@@ -54,17 +54,28 @@ export interface KycClaim {
  * webhook). See {@link InMemoryKycStore}.
  */
 export interface KycStore {
-  /** Current claim for a wallet, or undefined if the wallet never did KYC. */
-  get(address: string): KycClaim | undefined;
+  /**
+   * Current claim for a wallet, or undefined if the wallet never did KYC.
+   *
+   * The return type is `MaybeAsync` so the SAME interface fits both the
+   * single-instance in-memory store (synchronous Map) and the production
+   * database-backed store ({@link PgKycStore}, an async round-trip). Every call
+   * site `await`s the result — awaiting a plain value is a no-op, so the
+   * in-memory path stays synchronous in practice while the DB path is async.
+   */
+  get(address: string): MaybeAsync<KycClaim | undefined>;
   /** Upsert the claim for a wallet (called by the vendor-webhook handler). */
-  set(address: string, claim: KycClaim): void;
+  set(address: string, claim: KycClaim): MaybeAsync<void>;
   /**
    * Mark a wallet's KYC revoked immediately. Idempotent: revoking an unknown or
    * already-revoked wallet still leaves a `revoked` record so `/userinfo` reports
    * not-verified rather than "never heard of them".
    */
-  revoke(address: string): void;
+  revoke(address: string): MaybeAsync<void>;
 }
+
+/** A value that may be returned directly (in-memory) or via a Promise (DB). */
+export type MaybeAsync<T> = T | Promise<T>;
 
 /**
  * Normalize an address key so lookups are case-insensitive. SIWE account ids are
@@ -105,11 +116,12 @@ export function effectiveVerified(
  * In-memory KYC claim store.
  *
  * DESIGN CHOICE (not a TODO): a Map is correct for the single-instance dev /
- * test authority. In production this MUST be backed by a database row that the
- * vendor-webhook handler (POST /kyc/_set, see siwe-routes / server) updates — that
- * row is the data-controller boundary: it holds ONLY the {@link KycClaim} record,
- * never PII (the vendor holds PII). The interface {@link KycStore} is small so the
- * swap to a DB-backed store is a drop-in, exactly like {@link InMemoryNonceStore}.
+ * test authority. In production the store is the database-backed `PgKycStore`
+ * (src/kyc-pg.ts), selected by {@link initKycStoreFromEnv} when `DATABASE_URL` is
+ * set — that row is the data-controller boundary: it holds ONLY the
+ * {@link KycClaim} record, never PII (the vendor holds PII). The {@link KycStore}
+ * interface is small (and `MaybeAsync`) so the swap is a true drop-in, exactly
+ * like {@link InMemoryNonceStore}. TD-2 (Wave-2) discharged by that swap.
  */
 export class InMemoryKycStore implements KycStore {
   private readonly claims = new Map<string, KycClaim>();
@@ -155,4 +167,41 @@ export function getKycStore(): KycStore {
 /** Swap the live KYC store (production wiring / tests). */
 export function setKycStore(store: KycStore): void {
   kycStore = store;
+}
+
+/**
+ * Install the right KYC store for the running environment (TD-2). Called once at
+ * server boot (see {@link createProvider} → server.ts).
+ *
+ *   - `DATABASE_URL` set  → a {@link PgKycStore}: the claim record survives
+ *     restarts and is shared across instances (the data-loss / multi-instance gap
+ *     TD-2 names). `ensureSchema()` runs idempotently so the table exists.
+ *   - `DATABASE_URL` unset → the in-memory dev store, with a one-line warning so a
+ *     developer running locally knows persistence is off. In PRODUCTION an unset
+ *     `DATABASE_URL` never reaches here: {@link assertProductionConfig} throws
+ *     first (fail-closed, same posture as COOKIE_KEYS) so we cannot silently boot
+ *     production on a volatile Map.
+ *
+ * Imported lazily so the `pg` driver is only pulled in when a database is actually
+ * configured — dev/test paths that use the in-memory store never touch `pg`.
+ */
+export async function initKycStoreFromEnv(
+  env: { DATABASE_URL?: string } = process.env,
+): Promise<KycStore> {
+  const databaseUrl = env.DATABASE_URL;
+  if (databaseUrl && databaseUrl.trim() !== '') {
+    const { PgKycStore } = await import('./kyc-pg.js');
+    const store = await PgKycStore.connect(databaseUrl);
+    setKycStore(store);
+    return store;
+  }
+  // eslint-disable-next-line no-console
+  console.warn(
+    '[citrate-identity] DATABASE_URL unset — using the in-memory KYC store ' +
+      '(claims are lost on restart and not shared across instances). Set ' +
+      'DATABASE_URL to back KYC with Postgres (required in production).',
+  );
+  const store = new InMemoryKycStore();
+  setKycStore(store);
+  return store;
 }

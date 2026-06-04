@@ -9,6 +9,8 @@ import {
 } from './config.js';
 import { mountSiweRoutes } from './siwe-routes.js';
 import { mountKycRoutes } from './kyc-routes.js';
+import { mountLogoutRoutes } from './logout-routes.js';
+import { initKycStoreFromEnv } from './kyc.js';
 import { createCitratePublicClient } from './siwe.js';
 import type { PublicClient } from 'viem';
 
@@ -68,6 +70,11 @@ export async function createProvider(
     ? { webhookSecret: options.kycWebhookSecret }
     : {});
 
+  // IDP-S2 / TD-5 (authority side): POST /logout revokes the presented token,
+  // ends its session, and publishes a `logout` on the session bus; GET
+  // /sessions/events streams those events to subscribed relying parties (SSE).
+  mountLogoutRoutes(provider);
+
   return provider;
 }
 
@@ -81,6 +88,12 @@ async function main(): Promise<void> {
     // eslint-disable-next-line no-console
     console.warn(`[citrate-identity] config warning: ${w}`);
   }
+
+  // TD-2: install the KYC store for this environment. With DATABASE_URL set this
+  // connects Postgres and ensures the schema; without it (dev) it warns and uses
+  // the in-memory store. assertProductionConfig above already refused to start in
+  // production if DATABASE_URL was unset, so this only falls back to memory in dev.
+  await initKycStoreFromEnv(process.env);
 
   const provider = await createProvider();
   provider.listen(PORT, () => {

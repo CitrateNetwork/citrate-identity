@@ -26,6 +26,8 @@ function safeProdEnv(): ConfigEnv {
     ISSUER_URL: 'https://auth.citrate.ai',
     EXPLORER_ORIGIN: 'https://explorer.citrate.ai',
     DASHBOARD_ORIGIN: 'https://dashboard.citrate.ai',
+    // TD-2: KYC store must be DB-backed in production, so a safe baseline sets it.
+    DATABASE_URL: 'postgres://user:pass@db.internal:5432/citrate_identity',
   };
 }
 
@@ -83,6 +85,16 @@ describe('assertProductionConfig — production fail-closed (TD-1)', () => {
     expect(() => assertProductionConfig(env)).toThrow(/DASHBOARD_ORIGIN/);
   });
 
+  it('throws when DATABASE_URL is unset (TD-2 fail-closed)', () => {
+    const env = { ...safeProdEnv(), DATABASE_URL: undefined };
+    expect(() => assertProductionConfig(env)).toThrow(/DATABASE_URL is unset/);
+  });
+
+  it('throws when DATABASE_URL is blank (TD-2 fail-closed)', () => {
+    const env = { ...safeProdEnv(), DATABASE_URL: '   ' };
+    expect(() => assertProductionConfig(env)).toThrow(/DATABASE_URL is unset/);
+  });
+
   it('reports MULTIPLE problems in one throw when several are unsafe', () => {
     const env: ConfigEnv = {
       NODE_ENV: 'production',
@@ -138,8 +150,23 @@ describe('assertProductionConfig — non-production warns but allows (TD-1)', ()
       ISSUER_URL: 'https://auth.citrate.ai',
       EXPLORER_ORIGIN: 'https://explorer.citrate.ai',
       DASHBOARD_ORIGIN: 'https://dashboard.citrate.ai',
+      // TD-2: a DB-backed KYC store is part of a fully-safe config.
+      DATABASE_URL: 'postgres://user:pass@db.internal:5432/citrate_identity',
     };
     expect(assertProductionConfig(env).warnings).toEqual([]);
+  });
+
+  it('warns (does not throw) in dev when DATABASE_URL is unset (TD-2)', () => {
+    const env: ConfigEnv = {
+      NODE_ENV: 'development',
+      COOKIE_KEYS: `${GOOD_KEY},${GOOD_KEY_2}`,
+      ISSUER_URL: 'https://auth.citrate.ai',
+      EXPLORER_ORIGIN: 'https://explorer.citrate.ai',
+      DASHBOARD_ORIGIN: 'https://dashboard.citrate.ai',
+      // DATABASE_URL intentionally unset.
+    };
+    const { warnings } = assertProductionConfig(env);
+    expect(warnings.some((w) => /DATABASE_URL is unset/.test(w))).toBe(true);
   });
 });
 
