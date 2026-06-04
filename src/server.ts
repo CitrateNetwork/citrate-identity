@@ -1,16 +1,58 @@
 import Provider from 'oidc-provider';
-import { buildConfiguration, ISSUER_URL, PORT } from './config.js';
+import {
+  buildConfiguration,
+  loadOrCreateJwks,
+  siweDomainFromIssuer,
+  ISSUER_URL,
+  PORT,
+} from './config.js';
+import { mountSiweRoutes } from './siwe-routes.js';
+import { createCitratePublicClient } from './siwe.js';
+import type { PublicClient } from 'viem';
+
+export interface CreateProviderOptions {
+  /**
+   * RPC URL for EIP-1271 (smart-contract / Safe wallet) signature verification.
+   * When set, SIWE verification can check `isValidSignature` on-chain. Reads
+   * `CITRATE_RPC_URL` from the environment by default; when absent, only EOA
+   * (ECDSA) signatures are accepted and 1271 logins are declined (fail closed).
+   */
+  rpcUrl?: string;
+  /** Inject a viem public client directly (tests). Overrides `rpcUrl`. */
+  publicClient?: PublicClient;
+}
 
 /**
  * Construct the Citrate OIDC authority Provider. Exposed as a factory so tests
- * can mount it on an ephemeral port without binding a fixed socket.
+ * can mount it on an ephemeral port without binding a fixed socket. Also mounts
+ * the SIWE (EIP-4361) login routes (`/siwe/challenge`, `/siwe/verify`) that log
+ * a wallet in as an OIDC account (IDP-S1.5).
  */
-export async function createProvider(issuer: string = ISSUER_URL): Promise<Provider> {
+export async function createProvider(
+  issuer: string = ISSUER_URL,
+  options: CreateProviderOptions = {},
+): Promise<Provider> {
   const configuration = await buildConfiguration();
   const provider = new Provider(issuer, configuration);
   // Behind a TLS-terminating proxy (auth.citrate.ai) we trust X-Forwarded-* so
   // discovery advertises https URLs and secure cookies behave.
   provider.proxy = true;
+
+  // SIWE login. The signing JWK is the same RS256 key the authority publishes
+  // via JWKS, so direct-path ID tokens verify against `/jwks`.
+  const jwks = await loadOrCreateJwks();
+  const rpcUrl = options.rpcUrl ?? process.env.CITRATE_RPC_URL;
+  const publicClient =
+    options.publicClient ??
+    (rpcUrl ? createCitratePublicClient(rpcUrl) : undefined);
+
+  mountSiweRoutes(provider, {
+    expectedDomain: siweDomainFromIssuer(issuer),
+    issuer,
+    signingJwk: jwks.keys[0],
+    publicClient,
+  });
+
   return provider;
 }
 

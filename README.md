@@ -19,6 +19,44 @@ the Privy custom-auth proof-of-concept.
   requiring **PKCE (S256)**, scopes `openid profile wallet`.
 - Authorization Code + PKCE `/auth` + `/token`, refresh-token rotation, and
   token revocation are enabled.
+- **SIWE (EIP-4361) login** (IDP-S1.5): `GET /siwe/challenge` issues a fresh
+  single-use nonce; `POST /siwe/verify` `{message, signature}` verifies the
+  wallet signature and logs the user in as the OIDC account
+  `accountId = wallet address` (claim `wallet_address` populated).
+
+## SIWE login (IDP-S1.5)
+
+panva has no built-in SIWE; this repo adds a custom interaction. Flow:
+
+```bash
+# 1) get a nonce
+curl http://localhost:3000/siwe/challenge          # → { "nonce": "..." }
+# 2) build + sign an EIP-4361 message bound to this host, chainId 40204,
+#    that nonce, with a future expirationTime, then:
+curl -X POST http://localhost:3000/siwe/verify \
+  -H 'content-type: application/json' \
+  -d '{"message":"<eip-4361 message>","signature":"0x..."}'
+```
+
+Security checks enforced on `/siwe/verify` (all fail closed → 401):
+
+- **nonce / replay** — single-use; consumed once, even within its TTL.
+- **domain binding** — `message.domain` must equal the authority host (anti-phishing).
+- **expirationTime** — a message past its expiry is rejected.
+- **chainId** — must equal Citrate (`40204`).
+- **low-S only** — high-S (malleable) ECDSA signatures rejected (EIP-2).
+- **EIP-1271** — Safe / smart-contract wallets verified on-chain via
+  `isValidSignature` using a viem public client. Set `CITRATE_RPC_URL` (or pass
+  `publicClient`) to enable; without it only EOA signatures are accepted.
+
+Integration with panva: a valid signature resumes an in-flight OIDC interaction
+via `provider.interactionResult({ login: { accountId } })` (the production code
+path), or — for headless/API logins with no interaction — mints a real RS256 ID
+token signed by the authority's JWKS (verifiable against `/jwks`). Both paths
+share one verification core and one `findAccount`, so claims never diverge.
+
+> Note: the nonce store is an in-memory Map (correct for a single instance).
+> For multi-instance HA, back it with Redis (`NonceStore` is a drop-in seam).
 
 ## Run
 

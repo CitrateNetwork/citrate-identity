@@ -14,7 +14,9 @@
   },
   "dependencies": {
     "jose": "^5.9.6",
-    "oidc-provider": "^8.5.3"
+    "oidc-provider": "^8.5.3",
+    "siwe": "^3.0.0",
+    "viem": "^2.52.0"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",

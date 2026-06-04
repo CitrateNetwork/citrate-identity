@@ -1,7 +1,8 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { exportJWK, generateKeyPair, type JWK } from 'jose';
-import type { Configuration } from 'oidc-provider';
+import { getAddress, isAddress } from 'viem';
+import type { Account, Configuration, FindAccount } from 'oidc-provider';
 
 /**
  * Public issuer URL. In production: https://auth.citrate.ai
@@ -58,6 +59,47 @@ export async function loadOrCreateJwks(): Promise<PersistedJwks> {
 }
 
 /**
+ * The host (authority) a SIWE message must be bound to (EIP-4361 `domain`),
+ * derived from an issuer URL. For `https://auth.citrate.ai` this is
+ * `auth.citrate.ai`; for `http://127.0.0.1:42817` it is `127.0.0.1:42817`.
+ * Domain binding is the anti-phishing control: a message signed for some other
+ * site cannot be replayed against this authority.
+ */
+export function siweDomainFromIssuer(issuer: string): string {
+  return new URL(issuer).host;
+}
+
+/**
+ * SIWE account resolver (IDP-S1.5).
+ *
+ * With SIWE, the wallet IS the identity: the account id is the EIP-55
+ * checksummed wallet address, and the `wallet_address` claim is that same
+ * address. There is no off-chain user record to look up — possession of the
+ * address (proven by the verified EIP-4361 signature) is the account. Linked
+ * (secondary) wallets and the canonical-first-wallet rule arrive in IDP-S3;
+ * until then `wallets` is the single-element list of the address itself.
+ *
+ * Both the OIDC interaction-resume path and the direct-token path call this, so
+ * claims are identical regardless of how the login was driven.
+ */
+export const findAccount: FindAccount = (_ctx, sub): Account => {
+  // `sub` is the accountId we set during login = the verified wallet address.
+  const address = isAddress(sub) ? getAddress(sub) : sub;
+  return {
+    accountId: address,
+    async claims() {
+      return {
+        sub: address,
+        // Populate the `wallet` scope claims the authority advertises. Before
+        // S1.5 these were declared but never filled; SIWE makes them real.
+        wallet_address: address,
+        wallets: [address],
+      };
+    },
+  };
+};
+
+/**
  * Build the oidc-provider configuration for the Citrate authority.
  *
  * Reference relying party is `citrate-explorer` (IDP-S1). It is a PUBLIC client
@@ -69,6 +111,9 @@ export async function buildConfiguration(): Promise<Configuration> {
 
   return {
     jwks,
+    // SIWE login resolves the authenticated wallet address → OIDC account, and
+    // populates the `wallet_address` / `wallets` claims (IDP-S1.5).
+    findAccount,
     clients: [
       {
         client_id: 'citrate-explorer',
