@@ -10,8 +10,9 @@ import { createProvider } from '../src/server.js';
 import { CITRATE_CHAIN_ID } from '../src/siwe.js';
 
 /**
- * IDP-S5 — citrate-explorer as the first Authorization-Code + PKCE relying party,
- * authenticated end-to-end with SIWE (EIP-4361).
+ * IDP-S5 / IDP-S5b — the Authorization-Code + PKCE + SIWE relying-party flow,
+ * parametrized over BOTH first-party clients (citrate-explorer, citrate-dashboard),
+ * each with its own registered redirect_uri.
  *
  *   gtm-spine/features/IDP-S5-explorer-rp.feature
  *
@@ -19,7 +20,7 @@ import { CITRATE_CHAIN_ID } from '../src/siwe.js';
  * interaction cookie panva sets at /auth is carried into /siwe/verify (Path A —
  * interactionResult), and the resumed interaction's session cookie is carried
  * into the auth-code redirect. A viem EOA signs the SIWE message; the resulting
- * id_token is verified against the published /jwks.
+ * id_token is verified against the published /jwks, with `aud` asserted per client.
  */
 
 let server: Server;
@@ -27,8 +28,11 @@ let baseUrl: string;
 let host: string;
 const account = privateKeyToAccount(`0x${'b2'.repeat(32)}` as Hex);
 
-// The explorer relying party's registered redirect URI (dev).
-const EXPLORER_REDIRECT = 'http://localhost:3001/auth/callback';
+/** The first-party relying parties under test, each with its dev redirect_uri. */
+const RP_CLIENTS: ReadonlyArray<{ clientId: string; redirectUri: string }> = [
+  { clientId: 'citrate-explorer', redirectUri: 'http://localhost:3001/auth/callback' },
+  { clientId: 'citrate-dashboard', redirectUri: 'http://localhost:3002/auth/callback' },
+];
 
 /** A tiny cookie jar: name → value, last-write-wins per name. */
 class CookieJar {
@@ -89,7 +93,9 @@ function base64url(buf: Buffer): string {
     .replace(/=+$/, '');
 }
 
-describe('citrate-explorer OIDC relying party (IDP-S5)', () => {
+describe.each(RP_CLIENTS)(
+  '$clientId OIDC relying party (IDP-S5 / S5b)',
+  ({ clientId, redirectUri }) => {
   it('drives a full Authorization-Code + PKCE + SIWE login and mints a verifiable id_token', async () => {
     const jar = new CookieJar();
 
@@ -102,8 +108,8 @@ describe('citrate-explorer OIDC relying party (IDP-S5)', () => {
 
     // 1) /auth — start Authorization Code flow. panva 303s to the interaction.
     const authUrl =
-      `${baseUrl}/auth?response_type=code&client_id=citrate-explorer` +
-      `&redirect_uri=${encodeURIComponent(EXPLORER_REDIRECT)}` +
+      `${baseUrl}/auth?response_type=code&client_id=${encodeURIComponent(clientId)}` +
+      `&redirect_uri=${encodeURIComponent(redirectUri)}` +
       `&scope=${encodeURIComponent('openid profile wallet')}` +
       `&code_challenge=${codeChallenge}&code_challenge_method=S256` +
       `&state=${state}`;
@@ -178,9 +184,9 @@ describe('citrate-explorer OIDC relying party (IDP-S5)', () => {
     let callbackLoc: string | undefined;
     for (let hop = 0; hop < 10; hop++) {
       const url = location.startsWith('http') ? location : `${baseUrl}${location}`;
-      // Once panva redirects to the explorer's callback origin we stop and
-      // assert on it rather than chasing a (non-existent in-test) explorer.
-      if (url.startsWith(EXPLORER_REDIRECT)) {
+      // Once panva redirects to this RP's callback origin we stop and assert on
+      // it rather than chasing a (non-existent in-test) relying party.
+      if (url.startsWith(redirectUri)) {
         callbackLoc = url;
         break;
       }
@@ -193,7 +199,7 @@ describe('citrate-explorer OIDC relying party (IDP-S5)', () => {
       location = hopRes.headers.get('location')!;
     }
     expect(callbackLoc).toBeDefined();
-    expect(callbackLoc!.startsWith(EXPLORER_REDIRECT)).toBe(true);
+    expect(callbackLoc!.startsWith(redirectUri)).toBe(true);
     const callbackUrl = new URL(callbackLoc!);
     const code = callbackUrl.searchParams.get('code');
     expect(typeof code).toBe('string');
@@ -206,8 +212,8 @@ describe('citrate-explorer OIDC relying party (IDP-S5)', () => {
       body: new URLSearchParams({
         grant_type: 'authorization_code',
         code: code!,
-        client_id: 'citrate-explorer',
-        redirect_uri: EXPLORER_REDIRECT,
+        client_id: clientId,
+        redirect_uri: redirectUri,
         code_verifier: codeVerifier,
       }).toString(),
     });
@@ -224,10 +230,10 @@ describe('citrate-explorer OIDC relying party (IDP-S5)', () => {
     const jwks = createRemoteJWKSet(new URL(`${baseUrl}/jwks`));
     const { payload } = await jwtVerify(tokenJson.id_token!, jwks, {
       issuer: baseUrl,
-      audience: 'citrate-explorer',
+      audience: clientId,
     });
     expect(payload.iss).toBe(baseUrl);
-    expect(payload.aud).toBe('citrate-explorer');
+    expect(payload.aud).toBe(clientId);
     expect(payload.sub).toBe(account.address);
     expect(payload.wallet_address).toBe(account.address);
   });
