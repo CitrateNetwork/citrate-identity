@@ -1,0 +1,179 @@
+/**
+ * Logout + token revocation + session-bus cascade (IDP-S2 / TD-5, authority side).
+ *
+ *   gtm-spine/features/IDP-S2-revocation-and-logout-cascade.feature
+ *     Scenario: revocation invalidates a token immediately
+ *     Scenario: logout in one app cascades to the others
+ *
+ * Mounts two routes on the provider's Koa app:
+ *
+ *   POST /logout          → end the session for the presented access token,
+ *                            REVOKE that token (panva AccessToken.destroy, so a
+ *                            subsequent /token/introspection reports inactive and
+ *                            /userinfo 401s), and PUBLISH a `logout` event on the
+ *                            session bus for that `sub`. Fails CLOSED: no/invalid
+ *                            token → 401, nothing is published.
+ *
+ *   GET  /sessions/events → Server-Sent Events stream of bus events. Relying
+ *                            parties (or a thin proxy) subscribe here and reflect
+ *                            logged-out state when a `logout` for the user arrives
+ *                            ("cascades to the others"). Each connection subscribes
+ *                            to the bus and unsubscribes on disconnect.
+ *
+ * This is the AUTHORITY half of the cascade. The RP half (explorer/dashboard
+ * listening + dropping their local session) is the RP-side of TD-5, tracked
+ * separately; the authority publishes the event the RPs consume.
+ */
+import type { IncomingMessage, ServerResponse } from 'node:http';
+import type Provider from 'oidc-provider';
+import { getSessionBus, type SessionEvent } from './session-bus.js';
+
+export interface LogoutRouteOptions {
+  /**
+   * Heartbeat interval (ms) for the SSE stream so proxies don't time the
+   * connection out. A comment ping is sent every interval. Default 25s.
+   */
+  sseHeartbeatMs?: number;
+}
+
+/** Extract a Bearer access token from the Authorization header, if present. */
+function bearerToken(req: IncomingMessage): string | undefined {
+  const auth = req.headers['authorization'];
+  if (typeof auth === 'string' && auth.startsWith('Bearer ')) {
+    const token = auth.slice('Bearer '.length).trim();
+    return token.length > 0 ? token : undefined;
+  }
+  return undefined;
+}
+
+function sendJson(res: ServerResponse, status: number, body: unknown): void {
+  res.writeHead(status, {
+    'content-type': 'application/json; charset=utf-8',
+    'cache-control': 'no-store',
+  });
+  res.end(JSON.stringify(body));
+}
+
+/**
+ * The minimal shape of a panva AccessToken instance we rely on. `find` resolves a
+ * presented opaque token; the instance carries the account + session ids and a
+ * `destroy()` that revokes it (the adapter drops the record, so introspection
+ * reports inactive and userinfo 401s).
+ */
+interface FoundAccessToken {
+  accountId?: string;
+  sessionUid?: string;
+  sid?: string;
+  grantId?: string;
+  destroy(): Promise<void>;
+}
+
+/**
+ * Mount `POST /logout` and `GET /sessions/events`. Returns nothing; the routes
+ * are wired onto the provider's Koa middleware stack the same way the SIWE/KYC
+ * routes are.
+ */
+export function mountLogoutRoutes(
+  provider: Provider,
+  options: LogoutRouteOptions = {},
+): void {
+  const heartbeatMs = options.sseHeartbeatMs ?? 25_000;
+
+  provider.use(async (ctx, next) => {
+    const { method, path } = ctx;
+
+    // --- GET /sessions/events — SSE fan-out of session-bus events. ---
+    if (method === 'GET' && path === '/sessions/events') {
+      const res = ctx.res;
+      res.writeHead(200, {
+        'content-type': 'text/event-stream; charset=utf-8',
+        'cache-control': 'no-store',
+        connection: 'keep-alive',
+      });
+      // Open the stream immediately so a client (and a test) knows it is live.
+      res.write(': connected\n\n');
+
+      const onEvent = (event: SessionEvent): void => {
+        // SSE framing: a named event with a JSON data line.
+        res.write(`event: ${event.type}\n`);
+        res.write(`data: ${JSON.stringify(event)}\n\n`);
+      };
+      const unsubscribe = getSessionBus().subscribe(onEvent);
+
+      const heartbeat = setInterval(() => {
+        res.write(': ping\n\n');
+      }, heartbeatMs);
+      // Don't let the heartbeat keep the process alive on its own.
+      if (typeof heartbeat.unref === 'function') heartbeat.unref();
+
+      const cleanup = (): void => {
+        clearInterval(heartbeat);
+        unsubscribe();
+      };
+      ctx.req.on('close', cleanup);
+      ctx.req.on('error', cleanup);
+
+      // Hand the socket to the SSE stream: tell Koa we've handled the response so
+      // it does not try to write a body or close the connection.
+      ctx.respond = false;
+      return;
+    }
+
+    // --- POST /logout — revoke the presented token + publish a logout event. ---
+    if (method === 'POST' && path === '/logout') {
+      const token = bearerToken(ctx.req);
+      if (!token) {
+        // Fail closed: no token → nothing to revoke, nothing published.
+        sendJson(ctx.res, 401, {
+          error: 'invalid_request',
+          reason: 'a Bearer access token is required to log out',
+        });
+        return;
+      }
+
+      let at: FoundAccessToken | undefined;
+      try {
+        at = (await provider.AccessToken.find(token)) as
+          | FoundAccessToken
+          | undefined;
+      } catch {
+        at = undefined;
+      }
+      if (!at || !at.accountId) {
+        // Unknown / already-revoked / expired token → fail closed.
+        sendJson(ctx.res, 401, {
+          error: 'invalid_grant',
+          reason: 'the presented token is not active',
+        });
+        return;
+      }
+
+      const sub = at.accountId;
+      const sid = at.sid ?? at.sessionUid;
+
+      // 1) End the session backing this login (if one exists) so a fresh /auth
+      //    re-prompts rather than silently re-authenticating from a live cookie.
+      if (at.sessionUid) {
+        try {
+          const session = await provider.Session.findByUid(at.sessionUid);
+          if (session) await session.destroy();
+        } catch {
+          // A missing/already-gone session is fine — logout is idempotent.
+        }
+      }
+
+      // 2) REVOKE the presented access token. destroy() drops the adapter record,
+      //    so a later /token/introspection returns { active: false } and
+      //    /userinfo with this token 401s — "invalidates a token immediately".
+      await at.destroy();
+
+      // 3) PUBLISH the logout on the session bus so the OTHER apps cascade.
+      getSessionBus().publish(sub, { type: 'logout', sid, at: Date.now() });
+
+      sendJson(ctx.res, 200, { ok: true, sub, sid });
+      return;
+    }
+
+    await next();
+  });
+}

@@ -129,6 +129,12 @@ export interface ConfigEnv {
   ISSUER_URL?: string;
   EXPLORER_ORIGIN?: string;
   DASHBOARD_ORIGIN?: string;
+  /**
+   * Postgres connection string backing the KYC claim store (TD-2). Unset is fine
+   * in dev (in-memory store + a warning); in production it MUST be set or the
+   * authority refuses to boot — see {@link assertProductionConfig}.
+   */
+  DATABASE_URL?: string;
 }
 
 /** A host is "local" if it is localhost / a loopback / `.local` / unspecified. */
@@ -166,7 +172,9 @@ function isLocalUrl(url: string | undefined): boolean {
  * dev secret. Production rejects when ANY of:
  *   - COOKIE_KEYS is unset, equals the dev default, or has any key < 32 chars;
  *   - ISSUER_URL is unset or points at a localhost / loopback host;
- *   - EXPLORER_ORIGIN or DASHBOARD_ORIGIN points at a localhost / loopback host.
+ *   - EXPLORER_ORIGIN or DASHBOARD_ORIGIN points at a localhost / loopback host;
+ *   - DATABASE_URL is unset (TD-2: KYC claims would land in a volatile in-memory
+ *     Map — data loss on restart, no multi-instance — instead of a database).
  *
  * Outside production it never throws; it collects the same problems and (if the
  * caller wants) returns them as warnings — the dev defaults stay usable.
@@ -224,6 +232,17 @@ export function assertProductionConfig(env: ConfigEnv): { warnings: string[] } {
     );
   }
 
+  // --- DATABASE_URL (TD-2) ---
+  // Fail closed in production when the KYC store has no database to back it: an
+  // unset DATABASE_URL would silently fall back to the in-memory Map (data loss
+  // on restart, no multi-instance). Same posture as COOKIE_KEYS.
+  if (!env.DATABASE_URL || env.DATABASE_URL.trim() === '') {
+    problems.push(
+      'DATABASE_URL is unset (KYC claims would use the in-memory store — data ' +
+        'loss on restart, no multi-instance; TD-2)',
+    );
+  }
+
   if (isProd && problems.length > 0) {
     throw new Error(
       'Refusing to start in production with unsafe config (TD-1):\n  - ' +
@@ -258,7 +277,7 @@ export const findAccount: FindAccount = (_ctx, sub): Account => {
       // revoke or an expiry that lands AFTER a token was minted is reflected the
       // next time an RP calls /userinfo. This is the whole point of IDP-KYC: the
       // store — not the immutable token — is authoritative for gated actions.
-      const claim = getKycStore().get(address);
+      const claim = await getKycStore().get(address);
       // Effective status: an expired or non-`verified` record reports as not
       // verified; a revoked record reports `revoked`. We never assert verified
       // for an expired claim (ADR: expiry → re-KYC).
@@ -393,6 +412,13 @@ export async function buildConfiguration(): Promise<Configuration> {
     features: {
       // Spec-compliant discovery is on by default; refresh + revocation explicit.
       revocation: { enabled: true },
+      // IDP-S2 / TD-5: token introspection is how a relying party (and our logout
+      // test) asks the authority whether a token is still active. After /logout
+      // revokes a token, introspection reports { active: false } — that is the
+      // "invalidates a token immediately" guarantee the cascade depends on. The
+      // default allowedPolicy restricts callers to the token's own client / a
+      // confidential client, which is the correct posture for first-party RPs.
+      introspection: { enabled: true },
       // devInteractions OFF: panva's built-in dev login page cannot perform a
       // SIWE signature. We serve our own interaction view (see interactions.url).
       devInteractions: { enabled: false },

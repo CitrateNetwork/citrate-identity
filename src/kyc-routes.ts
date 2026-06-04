@@ -149,7 +149,7 @@ export function mountKycRoutes(
     }
 
     if (path === '/kyc/_revoke') {
-      getKycStore().revoke(address);
+      await getKycStore().revoke(address);
       sendJson(ctx.res, 200, { address, kyc_status: 'revoked' });
       return;
     }
@@ -183,7 +183,7 @@ export function mountKycRoutes(
         : undefined;
 
     const claim: KycClaim = { status, vendor_ref, verified_at, expires_at };
-    getKycStore().set(address, claim);
+    await getKycStore().set(address, claim);
     sendJson(ctx.res, 200, { address, kyc_status: status });
   });
 }
