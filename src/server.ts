@@ -7,6 +7,7 @@ import {
   PORT,
 } from './config.js';
 import { mountSiweRoutes } from './siwe-routes.js';
+import { mountKycRoutes } from './kyc-routes.js';
 import { createCitratePublicClient } from './siwe.js';
 import type { PublicClient } from 'viem';
 
@@ -20,6 +21,12 @@ export interface CreateProviderOptions {
   rpcUrl?: string;
   /** Inject a viem public client directly (tests). Overrides `rpcUrl`. */
   publicClient?: PublicClient;
+  /**
+   * Shared secret guarding the KYC vendor-webhook endpoints (POST /kyc/_set,
+   * /kyc/_revoke). Overrides `KYC_WEBHOOK_SECRET` from the environment; tests
+   * pass it explicitly. When neither is set the endpoints fail closed.
+   */
+  kycWebhookSecret?: string;
 }
 
 /**
@@ -52,6 +59,13 @@ export async function createProvider(
     signingJwk: jwks.keys[0],
     publicClient,
   });
+
+  // IDP-KYC: the vendor-webhook stand-in that writes the LIVE KYC claim record
+  // into the store /userinfo reads from. Guarded by KYC_WEBHOOK_SECRET; fails
+  // closed when unset. Stores ONLY the claim record — no PII (ADR-2026-06-03).
+  mountKycRoutes(provider, options.kycWebhookSecret !== undefined
+    ? { webhookSecret: options.kycWebhookSecret }
+    : {});
 
   return provider;
 }

@@ -3,6 +3,7 @@ import { dirname, resolve } from 'node:path';
 import { exportJWK, generateKeyPair, type JWK } from 'jose';
 import { getAddress, isAddress } from 'viem';
 import type { Account, Configuration, FindAccount } from 'oidc-provider';
+import { getKycStore, effectiveVerified, type KycStatus } from './kyc.js';
 
 /**
  * Public issuer URL. In production: https://auth.citrate.ai
@@ -103,12 +104,38 @@ export const findAccount: FindAccount = (_ctx, sub): Account => {
   return {
     accountId: address,
     async claims() {
+      // Read the CURRENT KYC record at claims() time. panva invokes claims()
+      // afresh for every /userinfo call (it is not cached against a token), so a
+      // revoke or an expiry that lands AFTER a token was minted is reflected the
+      // next time an RP calls /userinfo. This is the whole point of IDP-KYC: the
+      // store — not the immutable token — is authoritative for gated actions.
+      const claim = getKycStore().get(address);
+      // Effective status: an expired or non-`verified` record reports as not
+      // verified; a revoked record reports `revoked`. We never assert verified
+      // for an expired claim (ADR: expiry → re-KYC).
+      const verified = effectiveVerified(claim);
+      // The effective status surfaced to RPs. 'none' = never did KYC; 'expired'
+      // = stored verified but past expires_at (distinct from a vendor 'revoked').
+      // Anything other than the literal 'verified' must NOT pass a gated action.
+      const kyc_status: KycStatus | 'none' | 'expired' = claim
+        ? verified
+          ? 'verified'
+          : claim.status === 'verified'
+            ? 'expired'
+            : claim.status
+        : 'none';
       return {
         sub: address,
         // Populate the `wallet` scope claims the authority advertises. Before
         // S1.5 these were declared but never filled; SIWE makes them real.
         wallet_address: address,
         wallets: [address],
+        // KYC scope claims — LIVE, read from the store above. `kyc_status` is the
+        // effective state ('none' when the wallet never did KYC); the dates are
+        // the raw vendor record (no PII).
+        kyc_status,
+        kyc_verified_at: claim?.verified_at,
+        kyc_expires_at: claim?.expires_at,
       };
     },
   };
@@ -150,19 +177,24 @@ export async function buildConfiguration(): Promise<Configuration> {
         // `offline_access` lets the explorer request a refresh token; combined
         // with the `refresh_token` grant + rotateRefreshToken below that gives
         // rotating refresh tokens (a security must-have).
-        scope: 'openid profile wallet offline_access',
+        scope: 'openid profile wallet kyc offline_access',
       },
     ],
     // `offline_access` is what turns on the `refresh_token` grant_type in panva
     // (lib/helpers/configuration.js): without a refresh-capable scope the
     // provider rejects a client that declares grant_types: ['…','refresh_token'].
-    scopes: ['openid', 'profile', 'wallet', 'offline_access'],
+    scopes: ['openid', 'profile', 'wallet', 'kyc', 'offline_access'],
     claims: {
       openid: ['sub'],
       profile: ['name', 'email'],
       // Citrate extension: canonical wallet + linked wallets surfaced under the
       // `wallet` scope. Populated by the identity registry in later stages (S3).
       wallet: ['wallet_address', 'wallets'],
+      // IDP-KYC: live, revocable KYC status under its own `kyc` scope. These are
+      // read from the KYC store at claims() time so /userinfo reflects the
+      // CURRENT record (revocation/expiry), not a stale token snapshot. Record
+      // holds NO PII — only status + dates (vendor holds PII; ADR-2026-06-03).
+      kyc: ['kyc_status', 'kyc_verified_at', 'kyc_expires_at'],
     },
     cookies: {
       // Keys for signing/verifying interaction + session cookies so tampered
