@@ -42,6 +42,7 @@ import {
   type VerifySiweResult,
 } from './siwe.js';
 import type { PublicClient } from 'viem';
+import { isTrustedFirstPartyClient } from './config.js';
 
 export interface SiweRouteOptions {
   /**
@@ -235,6 +236,78 @@ btn.addEventListener('click', signIn);
 </html>`;
 }
 
+/** The subset of a panva consent-prompt `details` we surface to the user. */
+interface ConsentPromptDetails {
+  missingOIDCScope?: string[];
+  missingOIDCClaims?: string[];
+  missingResourceScopes?: Record<string, string[]>;
+}
+
+/**
+ * Interactive consent page for a NON-trusted (third-party) client (TD-8
+ * fall-through). Unlike the trusted-set auto-grant, this requires the user to
+ * explicitly POST /consent/approve before any Grant is persisted. The page is
+ * dependency-free plain HTML+JS, mirroring the SIWE interaction page.
+ */
+function renderConsentPage(opts: {
+  uid: string;
+  clientId: string;
+  details: ConsentPromptDetails;
+}): string {
+  const scopes = (opts.details.missingOIDCScope ?? []).join(' ');
+  const claims = (opts.details.missingOIDCClaims ?? []).join(', ');
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Authorize ${escapeHtml(opts.clientId)}</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 28rem; margin: 4rem auto; padding: 0 1rem; color: #111; }
+  button { font-size: 1rem; padding: 0.6rem 1.1rem; border-radius: 0.5rem; border: 1px solid #8ecc09; background: #8ecc09; color: #082; cursor: pointer; }
+  button:disabled { opacity: 0.6; cursor: default; }
+  #status { margin-top: 1rem; color: #555; white-space: pre-wrap; }
+  code { background: #f3f3f3; padding: 0.1rem 0.3rem; border-radius: 0.25rem; }
+</style>
+</head>
+<body>
+  <h1>Authorize <code>${escapeHtml(opts.clientId)}</code></h1>
+  <p>This application is requesting access to your Citrate identity.</p>
+  <p>Scopes: <code>${escapeHtml(scopes || '(none)')}</code></p>
+  ${claims ? `<p>Claims: <code>${escapeHtml(claims)}</code></p>` : ''}
+  <button id="approve" type="button">Approve</button>
+  <p id="status" role="status"></p>
+<script>
+const statusEl = document.getElementById('status');
+const btn = document.getElementById('approve');
+btn.addEventListener('click', async () => {
+  btn.disabled = true;
+  statusEl.textContent = 'Authorizing…';
+  try {
+    const res = await fetch('/consent/approve', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      credentials: 'same-origin',
+      body: '{}',
+    });
+    const result = await res.json();
+    if (!res.ok || !result.redirectTo) {
+      statusEl.textContent = 'Authorization failed: ' + (result.reason || res.status);
+      btn.disabled = false;
+      return;
+    }
+    statusEl.textContent = 'Authorized. Redirecting…';
+    window.location = result.redirectTo;
+  } catch (err) {
+    statusEl.textContent = 'Error: ' + (err && err.message ? err.message : String(err));
+    btn.disabled = false;
+  }
+});
+</script>
+</body>
+</html>`;
+}
+
 /**
  * Resolve the OIDC account for a wallet address via the provider's configured
  * `findAccount`. Returns the populated claims so the direct path mirrors the
@@ -285,11 +358,15 @@ async function mintIdToken(
 }
 
 /**
- * Auto-consent for the trusted first-party explorer. Builds (or extends) the
+ * Auto-consent for a trusted first-party client (TD-8). Builds (or extends) the
  * client's Grant for this account with exactly the OIDC scopes + claims +
  * resource scopes the consent prompt reports as still missing, persists it, and
  * resumes the interaction via `interactionResult({ consent: { grantId } })`.
  * Returns the `redirectTo` URL panva computed for resuming the /auth flow.
+ *
+ * The trust decision lives in {@link isTrustedFirstPartyClient} (config.ts), so
+ * adding/removing an RP is a one-line change to the trusted set — there is no
+ * per-client branch here.
  */
 async function grantConsent(
   provider: Provider,
@@ -389,13 +466,31 @@ export function mountSiweRoutes(
       const promptName = interaction.prompt.name;
 
       if (promptName === 'consent') {
-        // Auto-consent for the trusted first-party explorer client: build (or
-        // extend) the Grant with exactly the scopes/claims the request is still
-        // missing, then resume. This is real consent persisted as a Grant — not
-        // a bypass of the authorization model.
-        const redirectTo = await grantConsent(provider, ctx, interaction);
-        ctx.res.writeHead(303, { location: redirectTo, 'cache-control': 'no-store' });
-        ctx.res.end();
+        const clientId = String(interaction.params.client_id);
+        // TD-8: auto-consent only for clients in the trusted first-party set
+        // (config.ts). Build (or extend) the Grant with exactly the scopes/claims
+        // the request is still missing, then resume. This is real consent
+        // persisted as a Grant — not a bypass of the authorization model.
+        if (isTrustedFirstPartyClient(clientId)) {
+          const redirectTo = await grantConsent(provider, ctx, interaction);
+          ctx.res.writeHead(303, {
+            location: redirectTo,
+            'cache-control': 'no-store',
+          });
+          ctx.res.end();
+          return;
+        }
+        // Untrusted / third-party client: fall through to an explicit consent
+        // prompt. The user must POST /consent/approve to grant — no auto-grant.
+        sendHtml(
+          ctx.res,
+          200,
+          renderConsentPage({
+            uid,
+            clientId,
+            details: interaction.prompt.details as ConsentPromptDetails,
+          }),
+        );
         return;
       }
 
@@ -514,6 +609,31 @@ export function mountSiweRoutes(
         id_token: idToken,
         wallet_address: claims.wallet_address,
       });
+      return;
+    }
+
+    // POST /consent/approve — explicit user approval for a NON-trusted client's
+    // consent prompt (TD-8 fall-through). The cookie-bound interaction must be a
+    // live consent prompt; we then persist the same kind of real Grant the
+    // trusted path builds and resume the /auth flow.
+    if (method === 'POST' && path === '/consent/approve') {
+      let interaction: Awaited<
+        ReturnType<typeof provider.interactionDetails>
+      > | null = null;
+      try {
+        interaction = await provider.interactionDetails(ctx.req, ctx.res);
+      } catch {
+        interaction = null;
+      }
+      if (!interaction || interaction.prompt.name !== 'consent') {
+        sendJson(ctx.res, 400, {
+          error: 'invalid_request',
+          reason: 'no active consent interaction',
+        });
+        return;
+      }
+      const redirectTo = await grantConsent(provider, ctx, interaction);
+      sendJson(ctx.res, 200, { redirectTo });
       return;
     }
 

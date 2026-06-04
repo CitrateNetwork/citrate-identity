@@ -25,17 +25,49 @@ export const PORT = Number(process.env.PORT ?? 3000);
 export const EXPLORER_ORIGIN =
   process.env.EXPLORER_ORIGIN ?? 'http://localhost:3001';
 
-/** The explorer's OAuth callback path (where panva sends `code` + `state`). */
-const EXPLORER_CALLBACK_PATH = '/auth/callback';
+/**
+ * The citrate-dashboard relying party's web origin. Mirrors {@link EXPLORER_ORIGIN}:
+ * the dashboard completes login by redirecting the browser to
+ * `${DASHBOARD_ORIGIN}/auth/callback`, so that path is what must be registered as
+ * a redirect_uri. Defaults to the local dev dashboard on :3002.
+ */
+export const DASHBOARD_ORIGIN =
+  process.env.DASHBOARD_ORIGIN ?? 'http://localhost:3002';
+
+/** The shared OAuth callback path (where panva sends `code` + `state`). */
+const CALLBACK_PATH = '/auth/callback';
 
 /**
  * Loopback redirect placeholder for native/CLI clients (RFC 8252). The actual
  * loopback port is chosen by the native app at runtime; oidc-provider treats any
  * port on a registered 127.0.0.1 loopback redirect as valid, so this concrete
  * placeholder both documents intent and satisfies registration. It mirrors the
- * explorer's `/auth/callback` path so native flows and the web flow agree.
+ * `/auth/callback` path so native flows and the web flow agree.
  */
-const LOOPBACK_REDIRECT = `http://127.0.0.1:${PORT}${EXPLORER_CALLBACK_PATH}`;
+const LOOPBACK_REDIRECT = `http://127.0.0.1:${PORT}${CALLBACK_PATH}`;
+
+/**
+ * TD-8 — trusted first-party relying parties. Consent for any client in this set
+ * is auto-granted (a real persisted Grant with the requested scopes/claims; see
+ * siwe-routes.ts), because Citrate owns these RPs end-to-end. Any client_id NOT
+ * in this set falls through to the normal interactive consent prompt. This is the
+ * single source of truth — there is no per-client hardcode anywhere else.
+ */
+export const TRUSTED_FIRST_PARTY_CLIENT_IDS: ReadonlySet<string> = new Set([
+  'citrate-explorer',
+  'citrate-dashboard',
+]);
+
+/** True iff `clientId` is a Citrate-owned trusted first-party RP (TD-8). */
+export function isTrustedFirstPartyClient(clientId: string): boolean {
+  return TRUSTED_FIRST_PARTY_CLIENT_IDS.has(clientId);
+}
+
+/** The dev-default cookie key shipped in source — must never run in production. */
+export const DEV_DEFAULT_COOKIE_KEY = 'citrate-identity-dev-cookie-key';
+
+/** Minimum length (chars) for a production cookie signing key. */
+export const MIN_COOKIE_KEY_LENGTH = 32;
 
 /**
  * Where to persist the signing keys so they survive restarts in dev. If absent,
@@ -83,6 +115,123 @@ export async function loadOrCreateJwks(): Promise<PersistedJwks> {
  */
 export function siweDomainFromIssuer(issuer: string): string {
   return new URL(issuer).host;
+}
+
+/**
+ * The environment surface {@link assertProductionConfig} inspects. Passed in
+ * (rather than read from `process.env` inside) so the check is pure and
+ * unit-testable: a test constructs each bad case explicitly.
+ */
+export interface ConfigEnv {
+  NODE_ENV?: string;
+  CITRATE_ENV?: string;
+  COOKIE_KEYS?: string;
+  ISSUER_URL?: string;
+  EXPLORER_ORIGIN?: string;
+  DASHBOARD_ORIGIN?: string;
+}
+
+/** A host is "local" if it is localhost / a loopback / `.local` / unspecified. */
+function isLocalHost(host: string): boolean {
+  const h = host.toLowerCase();
+  // Strip any :port for the bare-host comparisons.
+  const bare = h.includes(':') ? h.slice(0, h.indexOf(':')) : h;
+  return (
+    bare === 'localhost' ||
+    bare === '127.0.0.1' ||
+    bare === '::1' ||
+    bare === '0.0.0.0' ||
+    bare.endsWith('.local') ||
+    bare.endsWith('.localhost')
+  );
+}
+
+/** True iff `url` is parseable and points at a local/loopback host. */
+function isLocalUrl(url: string | undefined): boolean {
+  if (!url) return false;
+  try {
+    return isLocalHost(new URL(url).host);
+  } catch {
+    // Unparseable → treat as local so production refuses to start on garbage.
+    return true;
+  }
+}
+
+/**
+ * TD-1 — fail-closed production config gate.
+ *
+ * In production (`NODE_ENV==='production'` OR `CITRATE_ENV==='production'`) this
+ * THROWS when any deploy-unsafe default is still in place, so the authority
+ * refuses to boot rather than silently signing cookies / discovery with a known
+ * dev secret. Production rejects when ANY of:
+ *   - COOKIE_KEYS is unset, equals the dev default, or has any key < 32 chars;
+ *   - ISSUER_URL is unset or points at a localhost / loopback host;
+ *   - EXPLORER_ORIGIN or DASHBOARD_ORIGIN points at a localhost / loopback host.
+ *
+ * Outside production it never throws; it collects the same problems and (if the
+ * caller wants) returns them as warnings — the dev defaults stay usable.
+ *
+ * Pure: it reads only the passed-in `env`, so a unit test can drive every branch.
+ */
+export function assertProductionConfig(env: ConfigEnv): { warnings: string[] } {
+  const isProd =
+    env.NODE_ENV === 'production' || env.CITRATE_ENV === 'production';
+
+  const problems: string[] = [];
+
+  // --- COOKIE_KEYS ---
+  const rawCookieKeys = env.COOKIE_KEYS;
+  if (rawCookieKeys === undefined || rawCookieKeys.trim() === '') {
+    problems.push('COOKIE_KEYS is unset (cookie forgery if deployed unset)');
+  } else {
+    const keys = rawCookieKeys
+      .split(',')
+      .map((k) => k.trim())
+      .filter(Boolean);
+    if (keys.length === 0) {
+      problems.push('COOKIE_KEYS contains no usable keys');
+    } else {
+      if (keys.includes(DEV_DEFAULT_COOKIE_KEY)) {
+        problems.push(
+          `COOKIE_KEYS still contains the dev-default key "${DEV_DEFAULT_COOKIE_KEY}"`,
+        );
+      }
+      const tooShort = keys.filter((k) => k.length < MIN_COOKIE_KEY_LENGTH);
+      if (tooShort.length > 0) {
+        problems.push(
+          `COOKIE_KEYS has ${tooShort.length} key(s) shorter than ${MIN_COOKIE_KEY_LENGTH} chars`,
+        );
+      }
+    }
+  }
+
+  // --- ISSUER_URL ---
+  if (!env.ISSUER_URL || env.ISSUER_URL.trim() === '') {
+    problems.push('ISSUER_URL is unset');
+  } else if (isLocalUrl(env.ISSUER_URL)) {
+    problems.push(`ISSUER_URL points at a local host: ${env.ISSUER_URL}`);
+  }
+
+  // --- RP origins ---
+  if (isLocalUrl(env.EXPLORER_ORIGIN)) {
+    problems.push(
+      `EXPLORER_ORIGIN points at a local host: ${env.EXPLORER_ORIGIN}`,
+    );
+  }
+  if (isLocalUrl(env.DASHBOARD_ORIGIN)) {
+    problems.push(
+      `DASHBOARD_ORIGIN points at a local host: ${env.DASHBOARD_ORIGIN}`,
+    );
+  }
+
+  if (isProd && problems.length > 0) {
+    throw new Error(
+      'Refusing to start in production with unsafe config (TD-1):\n  - ' +
+        problems.join('\n  - '),
+    );
+  }
+
+  return { warnings: problems };
 }
 
 /**
@@ -168,15 +317,37 @@ export async function buildConfiguration(): Promise<Configuration> {
           // Web callback for the configured (local/dev) explorer origin. The
           // explorer redirects to `${EXPLORER_ORIGIN}/auth/callback` — this must
           // match byte-for-byte or panva rejects the /auth request.
-          `${EXPLORER_ORIGIN}${EXPLORER_CALLBACK_PATH}`,
+          `${EXPLORER_ORIGIN}${CALLBACK_PATH}`,
           // Hosted production explorer.
-          `https://explorer.citrate.ai${EXPLORER_CALLBACK_PATH}`,
+          `https://explorer.citrate.ai${CALLBACK_PATH}`,
           // Loopback for native/CLI flows (RFC 8252).
           LOOPBACK_REDIRECT,
         ],
         // `offline_access` lets the explorer request a refresh token; combined
         // with the `refresh_token` grant + rotateRefreshToken below that gives
         // rotating refresh tokens (a security must-have).
+        scope: 'openid profile wallet kyc offline_access',
+      },
+      {
+        // citrate-dashboard — second first-party relying party (IDP-S5b). Same
+        // posture as the explorer: PUBLIC client (no secret), Authorization Code
+        // + PKCE (S256, enforced globally below), rotating refresh tokens.
+        client_id: 'citrate-dashboard',
+        token_endpoint_auth_method: 'none',
+        application_type: 'web',
+        grant_types: ['authorization_code', 'refresh_token'],
+        response_types: ['code'],
+        redirect_uris: [
+          // Web callback for the configured (local/dev) dashboard origin.
+          `${DASHBOARD_ORIGIN}${CALLBACK_PATH}`,
+          // Hosted production dashboard.
+          `https://dashboard.citrate.ai${CALLBACK_PATH}`,
+          // Loopback for native/CLI flows (RFC 8252).
+          LOOPBACK_REDIRECT,
+        ],
+        // `kyc` is available (advertised below) but NOT required for the
+        // dashboard's baseline `openid profile wallet`; offline_access enables
+        // the refresh_token grant the same way it does for the explorer.
         scope: 'openid profile wallet kyc offline_access',
       },
     ],

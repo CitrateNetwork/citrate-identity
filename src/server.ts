@@ -1,5 +1,6 @@
 import Provider from 'oidc-provider';
 import {
+  assertProductionConfig,
   buildConfiguration,
   loadOrCreateJwks,
   siweDomainFromIssuer,
@@ -72,6 +73,15 @@ export async function createProvider(
 
 /** Boot the authority and listen. Entry point for `npm run dev`. */
 async function main(): Promise<void> {
+  // TD-1: fail-closed config gate. In production this THROWS on any deploy-unsafe
+  // default (dev cookie key, localhost issuer/origins) so we never boot with a
+  // forgeable cookie secret. In dev it returns the same problems as warnings.
+  const { warnings } = assertProductionConfig(process.env);
+  for (const w of warnings) {
+    // eslint-disable-next-line no-console
+    console.warn(`[citrate-identity] config warning: ${w}`);
+  }
+
   const provider = await createProvider();
   provider.listen(PORT, () => {
     // eslint-disable-next-line no-console
