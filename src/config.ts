@@ -14,12 +14,27 @@ export const ISSUER_URL = process.env.ISSUER_URL ?? 'http://localhost:3000';
 export const PORT = Number(process.env.PORT ?? 3000);
 
 /**
+ * The citrate-explorer relying party's web origin. The explorer completes login
+ * by redirecting the browser to `${EXPLORER_ORIGIN}/auth/callback`, so that path
+ * — NOT a bare `/callback` and NOT the authority's own origin — is what must be
+ * registered as the redirect_uri. Configurable so a self-hosted / preview
+ * explorer can point the authority at its own origin. Defaults to the local dev
+ * explorer on :3001.
+ */
+export const EXPLORER_ORIGIN =
+  process.env.EXPLORER_ORIGIN ?? 'http://localhost:3001';
+
+/** The explorer's OAuth callback path (where panva sends `code` + `state`). */
+const EXPLORER_CALLBACK_PATH = '/auth/callback';
+
+/**
  * Loopback redirect placeholder for native/CLI clients (RFC 8252). The actual
  * loopback port is chosen by the native app at runtime; oidc-provider treats any
  * port on a registered 127.0.0.1 loopback redirect as valid, so this concrete
- * placeholder both documents intent and satisfies registration.
+ * placeholder both documents intent and satisfies registration. It mirrors the
+ * explorer's `/auth/callback` path so native flows and the web flow agree.
  */
-const LOOPBACK_REDIRECT = `http://127.0.0.1:${PORT}/callback`;
+const LOOPBACK_REDIRECT = `http://127.0.0.1:${PORT}${EXPLORER_CALLBACK_PATH}`;
 
 /**
  * Where to persist the signing keys so they survive restarts in dev. If absent,
@@ -123,16 +138,25 @@ export async function buildConfiguration(): Promise<Configuration> {
         grant_types: ['authorization_code', 'refresh_token'],
         response_types: ['code'],
         redirect_uris: [
-          // Web callback for the hosted explorer.
-          `${ISSUER_URL}/callback`,
-          'https://explorer.citrate.ai/callback',
+          // Web callback for the configured (local/dev) explorer origin. The
+          // explorer redirects to `${EXPLORER_ORIGIN}/auth/callback` — this must
+          // match byte-for-byte or panva rejects the /auth request.
+          `${EXPLORER_ORIGIN}${EXPLORER_CALLBACK_PATH}`,
+          // Hosted production explorer.
+          `https://explorer.citrate.ai${EXPLORER_CALLBACK_PATH}`,
           // Loopback for native/CLI flows (RFC 8252).
           LOOPBACK_REDIRECT,
         ],
-        scope: 'openid profile wallet',
+        // `offline_access` lets the explorer request a refresh token; combined
+        // with the `refresh_token` grant + rotateRefreshToken below that gives
+        // rotating refresh tokens (a security must-have).
+        scope: 'openid profile wallet offline_access',
       },
     ],
-    scopes: ['openid', 'profile', 'wallet'],
+    // `offline_access` is what turns on the `refresh_token` grant_type in panva
+    // (lib/helpers/configuration.js): without a refresh-capable scope the
+    // provider rejects a client that declares grant_types: ['…','refresh_token'].
+    scopes: ['openid', 'profile', 'wallet', 'offline_access'],
     claims: {
       openid: ['sub'],
       profile: ['name', 'email'],
@@ -153,11 +177,29 @@ export async function buildConfiguration(): Promise<Configuration> {
       // PKCE is MANDATORY for every client (red-team security must-have).
       required: () => true,
     },
+    interactions: {
+      // Replace panva's generic dev login page (which cannot speak SIWE) with
+      // our own SIWE interaction view, mounted at /interaction/:uid by
+      // mountSiweRoutes. panva 303s the browser here when an /auth request needs
+      // authentication; the page drives /siwe/challenge + /siwe/verify (Path A),
+      // which resolves the interaction via provider.interactionResult.
+      url(_ctx, interaction) {
+        return `/interaction/${interaction.uid}`;
+      },
+    },
     features: {
       // Spec-compliant discovery is on by default; refresh + revocation explicit.
       revocation: { enabled: true },
-      devInteractions: { enabled: true },
+      // devInteractions OFF: panva's built-in dev login page cannot perform a
+      // SIWE signature. We serve our own interaction view (see interactions.url).
+      devInteractions: { enabled: false },
     },
+    // Put scope-requested claims (notably `wallet_address` / `wallets`) directly
+    // in the ID token even when an access token is co-issued. With the default
+    // (true), the Authorization-Code flow would push those non-`sub` claims to
+    // the userinfo endpoint only; relying parties like the explorer expect the
+    // wallet identity inside the verifiable ID token, so we conform to that.
+    conformIdTokenClaims: false,
     // Rotating refresh tokens: issue a fresh refresh token on every use.
     rotateRefreshToken: true,
     ttl: {

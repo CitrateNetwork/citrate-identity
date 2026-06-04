@@ -34,6 +34,7 @@ import { SignJWT, importJWK, type JWK } from 'jose';
 import type Provider from 'oidc-provider';
 import type { Account } from 'oidc-provider';
 import {
+  CITRATE_CHAIN_ID,
   InMemoryNonceStore,
   SiweVerificationError,
   verifySiweLogin,
@@ -60,6 +61,11 @@ export interface SiweRouteOptions {
   audience?: string;
   /** ID-token lifetime for the direct path, seconds. */
   idTokenTtlSeconds?: number;
+  /**
+   * Chain the interaction page tells the wallet to bind the SIWE message to.
+   * Defaults to {@link CITRATE_CHAIN_ID}; overridable for tests / other chains.
+   */
+  chainId?: number;
 }
 
 /** Read a JSON request body with a hard size cap (anti-DoS). */
@@ -83,6 +89,150 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
     'cache-control': 'no-store',
   });
   res.end(payload);
+}
+
+function sendHtml(res: ServerResponse, status: number, html: string): void {
+  res.writeHead(status, {
+    'content-type': 'text/html; charset=utf-8',
+    'cache-control': 'no-store',
+  });
+  res.end(html);
+}
+
+/** Minimal HTML-attribute/text escaping for the values we interpolate. */
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+/**
+ * The SIWE interaction page (Path A). panva 303s the browser here for an
+ * in-flight `/auth` interaction. The page:
+ *   1. fetches /siwe/challenge for a fresh nonce,
+ *   2. asks the injected wallet (window.ethereum) to sign an EIP-4361 message
+ *      bound to this authority's domain + the Citrate chainId (40204),
+ *   3. POSTs /siwe/verify (the interaction cookie rides along → Path A →
+ *      provider.interactionResult), and
+ *   4. navigates to the returned `redirectTo`, resuming the OIDC flow so panva
+ *      mints the authorization code and redirects to the explorer callback.
+ *
+ * The page is intentionally dependency-free (plain HTML+JS). The automated E2E
+ * test does not load this page in a browser; it performs steps 1–4 directly over
+ * HTTP with a viem EOA. The page is the real human path for the same flow.
+ */
+function renderInteractionPage(opts: {
+  uid: string;
+  domain: string;
+  uri: string;
+  chainId: number;
+  statement: string;
+}): string {
+  // Values that land inside the inline script as JSON literals.
+  const cfg = JSON.stringify({
+    uid: opts.uid,
+    domain: opts.domain,
+    uri: opts.uri,
+    chainId: opts.chainId,
+    statement: opts.statement,
+  });
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Sign in to Citrate</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 28rem; margin: 4rem auto; padding: 0 1rem; color: #111; }
+  button { font-size: 1rem; padding: 0.6rem 1.1rem; border-radius: 0.5rem; border: 1px solid #8ecc09; background: #8ecc09; color: #082; cursor: pointer; }
+  button:disabled { opacity: 0.6; cursor: default; }
+  #status { margin-top: 1rem; color: #555; white-space: pre-wrap; }
+  code { background: #f3f3f3; padding: 0.1rem 0.3rem; border-radius: 0.25rem; }
+</style>
+</head>
+<body>
+  <h1>Sign in with your wallet</h1>
+  <p>Authenticate to <code>${escapeHtml(opts.domain)}</code> by signing a message on the Citrate network (chain ${opts.chainId}). No transaction, no gas.</p>
+  <button id="signin" type="button">Connect wallet &amp; sign in</button>
+  <p id="status" role="status"></p>
+<script>
+const CFG = ${cfg};
+const statusEl = document.getElementById('status');
+const btn = document.getElementById('signin');
+function setStatus(msg) { statusEl.textContent = msg; }
+
+// Build a canonical EIP-4361 message string. Mirrors the fields the authority
+// verifies: domain (anti-phishing), uri, chainId (Citrate), nonce, issuedAt,
+// expirationTime, and the signing address.
+function buildSiweMessage(address, nonce) {
+  const issuedAt = new Date();
+  const expirationTime = new Date(issuedAt.getTime() + 10 * 60 * 1000);
+  const lines = [
+    CFG.domain + ' wants you to sign in with your Ethereum account:',
+    address,
+    '',
+    CFG.statement,
+    '',
+    'URI: ' + CFG.uri,
+    'Version: 1',
+    'Chain ID: ' + CFG.chainId,
+    'Nonce: ' + nonce,
+    'Issued At: ' + issuedAt.toISOString(),
+    'Expiration Time: ' + expirationTime.toISOString(),
+  ];
+  return lines.join('\\n');
+}
+
+async function signIn() {
+  btn.disabled = true;
+  try {
+    if (!window.ethereum) {
+      setStatus('No injected wallet found. Install a wallet to continue.');
+      btn.disabled = false;
+      return;
+    }
+    setStatus('Requesting wallet…');
+    const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
+    const address = accounts[0];
+
+    setStatus('Fetching challenge…');
+    const challengeRes = await fetch('/siwe/challenge', { credentials: 'same-origin' });
+    const { nonce } = await challengeRes.json();
+
+    const message = buildSiweMessage(address, nonce);
+    setStatus('Awaiting signature…');
+    const signature = await window.ethereum.request({
+      method: 'personal_sign',
+      params: [message, address],
+    });
+
+    setStatus('Verifying…');
+    const verifyRes = await fetch('/siwe/verify', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      credentials: 'same-origin',
+      body: JSON.stringify({ message, signature }),
+    });
+    const result = await verifyRes.json();
+    if (!verifyRes.ok || !result.redirectTo) {
+      setStatus('Sign-in failed: ' + (result.reason || result.error || verifyRes.status));
+      btn.disabled = false;
+      return;
+    }
+    setStatus('Signed in. Redirecting…');
+    window.location = result.redirectTo;
+  } catch (err) {
+    setStatus('Error: ' + (err && err.message ? err.message : String(err)));
+    btn.disabled = false;
+  }
+}
+btn.addEventListener('click', signIn);
+</script>
+</body>
+</html>`;
 }
 
 /**
@@ -135,6 +285,63 @@ async function mintIdToken(
 }
 
 /**
+ * Auto-consent for the trusted first-party explorer. Builds (or extends) the
+ * client's Grant for this account with exactly the OIDC scopes + claims +
+ * resource scopes the consent prompt reports as still missing, persists it, and
+ * resumes the interaction via `interactionResult({ consent: { grantId } })`.
+ * Returns the `redirectTo` URL panva computed for resuming the /auth flow.
+ */
+async function grantConsent(
+  provider: Provider,
+  ctx: { req: IncomingMessage; res: ServerResponse },
+  interaction: NonNullable<Awaited<ReturnType<typeof provider.interactionDetails>>>,
+): Promise<string> {
+  const { session, params, prompt, grantId } = interaction;
+  const accountId = session?.accountId;
+  if (!accountId) {
+    // The login prompt always precedes consent, so a consent prompt without a
+    // session is an invariant violation rather than an expected branch.
+    throw new Error('consent prompt reached without an authenticated session');
+  }
+  const clientId = String(params.client_id);
+
+  // Reuse an existing grant for this client+account if one is already on the
+  // interaction; otherwise mint a fresh one.
+  let grant = grantId
+    ? await provider.Grant.find(grantId)
+    : undefined;
+  if (!grant) {
+    grant = new provider.Grant({ accountId, clientId });
+  }
+
+  const details = prompt.details as {
+    missingOIDCScope?: string[];
+    missingOIDCClaims?: string[];
+    missingResourceScopes?: Record<string, string[]>;
+  };
+  if (details.missingOIDCScope) {
+    grant.addOIDCScope(details.missingOIDCScope.join(' '));
+  }
+  if (details.missingOIDCClaims) {
+    grant.addOIDCClaims(details.missingOIDCClaims);
+  }
+  if (details.missingResourceScopes) {
+    for (const [resource, scopes] of Object.entries(details.missingResourceScopes)) {
+      grant.addResourceScope(resource, scopes.join(' '));
+    }
+  }
+
+  const persistedGrantId = await grant.save();
+  const redirectTo = await provider.interactionResult(
+    ctx.req,
+    ctx.res,
+    { consent: { grantId: persistedGrantId } },
+    { mergeWithLastSubmission: true },
+  );
+  return redirectTo;
+}
+
+/**
  * Mount `/siwe/challenge` and `/siwe/verify` on the provider's Koa app.
  * Returns the nonce store so a caller/test can inspect or swap it.
  */
@@ -144,8 +351,79 @@ export function mountSiweRoutes(
 ): NonceStore {
   const nonceStore = options.nonceStore ?? new InMemoryNonceStore();
 
+  // The chainId every SIWE message must bind to, surfaced to the page so the
+  // wallet signs for Citrate and the authority's chain check passes.
+  const chainId = options.chainId ?? CITRATE_CHAIN_ID;
+
   provider.use(async (ctx, next) => {
     const { method, path } = ctx;
+
+    // GET /interaction/:uid — the custom interaction view. panva 303s here
+    // (interactions.url in config) whenever an in-flight /auth request needs a
+    // prompt. Two prompts occur for the explorer flow:
+    //   - `login`   → render the SIWE sign-in page (Path A drives the rest).
+    //   - `consent` → the explorer is a trusted first-party RP, so grant the
+    //                 requested OIDC scopes/claims automatically and resume.
+    if (method === 'GET' && /^\/interaction\/[^/]+$/.test(path)) {
+      const uid = path.slice('/interaction/'.length);
+      let interaction: Awaited<
+        ReturnType<typeof provider.interactionDetails>
+      > | null = null;
+      try {
+        const details = await provider.interactionDetails(ctx.req, ctx.res);
+        // Confirm the cookie-bound interaction matches the requested uid so a
+        // stale/forged uid in the URL can't render a usable surface.
+        if (details && details.uid === uid) interaction = details;
+      } catch {
+        interaction = null;
+      }
+      if (!interaction) {
+        sendHtml(
+          ctx.res,
+          400,
+          '<!doctype html><meta charset="utf-8"><p>This sign-in session is invalid or has expired. Start over from the application.</p>',
+        );
+        return;
+      }
+
+      const promptName = interaction.prompt.name;
+
+      if (promptName === 'consent') {
+        // Auto-consent for the trusted first-party explorer client: build (or
+        // extend) the Grant with exactly the scopes/claims the request is still
+        // missing, then resume. This is real consent persisted as a Grant — not
+        // a bypass of the authorization model.
+        const redirectTo = await grantConsent(provider, ctx, interaction);
+        ctx.res.writeHead(303, { location: redirectTo, 'cache-control': 'no-store' });
+        ctx.res.end();
+        return;
+      }
+
+      if (promptName === 'login') {
+        sendHtml(
+          ctx.res,
+          200,
+          renderInteractionPage({
+            uid,
+            domain: options.expectedDomain,
+            uri: options.issuer,
+            chainId,
+            statement: 'Sign in to Citrate',
+          }),
+        );
+        return;
+      }
+
+      // Any other prompt is not supported by this minimal authority.
+      sendHtml(
+        ctx.res,
+        400,
+        `<!doctype html><meta charset="utf-8"><p>Unsupported interaction prompt: ${escapeHtml(
+          promptName,
+        )}.</p>`,
+      );
+      return;
+    }
 
     if (method === 'GET' && path === '/siwe/challenge') {
       const nonce = nonceStore.issue();

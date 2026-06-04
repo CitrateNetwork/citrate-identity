@@ -16,9 +16,16 @@ the Privy custom-auth proof-of-concept.
 - Publishes OIDC **discovery** at `/.well-known/openid-configuration`.
 - Serves a rotating-capable **JWKS** (RS256) at `/jwks`.
 - Registers one reference relying party, **`citrate-explorer`** — a public client
-  requiring **PKCE (S256)**, scopes `openid profile wallet`.
+  requiring **PKCE (S256)**, scopes `openid profile wallet offline_access`, with
+  redirect URI `${EXPLORER_ORIGIN}/auth/callback` (default
+  `http://localhost:3001/auth/callback`).
 - Authorization Code + PKCE `/auth` + `/token`, refresh-token rotation, and
   token revocation are enabled.
+- A **custom SIWE interaction view** at `GET /interaction/:uid` replaces panva's
+  dev login page: the `login` prompt renders a wallet sign-in page that drives
+  SIWE; the `consent` prompt is auto-granted for the trusted first-party explorer
+  (a real persisted `Grant`). This lets the explorer complete a full
+  Authorization-Code + SIWE login end-to-end (IDP-S5).
 - **SIWE (EIP-4361) login** (IDP-S1.5): `GET /siwe/challenge` issues a fresh
   single-use nonce; `POST /siwe/verify` `{message, signature}` verifies the
   wallet signature and logs the user in as the OIDC account
@@ -57,6 +64,28 @@ share one verification core and one `findAccount`, so claims never diverge.
 
 > Note: the nonce store is an in-memory Map (correct for a single instance).
 > For multi-instance HA, back it with Redis (`NonceStore` is a drop-in seam).
+
+## Explorer relying party — Authorization Code + SIWE (IDP-S5)
+
+The `citrate-explorer` RP completes a full OIDC login backed by SIWE:
+
+1. Explorer sends the browser to `/auth?response_type=code&client_id=citrate-explorer&redirect_uri=${EXPLORER_ORIGIN}/auth/callback&scope=openid%20profile%20wallet&code_challenge=<S256>&code_challenge_method=S256&state=...`.
+2. panva 303s to the `login` interaction at `/interaction/:uid`, which serves
+   the SIWE sign-in page. The page fetches `/siwe/challenge`, has the wallet sign
+   the EIP-4361 message (domain = authority host, chainId 40204, nonce, issuedAt,
+   expirationTime), and POSTs `/siwe/verify`. With the interaction cookie present
+   this is **Path A** → `provider.interactionResult({ login: { accountId } })`
+   → returns `redirectTo`.
+3. The browser follows `redirectTo`; the `consent` prompt is auto-granted (a
+   persisted `Grant` for the trusted first-party explorer), and panva redirects
+   to `${EXPLORER_ORIGIN}/auth/callback?code=...&state=...`.
+4. Explorer exchanges the code at `/token` (with the PKCE `code_verifier`) for an
+   `id_token` (and `access_token`). The ID token carries `iss`, `aud =
+   citrate-explorer`, `sub = wallet address`, and `wallet_address`, and verifies
+   against `/jwks`.
+
+`EXPLORER_ORIGIN` (env, default `http://localhost:3001`) makes the registered
+redirect URI configurable; production uses `https://explorer.citrate.ai`.
 
 ## Run
 
