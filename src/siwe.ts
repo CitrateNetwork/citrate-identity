@@ -64,19 +64,25 @@ export class SiweVerificationError extends Error {
   }
 }
 
+/** A value returned directly (in-memory) or via a Promise (Redis round-trip). */
+export type MaybeAsync<T> = T | Promise<T>;
+
 /**
  * Single-use nonce store with a short TTL.
  *
- * DESIGN CHOICE (not a TODO): an in-memory Map is correct for the single
- * authority instance of S1.5. For a multi-instance / HA deployment of
- * auth.citrate.ai this MUST be backed by Redis (or another shared store) so a
- * nonce issued by one instance is consumable exactly once across all of them.
- * The interface below is deliberately small so that swap is a drop-in.
+ * An in-memory Map is correct for the single-instance dev / test authority. For
+ * the multi-instance / HA deployment of auth.citrate.ai the SAME interface is
+ * backed by Redis ({@link RedisNonceStore} in nonce-redis.ts), selected by
+ * `REDIS_URL`, so a nonce issued by one instance is consumable exactly once
+ * across all of them. The interface is deliberately small (and `MaybeAsync`, like
+ * the {@link KycStore} seam) so the swap is a true drop-in: every call site
+ * `await`s the result, and awaiting the in-memory store's plain value is a no-op
+ * — so the in-memory path stays synchronous in practice while Redis is async.
  */
 export interface NonceStore {
-  issue(): string;
+  issue(): MaybeAsync<string>;
   /** Returns true and consumes the nonce iff it is known and unexpired. */
-  consume(nonce: string): boolean;
+  consume(nonce: string): MaybeAsync<boolean>;
 }
 
 export class InMemoryNonceStore implements NonceStore {
@@ -190,7 +196,7 @@ export async function verifySiweLogin(
   // 1) Replay defence: the nonce must be known and unused. Consume it ONCE,
   //    before any expensive crypto, so even a valid signature cannot be
   //    replayed and a forced-error path cannot leave the nonce reusable.
-  if (!nonceStore.consume(siwe.nonce)) {
+  if (!(await nonceStore.consume(siwe.nonce))) {
     throw new SiweVerificationError(
       'unknown_nonce',
       'nonce is unknown, already used, or expired',

@@ -4,6 +4,8 @@ import { exportJWK, generateKeyPair, type JWK } from 'jose';
 import { getAddress, isAddress } from 'viem';
 import type { Account, Configuration, FindAccount } from 'oidc-provider';
 import { getKycStore, effectiveVerified, type KycStatus } from './kyc.js';
+import { createRedisAdapterFactory } from './redis-adapter.js';
+import type { RedisLike } from './redis.js';
 
 /**
  * Public issuer URL. In production: https://auth.citrate.ai
@@ -139,6 +141,16 @@ export interface ConfigEnv {
    * authority refuses to boot — see {@link assertProductionConfig}.
    */
   DATABASE_URL?: string;
+  /**
+   * Redis connection string backing the HA / restart-safe authority state: the
+   * panva persistent adapter (sessions/grants/tokens/interactions), the
+   * single-use SIWE nonce store, and the cross-instance logout session bus.
+   * Unset is fine in dev (in-memory nonce/bus + panva's in-memory adapter + a
+   * warning); in production it MUST be set or the authority refuses to boot
+   * (same posture as DATABASE_URL / COOKIE_KEYS) — see
+   * {@link assertProductionConfig}.
+   */
+  REDIS_URL?: string;
 }
 
 /** A host is "local" if it is localhost / a loopback / `.local` / unspecified. */
@@ -247,6 +259,20 @@ export function assertProductionConfig(env: ConfigEnv): { warnings: string[] } {
     );
   }
 
+  // --- REDIS_URL (HA / restart-safe) ---
+  // Fail closed in production when there is no Redis to back the persistent panva
+  // adapter + single-use nonce + cross-instance logout bus: an unset REDIS_URL
+  // would silently fall back to in-memory state (sessions/grants/tokens lost on
+  // restart, nonces only single-instance, logout not cascading across instances).
+  // Same posture as DATABASE_URL / COOKIE_KEYS.
+  if (!env.REDIS_URL || env.REDIS_URL.trim() === '') {
+    problems.push(
+      'REDIS_URL is unset (sessions/grants/tokens would use panva\'s in-memory ' +
+        'adapter and nonces/logout-bus would be in-process — state lost on ' +
+        'restart, not multi-instance / HA)',
+    );
+  }
+
   if (isProd && problems.length > 0) {
     throw new Error(
       'Refusing to start in production with unsafe config (TD-1):\n  - ' +
@@ -319,12 +345,22 @@ export const findAccount: FindAccount = (_ctx, sub): Account => {
  * Reference relying party is `citrate-explorer` (IDP-S1). It is a PUBLIC client
  * (no secret) that uses Authorization Code + PKCE (S256). Refresh-token rotation
  * and token revocation are enabled per the security must-haves.
+ *
+ * @param redis when provided (REDIS_URL set), the persistent {@link RedisAdapter}
+ *   is installed so sessions/grants/tokens/interactions survive restart and work
+ *   multi-instance. When omitted (dev) panva's default in-memory adapter is used,
+ *   leaving the existing single-instance behaviour unchanged.
  */
-export async function buildConfiguration(): Promise<Configuration> {
+export async function buildConfiguration(
+  redis?: RedisLike,
+): Promise<Configuration> {
   const jwks = await loadOrCreateJwks();
 
   return {
     jwks,
+    // HA / restart-safe: persist all authority state in Redis when configured.
+    // Omitting `adapter` (dev, no REDIS_URL) keeps panva's in-memory adapter.
+    ...(redis ? { adapter: createRedisAdapterFactory(redis) } : {}),
     // SIWE login resolves the authenticated wallet address → OIDC account, and
     // populates the `wallet_address` / `wallets` claims (IDP-S1.5).
     findAccount,

@@ -8,15 +8,16 @@
  * server-side fan-out like our SSE endpoint `/sessions/events`) subscribe and
  * reflect logged-out state.
  *
- * SEAM (not a TODO): this in-process {@link SessionBus} is a Node EventEmitter,
- * correct for the single authority instance. For a multi-instance / HA deployment
- * the SAME `publish`/`subscribe` shape is backed by Redis pub/sub (or another
- * broker) so an event published on instance A reaches subscribers on instance B.
- * The interface is deliberately small so that swap is a drop-in — exactly the same
- * pattern as the NonceStore seam (siwe.ts) and the KycStore seam (kyc.ts). A
- * `RedisSessionBus implements SessionBusLike` lands when the authority goes HA.
+ * SEAM: this in-process {@link SessionBus} is a Node EventEmitter, correct for the
+ * single authority instance. For a multi-instance / HA deployment the SAME
+ * `publish`/`subscribe` shape is backed by Redis pub/sub ({@link RedisSessionBus}),
+ * selected by `REDIS_URL`, so an event published on instance A reaches subscribers
+ * on instance B (the logout cascade has to cross instances). The interface is
+ * deliberately small so the swap is a drop-in — the same pattern as the NonceStore
+ * seam (siwe.ts) and the KycStore seam (kyc.ts).
  */
 import { EventEmitter } from 'node:events';
+import type { RedisLike } from './redis.js';
 
 /** The kinds of session-lifecycle events the bus carries. Only logout for now. */
 export type SessionEventType = 'logout';
@@ -82,6 +83,88 @@ export class SessionBus implements SessionBusLike {
     return () => {
       this.emitter.off(CHANNEL, handler);
     };
+  }
+}
+
+/** The Redis pub/sub channel logout events are published on, cluster-wide. */
+const REDIS_CHANNEL = 'citrate:session';
+
+/**
+ * Redis pub/sub session bus (HA / multi-instance).
+ *
+ * Backs the EXISTING {@link SessionBusLike} seam with Redis pub/sub so a `logout`
+ * published on instance A reaches the `/sessions/events` SSE subscribers attached
+ * to instance B — the cascade is only honest if it crosses instances.
+ *
+ * Redis pub/sub requires a DEDICATED subscriber connection (a client in
+ * subscribe mode cannot issue normal commands), so we take the shared client as
+ * the PUBLISHER and `duplicate()` it for the SUBSCRIBER. Local handlers are kept
+ * in a Set and fanned out from the single `message` listener; `publish` is a
+ * fire-and-forget `PUBLISH` (matching the void in-memory shape — a logout must
+ * not block the HTTP response on a broker round-trip), and a `subscribe` failure
+ * surfaces on the publisher's error channel rather than throwing into the caller.
+ */
+export class RedisSessionBus implements SessionBusLike {
+  private readonly subscriber: RedisLike;
+  private readonly handlers = new Set<SessionEventHandler>();
+  private subscribed = false;
+
+  /** @param publisher the shared {@link RedisLike}; a duplicate is the subscriber. */
+  constructor(private readonly publisher: RedisLike) {
+    this.subscriber = publisher.duplicate();
+    // One message listener fans out to every local handler. Set up before the
+    // SUBSCRIBE so no early message is missed.
+    this.subscriber.on('message', (...args: unknown[]) => {
+      const [channel, raw] = args as [string, string];
+      if (channel !== REDIS_CHANNEL) return;
+      let event: SessionEvent;
+      try {
+        event = JSON.parse(raw) as SessionEvent;
+      } catch {
+        // A malformed message is not actionable; drop it rather than crash the
+        // listener (which would silence the whole cascade on this instance).
+        return;
+      }
+      for (const handler of this.handlers) handler(event);
+    });
+  }
+
+  /** Establish the SUBSCRIBE once (idempotent). Awaited at boot wiring time. */
+  async start(): Promise<void> {
+    if (this.subscribed) return;
+    this.subscribed = true;
+    await this.subscriber.subscribe(REDIS_CHANNEL);
+  }
+
+  /**
+   * Publish an event for `sub`. Fire-and-forget `PUBLISH` so the logout HTTP
+   * response is not blocked on the broker. `sub` is supplied separately so the
+   * body can never disagree with its subject (mirrors {@link SessionBus}).
+   */
+  publish(sub: string, event: Omit<SessionEvent, 'sub'>): void {
+    const full: SessionEvent = { ...event, sub };
+    void this.publisher.publish(REDIS_CHANNEL, JSON.stringify(full));
+  }
+
+  /**
+   * Subscribe to every published event. Returns an unsubscribe function; call it
+   * (e.g. when an SSE client disconnects) so handlers never leak. The underlying
+   * Redis SUBSCRIBE stays up for the bus's lifetime — handlers are multiplexed
+   * over the one connection.
+   */
+  subscribe(handler: SessionEventHandler): Unsubscribe {
+    this.handlers.add(handler);
+    // Lazily ensure the SUBSCRIBE is live even if start() wasn't called (defensive
+    // for direct construction in tests); idempotent.
+    void this.start();
+    return () => {
+      this.handlers.delete(handler);
+    };
+  }
+
+  /** Close the dedicated subscriber connection (process shutdown). */
+  async close(): Promise<void> {
+    await this.subscriber.quit();
   }
 }
 
