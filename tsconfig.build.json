@@ -1,0 +1,17 @@
+{
+  // Production build config. The base tsconfig.json compiles src+test together
+  // (so vitest/tsx/the editor typecheck the tests), which would emit to
+  // dist/src/** and dist/test/**. For the deployable artifact we instead compile
+  // ONLY src with rootDir=src, so the entry point lands at dist/server.js (what
+  // `npm start` and the Dockerfile CMD run). Tests are never shipped.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist",
+    // Runtime artifact: skip declaration files + source maps to keep the image lean.
+    "declaration": false,
+    "sourceMap": false
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": ["node_modules", "dist", "test"]
+}

@@ -202,6 +202,20 @@ export class PgKycStore implements KycStore {
     );
   }
 
+  /**
+   * Lightweight liveness probe for `/health`. Runs the cheapest possible query
+   * (`SELECT 1`) and resolves `true` when the pool answers, `false` on any error.
+   * Never throws — the health endpoint must degrade a sub-field, not 500.
+   */
+  async ping(): Promise<boolean> {
+    try {
+      await this.pool.query('SELECT 1');
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   /** Close the underlying pool (process shutdown / tests). */
   async close(): Promise<void> {
     await this.pool.end?.();

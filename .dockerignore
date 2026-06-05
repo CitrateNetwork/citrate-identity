@@ -1,0 +1,27 @@
+# Keep the build context small + never ship secrets, tests, or local state.
+node_modules
+dist
+test
+
+# Secrets / local-only state — MUST NOT enter the image.
+.keys
+.env
+.env.*
+!.env.example
+!.env.production.example
+
+# VCS + tooling
+.git
+.gitignore
+.github
+.agentile
+
+# Editor / OS noise + logs + maps
+*.log
+*.md
+.DS_Store
+**/*.map
+
+# The compose / proxy artifacts are not needed inside the app image.
+docker-compose.yml
+Caddyfile

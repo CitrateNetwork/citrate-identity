@@ -1,0 +1,121 @@
+# Citrate Identity (auth.citrate.ai) — production compose for a Docker-on-VPS deploy.
+#
+# Services:
+#   identity  — the OIDC authority (this repo), built from the Dockerfile.
+#   postgres  — backs the KYC claim store (DATABASE_URL); named volume for durability.
+#   redis     — backs the HA authority state (REDIS_URL): panva adapter, SIWE nonces,
+#               and the logout session bus; named volume for AOF persistence.
+#   caddy     — TLS-terminating reverse proxy (automatic HTTPS) in front of identity.
+#               OPTIONAL: drop this service if your VPS already has its own ingress.
+#
+# Secrets are supplied via the environment (an .env file next to this compose, see
+# .env.production.example), NEVER hardcoded here. Copy .env.production.example to
+# .env, fill it in, then: `docker compose up -d --build`.
+
+services:
+  identity:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      ISSUER_URL: ${ISSUER_URL}
+      COOKIE_KEYS: ${COOKIE_KEYS}
+      EXPLORER_ORIGIN: ${EXPLORER_ORIGIN}
+      DASHBOARD_ORIGIN: ${DASHBOARD_ORIGIN}
+      STUDIO_ORIGIN: ${STUDIO_ORIGIN:-}
+      WALLETCONNECT_PROJECT_ID: ${WALLETCONNECT_PROJECT_ID:-}
+      KYC_WEBHOOK_SECRET: ${KYC_WEBHOOK_SECRET}
+      CITRATE_RPC_URL: ${CITRATE_RPC_URL:-}
+      # Point the app at the in-network postgres/redis services. The credentials
+      # come from the same env vars the postgres/redis services consume below.
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
+    volumes:
+      # Persist the generated RS256 JWKS across restarts/redeploys so issued tokens
+      # keep verifying. Mount a host path or named volume; the container writes
+      # /app/.keys/jwks.json on first boot if absent.
+      - identity_keys:/app/.keys
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:3000/health').then(r=>process.exit(r.status===200?0:1)).catch(()=>process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    # Not published to the host: Caddy terminates TLS and proxies to it over the
+    # internal network. Expose to other compose services only.
+    expose:
+      - "3000"
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    # Require a password (--requirepass) and enable AOF persistence so authority
+    # state survives a redis restart. REDIS_PASSWORD is supplied via the env file.
+    command:
+      - redis-server
+      - --requirepass
+      - ${REDIS_PASSWORD}
+      - --appendonly
+      - "yes"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    # OPTIONAL ingress. Remove this service if the VPS already fronts identity with
+    # its own TLS/ingress (then publish identity's port instead).
+    depends_on:
+      identity:
+        condition: service_started
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      # The public issuer host Caddy obtains a cert for, e.g. auth.citrate.ai.
+      ISSUER_HOST: ${ISSUER_HOST}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  identity_keys:
+  postgres_data:
+  redis_data:
+  caddy_data:
+  caddy_config:

@@ -6,11 +6,14 @@ import {
   siweDomainFromIssuer,
   ISSUER_URL,
   PORT,
+  WALLETCONNECT_PROJECT_ID,
 } from './config.js';
 import { mountSiweRoutes } from './siwe-routes.js';
 import { mountKycRoutes } from './kyc-routes.js';
 import { mountLogoutRoutes } from './logout-routes.js';
-import { initKycStoreFromEnv } from './kyc.js';
+import { mountHttpExtras } from './http-extras.js';
+import { initKycStoreFromEnv, getKycStore } from './kyc.js';
+import { PgKycStore } from './kyc-pg.js';
 import { createCitratePublicClient, type NonceStore } from './siwe.js';
 import { RedisNonceStore } from './nonce-redis.js';
 import { RedisSessionBus, getSessionBus, setSessionBus } from './session-bus.js';
@@ -47,6 +50,25 @@ export interface CreateProviderOptions {
    * one explicitly.
    */
   nonceStore?: NonceStore;
+  /**
+   * Override the `/health` Redis probe. Defaults to a round-trip against the
+   * `redis` client when one is provided (and omitted entirely otherwise, so the
+   * `redis` field is absent from the health body in dev). Tests inject one.
+   */
+  pingRedis?: () => Promise<boolean>;
+  /**
+   * Override the `/health` Postgres probe. Defaults to {@link PgKycStore.ping}
+   * when the live KYC store is Postgres-backed (omitted otherwise). Tests inject
+   * one.
+   */
+  pingDb?: () => Promise<boolean>;
+  /**
+   * WalletConnect Cloud project id surfaced to the SIWE interaction page so it
+   * offers the QR / mobile connector. Defaults to `WALLETCONNECT_PROJECT_ID` from
+   * the environment; when unset the page shows only the injected connector (NOT
+   * fail-closed). Tests pass it explicitly to assert both-connectors rendering.
+   */
+  walletConnectProjectId?: string;
 }
 
 /**
@@ -104,6 +126,35 @@ export async function createProvider(
   // discovery advertises https URLs and secure cookies behave.
   provider.proxy = true;
 
+  // CORS + /health first, so the cross-origin RP routes carry CORS headers and
+  // the liveness probe answers without ever touching panva's OIDC routing.
+  //   - Redis probe: a cheap round-trip (EXISTS on a throwaway key) against the
+  //     shared client when REDIS_URL wired one; omitted in dev so `redis` is
+  //     absent from the body. Swallows errors → false (never throws).
+  //   - DB probe: PgKycStore.ping() when the live KYC store is Postgres-backed;
+  //     omitted in dev (in-memory store) so `db` is absent.
+  const kycStore = getKycStore();
+  const defaultPingRedis = options.redis
+    ? async (): Promise<boolean> => {
+        try {
+          await options.redis!.exists('citrate-identity:health-probe');
+          return true;
+        } catch {
+          return false;
+        }
+      }
+    : undefined;
+  const defaultPingDb =
+    kycStore instanceof PgKycStore
+      ? (): Promise<boolean> => kycStore.ping()
+      : undefined;
+  const pingRedis = options.pingRedis ?? defaultPingRedis;
+  const pingDb = options.pingDb ?? defaultPingDb;
+  mountHttpExtras(provider, {
+    ...(pingRedis ? { pingRedis } : {}),
+    ...(pingDb ? { pingDb } : {}),
+  });
+
   // SIWE login. The signing JWK is the same RS256 key the authority publishes
   // via JWKS, so direct-path ID tokens verify against `/jwks`.
   const jwks = await loadOrCreateJwks();
@@ -118,12 +169,18 @@ export async function createProvider(
     options.nonceStore ??
     (options.redis ? new RedisNonceStore(options.redis) : undefined);
 
+  // WalletConnect: explicit option wins, else the env var. Undefined → the page
+  // hides the WalletConnect button (injected still works; not fail-closed).
+  const walletConnectProjectId =
+    options.walletConnectProjectId ?? WALLETCONNECT_PROJECT_ID;
+
   mountSiweRoutes(provider, {
     expectedDomain: siweDomainFromIssuer(issuer),
     issuer,
     signingJwk: jwks.keys[0],
     publicClient,
     ...(nonceStore ? { nonceStore } : {}),
+    ...(walletConnectProjectId ? { walletConnectProjectId } : {}),
   });
 
   // IDP-KYC: the vendor-webhook stand-in that writes the LIVE KYC claim record
