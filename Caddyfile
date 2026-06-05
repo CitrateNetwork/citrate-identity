@@ -1,0 +1,43 @@
+# Caddy reverse proxy for the Citrate OIDC authority.
+#
+# OPTIONAL ingress: this fronts the `identity` service with automatic HTTPS
+# (Let's Encrypt). If your VPS already terminates TLS / has its own ingress,
+# delete the `caddy` service from docker-compose.yml and point your proxy at
+# identity:3000 instead — the app trusts X-Forwarded-* (provider.proxy = true),
+# so discovery advertises https URLs and Secure cookies behave correctly behind
+# any TLS terminator.
+#
+# {$ISSUER_HOST} is read from the environment (set ISSUER_HOST in your .env, e.g.
+# auth.citrate.ai). Caddy provisions + renews the certificate for that hostname
+# automatically; no manual cert wrangling.
+
+{$ISSUER_HOST} {
+	encode zstd gzip
+
+	# Forward the real client protocol/host so the app issues correct absolute
+	# (https) discovery/issuer URLs and sets Secure cookies.
+	reverse_proxy identity:3000 {
+		header_up X-Forwarded-Proto {scheme}
+		header_up X-Forwarded-Host {host}
+		header_up X-Real-IP {remote_host}
+
+		# Let the load balancer / Caddy short-circuit on the app's own /health.
+		health_uri /health
+		health_interval 30s
+		health_timeout 5s
+	}
+
+	# Reasonable security headers for an auth surface. HSTS is safe once HTTPS is
+	# confirmed working for the host (Caddy serves HTTPS by default here).
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+
+	log {
+		output stdout
+		format console
+	}
+}

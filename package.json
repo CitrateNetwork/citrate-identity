@@ -9,7 +9,9 @@
   },
   "scripts": {
     "dev": "tsx src/server.ts",
-    "build": "tsc",
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "start": "node dist/server.js",
     "test": "vitest run"
   },
   "dependencies": {

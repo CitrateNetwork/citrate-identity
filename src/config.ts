@@ -36,6 +36,45 @@ export const EXPLORER_ORIGIN =
 export const DASHBOARD_ORIGIN =
   process.env.DASHBOARD_ORIGIN ?? 'http://localhost:3002';
 
+/**
+ * Web origin of the citrate-studio relying party, when it runs as a hosted web
+ * surface (the native shell uses loopback PKCE and needs no CORS). Optional —
+ * only added to the CORS allow-list when set. No dev default: studio is native
+ * first, so an unset value simply means "no studio web origin to allow".
+ */
+export const STUDIO_ORIGIN = process.env.STUDIO_ORIGIN;
+
+/**
+ * WalletConnect Cloud project id, surfaced to the SIWE interaction page so it can
+ * initialise `@walletconnect/ethereum-provider` (the QR / mobile-wallet connector)
+ * for chain {@link CITRATE_CHAIN_ID}. OPTIONAL and NOT fail-closed: when unset the
+ * interaction page hides the WalletConnect button and only the injected
+ * (`window.ethereum`) connector is offered — injected login keeps working. Get one
+ * free at https://cloud.reown.com (formerly WalletConnect Cloud).
+ */
+export const WALLETCONNECT_PROJECT_ID = process.env.WALLETCONNECT_PROJECT_ID;
+
+/**
+ * The RP web origins the authority echoes for CORS on its cross-origin routes
+ * (`/siwe/*` Path B, `/sessions/events`, `/token`, `/userinfo`, `/jwks`,
+ * `/me`, introspection/revocation). Only these exact origins are echoed back in
+ * `Access-Control-Allow-Origin`; everything else gets no CORS headers (we never
+ * open `*`). The authority's OWN origin is implicitly same-origin and does not
+ * need to be listed. `STUDIO_ORIGIN` is included only when configured.
+ *
+ * Built once at module load from the resolved origin env vars.
+ */
+export const ALLOWED_CORS_ORIGINS: ReadonlySet<string> = new Set(
+  [EXPLORER_ORIGIN, DASHBOARD_ORIGIN, STUDIO_ORIGIN].filter(
+    (o): o is string => typeof o === 'string' && o.trim() !== '',
+  ),
+);
+
+/** True iff `origin` is an allow-listed RP origin permitted to make CORS calls. */
+export function isAllowedCorsOrigin(origin: string | undefined): boolean {
+  return origin !== undefined && ALLOWED_CORS_ORIGINS.has(origin);
+}
+
 /** The shared OAuth callback path (where panva sends `code` + `state`). */
 const CALLBACK_PATH = '/auth/callback';
 
@@ -135,6 +174,18 @@ export interface ConfigEnv {
   ISSUER_URL?: string;
   EXPLORER_ORIGIN?: string;
   DASHBOARD_ORIGIN?: string;
+  /**
+   * Optional hosted citrate-studio web origin. Only used to widen the CORS
+   * allow-list; never required (studio is native-first). Validated for a local
+   * host the same way the other RP origins are when present.
+   */
+  STUDIO_ORIGIN?: string;
+  /**
+   * Optional WalletConnect Cloud project id for the QR / mobile connector on the
+   * SIWE interaction page. NOT fail-closed: unset simply hides the WalletConnect
+   * button (injected login still works), so the prod gate never requires it.
+   */
+  WALLETCONNECT_PROJECT_ID?: string;
   /**
    * Postgres connection string backing the KYC claim store (TD-2). Unset is fine
    * in dev (in-memory store + a warning); in production it MUST be set or the
@@ -245,6 +296,13 @@ export function assertProductionConfig(env: ConfigEnv): { warnings: string[] } {
   if (isLocalUrl(env.DASHBOARD_ORIGIN)) {
     problems.push(
       `DASHBOARD_ORIGIN points at a local host: ${env.DASHBOARD_ORIGIN}`,
+    );
+  }
+  // STUDIO_ORIGIN is optional (studio is native-first). Only validate it when
+  // present — an unset value is never a problem, but a local one in prod is.
+  if (env.STUDIO_ORIGIN && isLocalUrl(env.STUDIO_ORIGIN)) {
+    problems.push(
+      `STUDIO_ORIGIN points at a local host: ${env.STUDIO_ORIGIN}`,
     );
   }
 

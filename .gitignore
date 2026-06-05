@@ -1,5 +1,9 @@
 node_modules
 dist
+# Ignore ALL env files (incl. .env.production) — track only the *.example templates.
 .env
+.env.*
+!.env.example
+!.env.production.example
 .keys
 *.log

@@ -67,6 +67,15 @@ export interface SiweRouteOptions {
    * Defaults to {@link CITRATE_CHAIN_ID}; overridable for tests / other chains.
    */
   chainId?: number;
+  /**
+   * WalletConnect Cloud project id. When set, the interaction page additionally
+   * offers the WalletConnect (QR / mobile) connector — it lazy-loads
+   * `@walletconnect/ethereum-provider` from a CDN and `personal_sign`s the SAME
+   * EIP-4361 message. When UNSET the WalletConnect button is omitted entirely and
+   * only the injected (`window.ethereum`) connector is shown — injected login is
+   * never blocked by a missing project id (not fail-closed).
+   */
+  walletConnectProjectId?: string;
 }
 
 /** Read a JSON request body with a hard size cap (anti-DoS). */
@@ -131,43 +140,153 @@ function renderInteractionPage(opts: {
   uri: string;
   chainId: number;
   statement: string;
+  /** A friendly name for the app being signed into (the client_id). */
+  clientId: string;
+  /** WalletConnect Cloud project id, or undefined to hide that connector. */
+  walletConnectProjectId?: string;
 }): string {
-  // Values that land inside the inline script as JSON literals.
+  // Values that land inside the inline script as JSON literals. The
+  // walletConnectProjectId is included only when configured; its presence is
+  // what the page uses to decide whether to render the WalletConnect button.
   const cfg = JSON.stringify({
     uid: opts.uid,
     domain: opts.domain,
     uri: opts.uri,
     chainId: opts.chainId,
     statement: opts.statement,
+    clientId: opts.clientId,
+    walletConnectProjectId: opts.walletConnectProjectId ?? null,
   });
+  const hasWalletConnect = Boolean(opts.walletConnectProjectId);
   return `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Sign in to Citrate</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&display=swap" />
 <style>
-  body { font-family: system-ui, sans-serif; max-width: 28rem; margin: 4rem auto; padding: 0 1rem; color: #111; }
-  button { font-size: 1rem; padding: 0.6rem 1.1rem; border-radius: 0.5rem; border: 1px solid #8ecc09; background: #8ecc09; color: #082; cursor: pointer; }
-  button:disabled { opacity: 0.6; cursor: default; }
-  #status { margin-top: 1rem; color: #555; white-space: pre-wrap; }
-  code { background: #f3f3f3; padding: 0.1rem 0.3rem; border-radius: 0.25rem; }
+  :root {
+    /* Citrate brand: green primary on a clean paper/ink palette. */
+    --brand: #8ecc09;
+    --brand-ink: #2f4d00;
+    --brand-hover: #7eb808;
+    --paper: #fbfbf8;
+    --card: #ffffff;
+    --ink: #14150f;
+    --muted: #6b6f63;
+    --line: #e7e8e0;
+    --danger: #b42318;
+    --serif: 'Source Serif 4', Georgia, 'Times New Roman', serif;
+    --sans: 'Geist', system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: var(--sans);
+    margin: 0; min-height: 100vh;
+    display: flex; align-items: center; justify-content: center;
+    background: var(--paper); color: var(--ink);
+    padding: 1.5rem;
+    -webkit-font-smoothing: antialiased;
+  }
+  .card {
+    width: 100%; max-width: 26rem;
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 1rem;
+    padding: 2rem 1.75rem;
+    box-shadow: 0 1px 2px rgba(20,21,15,0.04), 0 8px 24px rgba(20,21,15,0.06);
+  }
+  .brand { display: flex; align-items: center; gap: 0.6rem; margin-bottom: 1.5rem; }
+  .brand .dot {
+    width: 1.5rem; height: 1.5rem; border-radius: 0.45rem;
+    background: var(--brand);
+    box-shadow: 0 0 0 4px rgba(142,204,9,0.18);
+    flex: none;
+  }
+  .brand .name { font-family: var(--serif); font-weight: 600; font-size: 1.15rem; letter-spacing: -0.01em; }
+  h1 { font-family: var(--serif); font-weight: 600; font-size: 1.55rem; line-height: 1.15; margin: 0 0 0.5rem; letter-spacing: -0.02em; }
+  .lede { color: var(--muted); margin: 0 0 1.5rem; font-size: 0.95rem; line-height: 1.5; }
+  .app-chip {
+    display: inline-flex; align-items: center; gap: 0.4rem;
+    background: rgba(142,204,9,0.12); color: var(--brand-ink);
+    border: 1px solid rgba(142,204,9,0.35);
+    padding: 0.15rem 0.55rem; border-radius: 999px;
+    font-weight: 500; font-size: 0.85rem;
+  }
+  .connected {
+    display: none; align-items: center; gap: 0.5rem;
+    margin-bottom: 1rem; padding: 0.6rem 0.75rem;
+    background: var(--paper); border: 1px solid var(--line); border-radius: 0.6rem;
+    font-size: 0.85rem;
+  }
+  .connected.show { display: flex; }
+  .connected .addr { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--ink); }
+  .actions { display: grid; gap: 0.6rem; }
+  button {
+    font-family: var(--sans);
+    font-size: 0.98rem; font-weight: 500;
+    padding: 0.75rem 1rem; border-radius: 0.65rem;
+    border: 1px solid transparent; cursor: pointer;
+    display: flex; align-items: center; justify-content: center; gap: 0.5rem;
+    transition: background 120ms ease, border-color 120ms ease, opacity 120ms ease;
+  }
+  button.primary { background: var(--brand); color: var(--brand-ink); border-color: var(--brand); }
+  button.primary:hover:not(:disabled) { background: var(--brand-hover); border-color: var(--brand-hover); }
+  button.secondary { background: var(--card); color: var(--ink); border-color: var(--line); }
+  button.secondary:hover:not(:disabled) { border-color: var(--brand); }
+  button:disabled { opacity: 0.55; cursor: default; }
+  #status {
+    margin-top: 1.1rem; min-height: 1.2rem;
+    color: var(--muted); font-size: 0.88rem; line-height: 1.45; white-space: pre-wrap;
+  }
+  #status.error { color: var(--danger); }
+  .meta { margin-top: 1.5rem; padding-top: 1rem; border-top: 1px solid var(--line); color: var(--muted); font-size: 0.78rem; line-height: 1.5; }
+  .meta code { background: var(--paper); border: 1px solid var(--line); padding: 0.05rem 0.3rem; border-radius: 0.3rem; }
 </style>
 </head>
 <body>
-  <h1>Sign in with your wallet</h1>
-  <p>Authenticate to <code>${escapeHtml(opts.domain)}</code> by signing a message on the Citrate network (chain ${opts.chainId}). No transaction, no gas.</p>
-  <button id="signin" type="button">Connect wallet &amp; sign in</button>
-  <p id="status" role="status"></p>
+  <main class="card">
+    <div class="brand"><span class="dot" aria-hidden="true"></span><span class="name">Citrate</span></div>
+    <h1>Sign in with your wallet</h1>
+    <p class="lede">Continue to <span class="app-chip" id="app-name">${escapeHtml(opts.clientId)}</span> by signing a message on the Citrate network. No transaction, no gas.</p>
+    <div class="connected" id="connected" role="status">
+      <span aria-hidden="true">&#128081;</span>
+      <span>Connected as <span class="addr" id="connected-addr"></span></span>
+    </div>
+    <div class="actions">
+      <button id="signin-injected" class="primary" type="button">Connect a browser wallet</button>
+      ${hasWalletConnect ? '<button id="signin-walletconnect" class="secondary" type="button">Use WalletConnect (mobile / QR)</button>' : ''}
+    </div>
+    <p id="status" role="status"></p>
+    <p class="meta">Authenticating to <code>${escapeHtml(opts.domain)}</code> on chain ${opts.chainId}. You are signing a Sign-In with Ethereum (EIP-4361) message; it proves you control your address and is never a transaction.</p>
+  </main>
 <script>
 const CFG = ${cfg};
 const statusEl = document.getElementById('status');
-const btn = document.getElementById('signin');
-function setStatus(msg) { statusEl.textContent = msg; }
+const injectedBtn = document.getElementById('signin-injected');
+const wcBtn = document.getElementById('signin-walletconnect');
+const connectedEl = document.getElementById('connected');
+const connectedAddrEl = document.getElementById('connected-addr');
+
+function setStatus(msg, isError) {
+  statusEl.textContent = msg;
+  statusEl.classList.toggle('error', Boolean(isError));
+}
+function showConnected(address) {
+  connectedAddrEl.textContent = address;
+  connectedEl.classList.add('show');
+}
+function setBusy(busy) {
+  injectedBtn.disabled = busy;
+  if (wcBtn) wcBtn.disabled = busy;
+}
 
 // Build a canonical EIP-4361 message string. Mirrors the fields the authority
 // verifies: domain (anti-phishing), uri, chainId (Citrate), nonce, issuedAt,
-// expirationTime, and the signing address.
+// expirationTime, and the signing address. Both connectors sign THIS string.
 function buildSiweMessage(address, nonce) {
   const issuedAt = new Date();
   const expirationTime = new Date(issuedAt.getTime() + 10 * 60 * 1000);
@@ -187,50 +306,115 @@ function buildSiweMessage(address, nonce) {
   return lines.join('\\n');
 }
 
-async function signIn() {
-  btn.disabled = true;
+// Shared tail: fetch a fresh nonce, sign the EIP-4361 message via the given
+// EIP-1193 provider's personal_sign, POST /siwe/verify, follow redirectTo.
+async function completeSignIn(provider, address) {
+  setStatus('Fetching challenge…');
+  const challengeRes = await fetch('/siwe/challenge', { credentials: 'same-origin' });
+  const { nonce } = await challengeRes.json();
+
+  const message = buildSiweMessage(address, nonce);
+  setStatus('Check your wallet to sign the message…');
+  const signature = await provider.request({
+    method: 'personal_sign',
+    params: [message, address],
+  });
+
+  setStatus('Verifying…');
+  const verifyRes = await fetch('/siwe/verify', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    credentials: 'same-origin',
+    body: JSON.stringify({ message, signature }),
+  });
+  const result = await verifyRes.json();
+  if (!verifyRes.ok || !result.redirectTo) {
+    setStatus('Sign-in failed: ' + (result.reason || result.error || verifyRes.status), true);
+    return false;
+  }
+  setStatus('Signed in. Redirecting…');
+  window.location = result.redirectTo;
+  return true;
+}
+
+// EIP-1193 user-rejection codes: 4001 (rejected request) is the common one.
+function describeError(err) {
+  if (err && (err.code === 4001 || err.code === 'ACTION_REJECTED')) {
+    return 'You declined the signature. Try again when ready.';
+  }
+  return (err && err.message ? err.message : String(err));
+}
+
+// --- Injected connector (window.ethereum personal_sign). ---
+async function signInInjected() {
+  setBusy(true);
   try {
     if (!window.ethereum) {
-      setStatus('No injected wallet found. Install a wallet to continue.');
-      btn.disabled = false;
+      setStatus('No browser wallet found. Install one (e.g. MetaMask) or use WalletConnect.', true);
+      setBusy(false);
       return;
     }
     setStatus('Requesting wallet…');
     const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
     const address = accounts[0];
-
-    setStatus('Fetching challenge…');
-    const challengeRes = await fetch('/siwe/challenge', { credentials: 'same-origin' });
-    const { nonce } = await challengeRes.json();
-
-    const message = buildSiweMessage(address, nonce);
-    setStatus('Awaiting signature…');
-    const signature = await window.ethereum.request({
-      method: 'personal_sign',
-      params: [message, address],
-    });
-
-    setStatus('Verifying…');
-    const verifyRes = await fetch('/siwe/verify', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      credentials: 'same-origin',
-      body: JSON.stringify({ message, signature }),
-    });
-    const result = await verifyRes.json();
-    if (!verifyRes.ok || !result.redirectTo) {
-      setStatus('Sign-in failed: ' + (result.reason || result.error || verifyRes.status));
-      btn.disabled = false;
-      return;
-    }
-    setStatus('Signed in. Redirecting…');
-    window.location = result.redirectTo;
+    showConnected(address);
+    const ok = await completeSignIn(window.ethereum, address);
+    if (!ok) setBusy(false);
   } catch (err) {
-    setStatus('Error: ' + (err && err.message ? err.message : String(err)));
-    btn.disabled = false;
+    setStatus('Error: ' + describeError(err), true);
+    setBusy(false);
   }
 }
-btn.addEventListener('click', signIn);
+injectedBtn.addEventListener('click', signInInjected);
+
+// --- WalletConnect connector (QR / mobile), only when a project id is set. ---
+${
+  hasWalletConnect
+    ? `
+async function signInWalletConnect() {
+  setBusy(true);
+  try {
+    setStatus('Starting WalletConnect…');
+    // Lazy-load the provider from a CDN ESM build — no bundler/build step.
+    const { EthereumProvider } = await import('https://esm.sh/@walletconnect/ethereum-provider@2');
+    const wc = await EthereumProvider.init({
+      projectId: CFG.walletConnectProjectId,
+      chains: [CFG.chainId],
+      showQrModal: true,
+      metadata: {
+        name: 'Citrate',
+        description: 'Sign in to Citrate',
+        url: CFG.uri,
+        icons: [],
+      },
+    });
+    setStatus('Scan the QR code or approve in your wallet…');
+    await wc.connect();
+    const accounts = wc.accounts || (await wc.request({ method: 'eth_accounts' }));
+    const address = accounts[0];
+    if (!address) throw new Error('WalletConnect returned no account');
+    // Guard against a wallet that connected on a different chain.
+    if (typeof wc.chainId === 'number' && wc.chainId !== CFG.chainId) {
+      setStatus('Wrong network: please switch your wallet to Citrate (chain ' + CFG.chainId + ').', true);
+      try { await wc.disconnect(); } catch (e) {}
+      setBusy(false);
+      return;
+    }
+    showConnected(address);
+    const ok = await completeSignIn(wc, address);
+    if (!ok) {
+      try { await wc.disconnect(); } catch (e) {}
+      setBusy(false);
+    }
+  } catch (err) {
+    setStatus('Error: ' + describeError(err), true);
+    setBusy(false);
+  }
+}
+wcBtn.addEventListener('click', signInWalletConnect);
+`
+    : ''
+}
 </script>
 </body>
 </html>`;
@@ -495,6 +679,11 @@ export function mountSiweRoutes(
       }
 
       if (promptName === 'login') {
+        // Surface the app being signed into (the client_id) so the page can show
+        // it; fall back to a generic label if the interaction has no client_id.
+        const clientId = interaction.params.client_id
+          ? String(interaction.params.client_id)
+          : 'a Citrate app';
         sendHtml(
           ctx.res,
           200,
@@ -504,6 +693,10 @@ export function mountSiweRoutes(
             uri: options.issuer,
             chainId,
             statement: 'Sign in to Citrate',
+            clientId,
+            ...(options.walletConnectProjectId
+              ? { walletConnectProjectId: options.walletConnectProjectId }
+              : {}),
           }),
         );
         return;
