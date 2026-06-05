@@ -12,6 +12,8 @@ import { mountSiweRoutes } from './siwe-routes.js';
 import { mountKycRoutes } from './kyc-routes.js';
 import { mountLogoutRoutes } from './logout-routes.js';
 import { mountHttpExtras } from './http-extras.js';
+import { mountAaRoutes } from './aa/aa-routes.js';
+import { loadAaConfig } from './aa/config.js';
 import { initKycStoreFromEnv, getKycStore } from './kyc.js';
 import { PgKycStore } from './kyc-pg.js';
 import { createCitratePublicClient, type NonceStore } from './siwe.js';
@@ -194,6 +196,16 @@ export async function createProvider(
   // ends its session, and publishes a `logout` on the session bus; GET
   // /sessions/events streams those events to subscribed relying parties (SSE).
   mountLogoutRoutes(provider);
+
+  // EW-S1 WP-5: /aa/* — smart-wallet address prediction + deploy-permit
+  // signing for the Citrate ERC-4337 stack. Only enabled when the AA env
+  // is set (CITRATE_AA_FACTORY etc.); production refuses to boot via
+  // loadAaConfig if the env is partial.
+  if (process.env.CITRATE_AA_FACTORY) {
+    const aaCfg = loadAaConfig(process.env);
+    const rpc = process.env.CITRATE_AA_RPC_URL ?? process.env.CITRATE_RPC_URL ?? 'https://rpc.citrate.ai';
+    mountAaRoutes(provider, { config: aaCfg, rpcUrl: rpc });
+  }
 
   return provider;
 }
