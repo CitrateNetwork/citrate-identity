@@ -13,6 +13,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "ioredis": "^5.11.1",
     "jose": "^5.9.6",
     "oidc-provider": "^8.5.3",
     "pg": "^8.21.0",
@@ -23,6 +24,7 @@
     "@types/node": "^22.10.2",
     "@types/oidc-provider": "^8.5.2",
     "@types/pg": "^8.20.0",
+    "ioredis-mock": "^8.13.1",
     "pg-mem": "^3.0.14",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",

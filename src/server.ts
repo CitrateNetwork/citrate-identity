@@ -11,7 +11,10 @@ import { mountSiweRoutes } from './siwe-routes.js';
 import { mountKycRoutes } from './kyc-routes.js';
 import { mountLogoutRoutes } from './logout-routes.js';
 import { initKycStoreFromEnv } from './kyc.js';
-import { createCitratePublicClient } from './siwe.js';
+import { createCitratePublicClient, type NonceStore } from './siwe.js';
+import { RedisNonceStore } from './nonce-redis.js';
+import { RedisSessionBus, getSessionBus, setSessionBus } from './session-bus.js';
+import { createRedis, type RedisLike } from './redis.js';
 import type { PublicClient } from 'viem';
 
 export interface CreateProviderOptions {
@@ -30,6 +33,57 @@ export interface CreateProviderOptions {
    * pass it explicitly. When neither is set the endpoints fail closed.
    */
   kycWebhookSecret?: string;
+  /**
+   * Shared Redis client (HA / restart-safe). When provided, the persistent panva
+   * adapter is installed and the SIWE nonce store is Redis-backed. The
+   * cross-instance session bus is installed separately at boot (see
+   * {@link initRedisFromEnv}). When omitted (dev) the in-memory adapter + nonce
+   * store are used, leaving the single-instance behaviour unchanged.
+   */
+  redis?: RedisLike;
+  /**
+   * Nonce store override. Defaults to a {@link RedisNonceStore} when `redis` is
+   * provided, else mountSiweRoutes falls back to its in-memory store. Tests pass
+   * one explicitly.
+   */
+  nonceStore?: NonceStore;
+}
+
+/**
+ * Select + install the Redis-backed authority state from the environment (HA /
+ * restart-safe). Mirrors {@link initKycStoreFromEnv}:
+ *
+ *   - `REDIS_URL` set  → connect one shared `ioredis` client, install the
+ *     cross-instance {@link RedisSessionBus} as the live session bus, and return
+ *     the client so the caller can build the {@link RedisNonceStore} + pass the
+ *     persistent panva adapter. State survives restarts + is multi-instance.
+ *   - `REDIS_URL` unset → return undefined; the in-memory nonce/bus + panva's
+ *     in-memory adapter are used (dev), with a one-line warning. In PRODUCTION an
+ *     unset REDIS_URL never reaches here: {@link assertProductionConfig} throws
+ *     first (fail-closed, same posture as DATABASE_URL).
+ *
+ * `ioredis` is imported lazily inside {@link createRedis}, so dev/test that use
+ * the in-memory path never pull the driver in.
+ */
+export async function initRedisFromEnv(
+  env: { REDIS_URL?: string } = process.env,
+): Promise<RedisLike | undefined> {
+  const url = env.REDIS_URL;
+  if (url && url.trim() !== '') {
+    const redis = await createRedis(url);
+    const bus = new RedisSessionBus(redis);
+    await bus.start();
+    setSessionBus(bus);
+    return redis;
+  }
+  // eslint-disable-next-line no-console
+  console.warn(
+    '[citrate-identity] REDIS_URL unset — using the in-memory OIDC adapter, ' +
+      'nonce store, and session bus (authority state is lost on restart and not ' +
+      'shared across instances). Set REDIS_URL to back sessions/grants/tokens + ' +
+      'nonces + the logout bus with Redis (required in production).',
+  );
+  return undefined;
 }
 
 /**
@@ -42,7 +96,9 @@ export async function createProvider(
   issuer: string = ISSUER_URL,
   options: CreateProviderOptions = {},
 ): Promise<Provider> {
-  const configuration = await buildConfiguration();
+  // HA / restart-safe: when a Redis client is provided, panva persists all
+  // authority state via the RedisAdapter; otherwise its in-memory default (dev).
+  const configuration = await buildConfiguration(options.redis);
   const provider = new Provider(issuer, configuration);
   // Behind a TLS-terminating proxy (auth.citrate.ai) we trust X-Forwarded-* so
   // discovery advertises https URLs and secure cookies behave.
@@ -56,11 +112,18 @@ export async function createProvider(
     options.publicClient ??
     (rpcUrl ? createCitratePublicClient(rpcUrl) : undefined);
 
+  // Single-use nonce store: Redis-backed (one-time across instances) when a
+  // Redis client is provided, else mountSiweRoutes falls back to in-memory.
+  const nonceStore =
+    options.nonceStore ??
+    (options.redis ? new RedisNonceStore(options.redis) : undefined);
+
   mountSiweRoutes(provider, {
     expectedDomain: siweDomainFromIssuer(issuer),
     issuer,
     signingJwk: jwks.keys[0],
     publicClient,
+    ...(nonceStore ? { nonceStore } : {}),
   });
 
   // IDP-KYC: the vendor-webhook stand-in that writes the LIVE KYC claim record
@@ -95,13 +158,43 @@ async function main(): Promise<void> {
   // production if DATABASE_URL was unset, so this only falls back to memory in dev.
   await initKycStoreFromEnv(process.env);
 
-  const provider = await createProvider();
-  provider.listen(PORT, () => {
+  // HA / restart-safe: install the Redis-backed authority state for this env.
+  // With REDIS_URL set this connects one shared client, installs the
+  // cross-instance logout bus, and returns the client for the persistent panva
+  // adapter + Redis nonce store; without it (dev) it warns and uses the in-memory
+  // adapter/nonce/bus. assertProductionConfig already refused to start in
+  // production if REDIS_URL was unset, so this only falls back to memory in dev.
+  const redis = await initRedisFromEnv(process.env);
+
+  const provider = await createProvider(ISSUER_URL, redis ? { redis } : {});
+  const server = provider.listen(PORT, () => {
     // eslint-disable-next-line no-console
     console.log(
       `citrate-identity listening on ${ISSUER_URL} — discovery at ${ISSUER_URL}/.well-known/openid-configuration`,
     );
   });
+
+  // Clean shutdown: stop accepting connections, then close the shared Redis
+  // client (and, via the live bus's own close, its dedicated subscriber). On a
+  // rolling deploy this lets in-flight requests drain and releases the Redis
+  // sockets instead of leaking them until the TCP timeout.
+  const shutdown = (signal: string): void => {
+    // eslint-disable-next-line no-console
+    console.log(`[citrate-identity] ${signal} received — shutting down`);
+    server.close(() => {
+      void (async () => {
+        try {
+          const bus = getSessionBus();
+          if (bus instanceof RedisSessionBus) await bus.close();
+          if (redis) await redis.quit();
+        } finally {
+          process.exit(0);
+        }
+      })();
+    });
+  };
+  process.once('SIGTERM', () => shutdown('SIGTERM'));
+  process.once('SIGINT', () => shutdown('SIGINT'));
 }
 
 // Only auto-listen when run directly (tsx src/server.ts), not when imported by tests.

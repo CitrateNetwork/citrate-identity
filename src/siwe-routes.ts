@@ -521,7 +521,7 @@ export function mountSiweRoutes(
     }
 
     if (method === 'GET' && path === '/siwe/challenge') {
-      const nonce = nonceStore.issue();
+      const nonce = await nonceStore.issue();
       sendJson(ctx.res, 200, { nonce });
       return; // handled; do not fall through to panva
     }
