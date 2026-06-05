@@ -56,6 +56,10 @@ const LOOPBACK_REDIRECT = `http://127.0.0.1:${PORT}${CALLBACK_PATH}`;
 export const TRUSTED_FIRST_PARTY_CLIENT_IDS: ReadonlySet<string> = new Set([
   'citrate-explorer',
   'citrate-dashboard',
+  // citrate-studio — the native agent-harness shell (Rust + Slint). PUBLIC
+  // native client using the loopback PKCE flow (RFC 8252). First-party,
+  // Citrate-owned end-to-end, so consent is auto-granted like the web RPs.
+  'citrate-studio',
 ]);
 
 /** True iff `clientId` is a Citrate-owned trusted first-party RP (TD-8). */
@@ -367,6 +371,29 @@ export async function buildConfiguration(): Promise<Configuration> {
         // `kyc` is available (advertised below) but NOT required for the
         // dashboard's baseline `openid profile wallet`; offline_access enables
         // the refresh_token grant the same way it does for the explorer.
+        scope: 'openid profile wallet kyc offline_access',
+      },
+      {
+        // citrate-studio — the native agent-harness shell (Rust + Slint).
+        // application_type: 'native' tells panva to apply RFC 8252 loopback
+        // rules: a 127.0.0.1 / localhost redirect matches regardless of the
+        // ephemeral port the app binds at runtime, which is exactly the native
+        // loopback PKCE flow (see ADR-2026-06-04-auth-oidc-siwe in
+        // citrate-studio). PUBLIC client (no secret), PKCE S256 enforced
+        // globally below, rotating refresh tokens via offline_access.
+        client_id: 'citrate-studio',
+        token_endpoint_auth_method: 'none',
+        application_type: 'native',
+        grant_types: ['authorization_code', 'refresh_token'],
+        response_types: ['code'],
+        redirect_uris: [
+          // RFC 8252 loopback — panva matches any ephemeral port for these
+          // 127.0.0.1 / localhost hosts when application_type is 'native'.
+          `http://127.0.0.1${CALLBACK_PATH}`,
+          `http://localhost${CALLBACK_PATH}`,
+          // The fixed-port loopback (shared with the web RPs) as a fallback.
+          LOOPBACK_REDIRECT,
+        ],
         scope: 'openid profile wallet kyc offline_access',
       },
     ],
