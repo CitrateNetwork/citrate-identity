@@ -526,6 +526,19 @@ export async function buildConfiguration(
         .split(',')
         .map((k) => k.trim())
         .filter(Boolean),
+      // panva defaults `_interaction` to `path=/interaction/<uid>` and
+      // `_interaction_resume` to `path=/auth/<uid>`. That breaks every
+      // sign-in flow whose form-submit hits a NON-`/interaction/<uid>/...`
+      // route: a browser respects cookie path, so a `POST /siwe/verify` or
+      // `POST /auth/password/register` from the interaction page arrives
+      // *without* the cookie — `provider.interactionDetails` returns
+      // `undefined`, the route bails with "no active interaction", sign-in
+      // fails. Widening the path to `/` lets the cookie ride every same-
+      // origin request to `auth.citrate.ai`. CSRF defense stays the
+      // standard `HttpOnly` + `Secure` + `SameSite=lax` — `lax` already
+      // blocks cross-origin POST abuse.
+      long: { path: '/' },
+      short: { path: '/' },
     },
     pkce: {
       // PKCE is MANDATORY for every client (red-team security must-have).
