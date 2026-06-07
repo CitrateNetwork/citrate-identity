@@ -444,6 +444,29 @@ h1 {
 @media (prefers-reduced-motion: reduce) {
   * { transition-duration: .001ms !important; }
 }
+
+/* Narrow viewports (phones): 4-column tab row squishes the icons + labels
+   under ~480px. Drop to a 2×2 grid + tighter card padding so the whole
+   card still fits in the viewport without horizontal scroll. */
+@media (max-width: 480px) {
+  .main { padding: 16px 12px; }
+  .card { padding: 20px 18px 18px; }
+  h1 { font-size: 26px; }
+  .lede { font-size: 15px; margin-bottom: 18px; }
+  .tabs {
+    grid-template-columns: repeat(2, 1fr);
+    gap: 4px;
+  }
+  .tabs button { height: 38px; }
+  .field input { font-size: 16px; } /* iOS Safari avoids autozoom at >=16px */
+  .footer-eyebrow { font-size: 10px; }
+}
+
+/* Very narrow (<360px, old/small phones): single column. */
+@media (max-width: 360px) {
+  .tabs { grid-template-columns: 1fr; }
+  .tabs button { height: 36px; }
+}
 </style>
 </head>
 <body>
