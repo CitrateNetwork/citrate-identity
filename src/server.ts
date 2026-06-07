@@ -17,6 +17,7 @@ import { loadAaConfig } from './aa/config.js';
 import { mountStaticAssets } from './static-assets.js';
 import { mountPasswordRoutes } from './auth/password-routes.js';
 import { mountWebauthnRoutes } from './auth/webauthn-routes.js';
+import { mountGoogleRoutes } from './auth/google-routes.js';
 import { initAuthStoresFromEnv } from './auth/stores.js';
 import { rpIdFromIssuer } from './auth/webauthn.js';
 import { initKycStoreFromEnv, getKycStore } from './kyc.js';
@@ -216,8 +217,16 @@ export async function createProvider(
   // (and the matching /auth/google/* routes — follow-up WP) only render
   // when CITRATE_AA_GOOGLE_CLIENT_ID is set. No env wired yet anywhere; the
   // flag is plumbed through so the prod deploy can turn it on later.
+  // Google federation requires BOTH the public client id (UI gate) AND the
+  // server-side secret (route gate). If either is missing the UI renders
+  // the "not enabled" copy and `mountGoogleRoutes` is skipped below — both
+  // must agree or a user clicks "Continue with Google" and hits a 404.
   const googleEnabled =
-    options.googleEnabled ?? Boolean(process.env.CITRATE_AA_GOOGLE_CLIENT_ID);
+    options.googleEnabled ??
+    Boolean(
+      process.env.CITRATE_AA_GOOGLE_CLIENT_ID &&
+        process.env.CITRATE_AA_GOOGLE_CLIENT_SECRET,
+    );
   // Footer build version: read once from package.json. Best-effort so dev/test
   // never crash if the file's missing — we just label the build "dev".
   const version = readPackageVersion();
@@ -248,6 +257,34 @@ export async function createProvider(
       expectedOrigin: issuer,
     },
   });
+
+  // EW-S1 WP-6 slice C — Google federation. Mount the OAuth start +
+  // callback routes ONLY when both the public client id (also the UI
+  // gate) AND the server-side secret are set. Without both, the
+  // interaction page falls back to the "not enabled" copy and these
+  // routes never register (a hit on /auth/google/start gets a 404
+  // from panva's catch-all).
+  const googleClientSecret = process.env.CITRATE_AA_GOOGLE_CLIENT_SECRET;
+  const googleClientId = process.env.CITRATE_AA_GOOGLE_CLIENT_ID;
+  if (googleEnabled && googleClientId && googleClientSecret) {
+    mountGoogleRoutes(provider, {
+      clientId: googleClientId,
+      clientSecret: googleClientSecret,
+      // The redirect URI Google compares byte-for-byte against the OAuth
+      // client's "Authorized redirect URIs" list. ISSUER_URL is
+      // https://auth.citrate.ai in prod and http://localhost:PORT in dev,
+      // so the operator just registers `<ISSUER_URL>/auth/google/callback`
+      // with Google and we mirror that here.
+      redirectUri: `${issuer}/auth/google/callback`,
+    });
+  } else if (googleEnabled && !googleClientSecret) {
+    // eslint-disable-next-line no-console
+    console.warn(
+      '[citrate-identity] CITRATE_AA_GOOGLE_CLIENT_ID is set but ' +
+        'CITRATE_AA_GOOGLE_CLIENT_SECRET is not — Google tab will render as ' +
+        '"not enabled" since the routes were not mounted.',
+    );
+  }
 
   // IDP-KYC: the vendor-webhook stand-in that writes the LIVE KYC claim record
   // into the store /userinfo reads from. Guarded by KYC_WEBHOOK_SECRET; fails

@@ -20,14 +20,23 @@ import { randomUUID } from 'node:crypto';
 import { type PgLike, type UserRecord } from './users-pg.js';
 import { type WebAuthnCredentialRecord } from './webauthn-pg.js';
 
-/** User store shape used by the password + webauthn HTTP routes. */
+/** User store shape used by the password + webauthn + google HTTP routes. */
 export interface UserStore {
   createWithEmailPassword(args: {
     email: string;
     passwordHash: string;
   }): Promise<UserRecord>;
+  createWithGoogle(args: {
+    googleSub: string;
+    email?: string;
+  }): Promise<UserRecord>;
   findById(id: string): Promise<UserRecord | undefined>;
   findByEmail(email: string): Promise<UserRecord | undefined>;
+  findByGoogleSub(googleSub: string): Promise<UserRecord | undefined>;
+  /** Link a Google sub to an existing email-only user (used at OAuth
+   * callback when the Google account matches an existing email but
+   * has no `google_sub` yet). */
+  linkGoogleSub(id: string, googleSub: string): Promise<void>;
 }
 
 /** WebAuthn credential store shape used by the webauthn HTTP routes. */
@@ -61,6 +70,7 @@ function normalizeEmail(email: string): string {
 export class InMemoryUserStore implements UserStore {
   private readonly byId = new Map<string, UserRecord>();
   private readonly byEmail = new Map<string, string>();
+  private readonly byGoogleSub = new Map<string, string>();
 
   async createWithEmailPassword(args: {
     email: string;
@@ -85,6 +95,34 @@ export class InMemoryUserStore implements UserStore {
     return rec;
   }
 
+  async createWithGoogle(args: {
+    googleSub: string;
+    email?: string;
+  }): Promise<UserRecord> {
+    if (this.byGoogleSub.has(args.googleSub)) {
+      throw new Error('google sub already registered');
+    }
+    const id = randomUUID();
+    const email = args.email ? normalizeEmail(args.email) : undefined;
+    if (email && this.byEmail.has(email)) {
+      throw new Error('email already registered');
+    }
+    const now = new Date();
+    const rec: UserRecord = {
+      id,
+      ...(email !== undefined ? { email } : {}),
+      // Google has verified the email by signing the id_token.
+      emailVerified: email !== undefined,
+      googleSub: args.googleSub,
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.byId.set(id, rec);
+    if (email) this.byEmail.set(email, id);
+    this.byGoogleSub.set(args.googleSub, id);
+    return rec;
+  }
+
   async findById(id: string): Promise<UserRecord | undefined> {
     return this.byId.get(id);
   }
@@ -92,6 +130,23 @@ export class InMemoryUserStore implements UserStore {
   async findByEmail(email: string): Promise<UserRecord | undefined> {
     const id = this.byEmail.get(normalizeEmail(email));
     return id ? this.byId.get(id) : undefined;
+  }
+
+  async findByGoogleSub(googleSub: string): Promise<UserRecord | undefined> {
+    const id = this.byGoogleSub.get(googleSub);
+    return id ? this.byId.get(id) : undefined;
+  }
+
+  async linkGoogleSub(id: string, googleSub: string): Promise<void> {
+    const rec = this.byId.get(id);
+    if (!rec) return;
+    if (rec.googleSub !== undefined) {
+      throw new Error('user already has a google sub');
+    }
+    rec.googleSub = googleSub;
+    rec.emailVerified = true;
+    rec.updatedAt = new Date();
+    this.byGoogleSub.set(googleSub, id);
   }
 }
 
