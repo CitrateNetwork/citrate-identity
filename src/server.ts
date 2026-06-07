@@ -14,8 +14,29 @@ import { mountLogoutRoutes } from './logout-routes.js';
 import { mountHttpExtras } from './http-extras.js';
 import { mountAaRoutes } from './aa/aa-routes.js';
 import { loadAaConfig } from './aa/config.js';
+import { mountStaticAssets } from './static-assets.js';
+import { mountPasswordRoutes } from './auth/password-routes.js';
+import { mountWebauthnRoutes } from './auth/webauthn-routes.js';
+import { initAuthStoresFromEnv } from './auth/stores.js';
+import { rpIdFromIssuer } from './auth/webauthn.js';
 import { initKycStoreFromEnv, getKycStore } from './kyc.js';
 import { PgKycStore } from './kyc-pg.js';
+import { resolve } from 'node:path';
+import { readFileSync } from 'node:fs';
+
+/** Resolve the package version once at boot for the interaction-page footer. */
+function readPackageVersion(): string {
+  try {
+    const raw = readFileSync(
+      resolve(process.cwd(), 'package.json'),
+      'utf8',
+    );
+    const parsed = JSON.parse(raw) as { version?: unknown };
+    return typeof parsed.version === 'string' ? parsed.version : 'dev';
+  } catch {
+    return 'dev';
+  }
+}
 import { createCitratePublicClient, type NonceStore } from './siwe.js';
 import { RedisNonceStore } from './nonce-redis.js';
 import { RedisSessionBus, getSessionBus, setSessionBus } from './session-bus.js';
@@ -71,6 +92,13 @@ export interface CreateProviderOptions {
    * fail-closed). Tests pass it explicitly to assert both-connectors rendering.
    */
   walletConnectProjectId?: string;
+  /**
+   * Override the Google federation tab state on the interaction page. Defaults
+   * to `Boolean(CITRATE_AA_GOOGLE_CLIENT_ID)` from the environment. Tests pass
+   * `false` explicitly to keep the assertion deterministic regardless of the
+   * shell environment, and `true` to assert the active-button rendering.
+   */
+  googleEnabled?: boolean;
 }
 
 /**
@@ -128,6 +156,13 @@ export async function createProvider(
   // discovery advertises https URLs and secure cookies behave.
   provider.proxy = true;
 
+  // Branded static assets (brand marks + self-hosted fonts) are served from
+  // /brand/* and /fonts/*. Mounted FIRST so a request for a font/logo never
+  // touches panva's OIDC routing.
+  mountStaticAssets(provider, {
+    publicRoot: resolve(process.cwd(), 'public'),
+  });
+
   // CORS + /health first, so the cross-origin RP routes carry CORS headers and
   // the liveness probe answers without ever touching panva's OIDC routing.
   //   - Redis probe: a cheap round-trip (EXISTS on a throwaway key) against the
@@ -176,13 +211,42 @@ export async function createProvider(
   const walletConnectProjectId =
     options.walletConnectProjectId ?? WALLETCONNECT_PROJECT_ID;
 
+  // Google federation: ungated UI shows the tab unconditionally with a
+  // clear "not enabled" message; the active "Continue with Google" button
+  // (and the matching /auth/google/* routes — follow-up WP) only render
+  // when CITRATE_AA_GOOGLE_CLIENT_ID is set. No env wired yet anywhere; the
+  // flag is plumbed through so the prod deploy can turn it on later.
+  const googleEnabled =
+    options.googleEnabled ?? Boolean(process.env.CITRATE_AA_GOOGLE_CLIENT_ID);
+  // Footer build version: read once from package.json. Best-effort so dev/test
+  // never crash if the file's missing — we just label the build "dev".
+  const version = readPackageVersion();
+
   mountSiweRoutes(provider, {
     expectedDomain: siweDomainFromIssuer(issuer),
     issuer,
     signingJwk: jwks.keys[0],
     publicClient,
+    googleEnabled,
+    version,
     ...(nonceStore ? { nonceStore } : {}),
     ...(walletConnectProjectId ? { walletConnectProjectId } : {}),
+  });
+
+  // EW-S1 WP-6 slice B — email/password + WebAuthn login routes that the
+  // branded /interaction/:uid page calls. Read/write the user + credential
+  // stores wired by initAuthStoresFromEnv (Postgres in prod, in-memory in
+  // dev — same posture as the KYC store).
+  mountPasswordRoutes(provider);
+  const rpId = rpIdFromIssuer(issuer);
+  mountWebauthnRoutes(provider, {
+    rp: {
+      rpId,
+      rpName: 'Citrate',
+      // WebAuthn requires the origin match the issuer host; in dev that's
+      // http://localhost:PORT, in prod https://auth.citrate.ai.
+      expectedOrigin: issuer,
+    },
   });
 
   // IDP-KYC: the vendor-webhook stand-in that writes the LIVE KYC claim record
@@ -226,6 +290,11 @@ async function main(): Promise<void> {
   // the in-memory store. assertProductionConfig above already refused to start in
   // production if DATABASE_URL was unset, so this only falls back to memory in dev.
   await initKycStoreFromEnv(process.env);
+
+  // WP-6 WP-B: install the user + WebAuthn credential stores. Same DATABASE_URL
+  // gate as KYC — Postgres in prod, in-memory in dev — so /auth/password/* and
+  // /auth/webauthn/* persist user records as soon as DATABASE_URL is set.
+  await initAuthStoresFromEnv(process.env);
 
   // HA / restart-safe: install the Redis-backed authority state for this env.
   // With REDIS_URL set this connects one shared client, installs the

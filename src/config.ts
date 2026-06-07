@@ -341,38 +341,54 @@ export function assertProductionConfig(env: ConfigEnv): { warnings: string[] } {
   return { warnings: problems };
 }
 
+/** Matches a canonical lowercase UUID (the shape `users.id` takes). */
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
 /**
- * SIWE account resolver (IDP-S1.5).
+ * Account resolver — both SIWE (wallet-bound) and password / WebAuthn
+ * (user-UUID-bound).
  *
- * With SIWE, the wallet IS the identity: the account id is the EIP-55
- * checksummed wallet address, and the `wallet_address` claim is that same
- * address. There is no off-chain user record to look up — possession of the
- * address (proven by the verified EIP-4361 signature) is the account. Linked
- * (secondary) wallets and the canonical-first-wallet rule arrive in IDP-S3;
- * until then `wallets` is the single-element list of the address itself.
+ * Two `sub` shapes flow through here:
  *
- * Both the OIDC interaction-resume path and the direct-token path call this, so
- * claims are identical regardless of how the login was driven.
+ *   - EIP-55 wallet address (SIWE, IDP-S1.5). The wallet IS the identity:
+ *     `wallet_address` + `wallets` are populated from `sub`. KYC is keyed
+ *     on the address.
+ *   - User UUID (WP-6 email/password + WebAuthn). Identity is the user
+ *     record; no wallet binding yet (the user enrolls a Citrate smart
+ *     wallet later from the dashboard, after which `primary_wallet` will
+ *     populate the wallet claims). `wallet_address` / `wallets` are
+ *     omitted; KYC is not yet looked up for UUID subs (they have no
+ *     wallet to key on).
+ *
+ * Both the OIDC interaction-resume path and the direct-token path call
+ * this, so claims are identical regardless of how the login was driven.
  */
 export const findAccount: FindAccount = (_ctx, sub): Account => {
-  // `sub` is the accountId we set during login = the verified wallet address.
-  const address = isAddress(sub) ? getAddress(sub) : sub;
+  const isUuid = UUID_RE.test(sub);
+  const accountId = isUuid ? sub : isAddress(sub) ? getAddress(sub) : sub;
   return {
-    accountId: address,
+    accountId,
     async claims() {
-      // Read the CURRENT KYC record at claims() time. panva invokes claims()
-      // afresh for every /userinfo call (it is not cached against a token), so a
-      // revoke or an expiry that lands AFTER a token was minted is reflected the
-      // next time an RP calls /userinfo. This is the whole point of IDP-KYC: the
-      // store — not the immutable token — is authoritative for gated actions.
-      const claim = await getKycStore().get(address);
-      // Effective status: an expired or non-`verified` record reports as not
-      // verified; a revoked record reports `revoked`. We never assert verified
-      // for an expired claim (ADR: expiry → re-KYC).
+      if (isUuid) {
+        // UUID-keyed user (password / WebAuthn sign-in). No wallet bound yet —
+        // RP code reading `wallet_address` should treat absence as "user has
+        // no Citrate wallet bound on the issuer record" and surface an
+        // enroll-wallet flow. KYC is not yet keyed on UUIDs (the vendor
+        // attaches verification to a wallet); the dashboard wires that the
+        // moment the user enrolls a wallet.
+        return {
+          sub: accountId,
+          kyc_status: 'none',
+        };
+      }
+      // Wallet-bound path (SIWE). Read the CURRENT KYC record at claims()
+      // time. panva invokes claims() afresh for every /userinfo call (it
+      // is not cached against a token), so a revoke or an expiry that
+      // lands AFTER a token was minted is reflected the next time an RP
+      // calls /userinfo.
+      const claim = await getKycStore().get(accountId);
       const verified = effectiveVerified(claim);
-      // The effective status surfaced to RPs. 'none' = never did KYC; 'expired'
-      // = stored verified but past expires_at (distinct from a vendor 'revoked').
-      // Anything other than the literal 'verified' must NOT pass a gated action.
       const kyc_status: KycStatus | 'none' | 'expired' = claim
         ? verified
           ? 'verified'
@@ -381,14 +397,9 @@ export const findAccount: FindAccount = (_ctx, sub): Account => {
             : claim.status
         : 'none';
       return {
-        sub: address,
-        // Populate the `wallet` scope claims the authority advertises. Before
-        // S1.5 these were declared but never filled; SIWE makes them real.
-        wallet_address: address,
-        wallets: [address],
-        // KYC scope claims — LIVE, read from the store above. `kyc_status` is the
-        // effective state ('none' when the wallet never did KYC); the dates are
-        // the raw vendor record (no PII).
+        sub: accountId,
+        wallet_address: accountId,
+        wallets: [accountId],
         kyc_status,
         kyc_verified_at: claim?.verified_at,
         kyc_expires_at: claim?.expires_at,
