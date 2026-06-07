@@ -29,6 +29,21 @@ services:
       WALLETCONNECT_PROJECT_ID: ${WALLETCONNECT_PROJECT_ID:-}
       KYC_WEBHOOK_SECRET: ${KYC_WEBHOOK_SECRET}
       CITRATE_RPC_URL: ${CITRATE_RPC_URL:-}
+      # EW-S1 AA stack. When CITRATE_AA_FACTORY is set, `server.ts`
+      # mounts `/aa/*` routes (predict address, enroll validator, list
+      # validators) via `mountAaRoutes`. CITRATE_AA_KERNEL_IMPL is the
+      # legacy alias for CITRATE_AA_WALLET_IMPL the AA config still
+      # checks at boot.
+      CITRATE_AA_ENTRY_POINT: ${CITRATE_AA_ENTRY_POINT:-}
+      CITRATE_AA_FACTORY: ${CITRATE_AA_FACTORY:-}
+      CITRATE_AA_WALLET_IMPL: ${CITRATE_AA_WALLET_IMPL:-}
+      CITRATE_AA_KERNEL_IMPL: ${CITRATE_AA_KERNEL_IMPL:-${CITRATE_AA_WALLET_IMPL:-}}
+      CITRATE_AA_PAYMASTER: ${CITRATE_AA_PAYMASTER:-}
+      CITRATE_AA_WEBAUTHN_VALIDATOR: ${CITRATE_AA_WEBAUTHN_VALIDATOR:-}
+      CITRATE_AA_ECDSA_VALIDATOR: ${CITRATE_AA_ECDSA_VALIDATOR:-}
+      CITRATE_AA_GUARDIAN_RECOVERY: ${CITRATE_AA_GUARDIAN_RECOVERY:-}
+      CITRATE_AA_IDENTITY_SIGNER_ADDR: ${CITRATE_AA_IDENTITY_SIGNER_ADDR:-}
+      CITRATE_AA_IDENTITY_SIGNER_KEY: ${CITRATE_AA_IDENTITY_SIGNER_KEY:-}
       # Point the app at the in-network postgres/redis services. The credentials
       # come from the same env vars the postgres/redis services consume below.
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
