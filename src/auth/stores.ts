@@ -30,6 +30,13 @@ export interface UserStore {
     googleSub: string;
     email?: string;
   }): Promise<UserRecord>;
+  /**
+   * Create a brand-new account with no email/password/Google federation,
+   * intended for a first-time passkey signup (WP-A). The caller is
+   * expected to immediately insert a WebAuthn credential bound to the
+   * returned user id; until that succeeds the row is dangling.
+   */
+  createWithPasskey(): Promise<UserRecord>;
   findById(id: string): Promise<UserRecord | undefined>;
   findByEmail(email: string): Promise<UserRecord | undefined>;
   findByGoogleSub(googleSub: string): Promise<UserRecord | undefined>;
@@ -120,6 +127,19 @@ export class InMemoryUserStore implements UserStore {
     this.byId.set(id, rec);
     if (email) this.byEmail.set(email, id);
     this.byGoogleSub.set(args.googleSub, id);
+    return rec;
+  }
+
+  async createWithPasskey(): Promise<UserRecord> {
+    const id = randomUUID();
+    const now = new Date();
+    const rec: UserRecord = {
+      id,
+      emailVerified: false,
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.byId.set(id, rec);
     return rec;
   }
 

@@ -503,6 +503,7 @@ h1 {
         <div class="actions">
           <button id="signin-passkey" class="btn primary" type="button">Continue with passkey</button>
         </div>
+        <button id="signup-passkey" class="altlink" type="button">First time? Register a new passkey.</button>
       </div>
 
       <!-- Email / password panel. -->
@@ -659,6 +660,70 @@ function serializeAssertion(c) {
     clientExtensionResults: c.getClientExtensionResults ? c.getClientExtensionResults() : {},
   };
 }
+function serializeAttestation(c) {
+  return {
+    id: c.id,
+    rawId: bufToB64u(c.rawId),
+    type: c.type,
+    response: {
+      clientDataJSON: bufToB64u(c.response.clientDataJSON),
+      attestationObject: bufToB64u(c.response.attestationObject),
+      transports: typeof c.response.getTransports === 'function' ? c.response.getTransports() : [],
+    },
+    clientExtensionResults: c.getClientExtensionResults ? c.getClientExtensionResults() : {},
+  };
+}
+
+// --- PASSKEY SIGNUP flow (/auth/webauthn/signup-{options,verify}). ---
+const passkeySignupBtn = document.getElementById('signup-passkey');
+passkeySignupBtn.addEventListener('click', async () => {
+  passkeySignupBtn.disabled = true;
+  try {
+    if (!window.PublicKeyCredential) {
+      setStatus('This browser does not support passkeys.', true);
+      passkeySignupBtn.disabled = false; return;
+    }
+    setStatus('Asking your device to create a new passkey…');
+    const optsRes = await fetch('/auth/webauthn/signup-options', {
+      method: 'POST', credentials: 'same-origin',
+      headers: { 'content-type': 'application/json' }, body: '{}',
+    });
+    if (!optsRes.ok) {
+      const err = await optsRes.json().catch(() => ({}));
+      setStatus('Could not start passkey signup: ' + (err.reason || optsRes.status), true);
+      passkeySignupBtn.disabled = false; return;
+    }
+    const options = await optsRes.json();
+    const publicKey = {
+      ...options,
+      challenge: b64uToBuf(options.challenge),
+      user: { ...options.user, id: b64uToBuf(options.user.id) },
+      excludeCredentials: (options.excludeCredentials || []).map((c) => ({ ...c, id: b64uToBuf(c.id) })),
+    };
+    const attestation = await navigator.credentials.create({ publicKey });
+    if (!attestation) {
+      setStatus('No credential returned.', true);
+      passkeySignupBtn.disabled = false; return;
+    }
+    const response = serializeAttestation(attestation);
+    setStatus('Verifying…');
+    const verifyRes = await fetch('/auth/webauthn/signup-verify', {
+      method: 'POST', credentials: 'same-origin',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ response }),
+    });
+    const result = await verifyRes.json();
+    if (!verifyRes.ok || !result.redirectTo) {
+      setStatus('Passkey signup failed: ' + (result.reason || result.error || verifyRes.status), true);
+      passkeySignupBtn.disabled = false; return;
+    }
+    setStatus('Account created. Redirecting…');
+    window.location = result.redirectTo;
+  } catch (err) {
+    setStatus('Error: ' + describeError(err), true);
+    passkeySignupBtn.disabled = false;
+  }
+});
 
 // --- EMAIL / PASSWORD flow (/auth/password/{login,register}). ---
 const pwForm = document.getElementById('form-password');

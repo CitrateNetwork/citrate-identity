@@ -136,6 +136,23 @@ export class PgUserStore {
     return rowToRecord(res.rows[0] as RawRow);
   }
 
+  /**
+   * Create a passkey-only user (no email, no password, no Google federation).
+   * Used by WP-A's `/auth/webauthn/signup-verify` for first-time enrollment;
+   * the caller MUST insert the WebAuthn credential atomically afterwards.
+   */
+  async createWithPasskey(): Promise<UserRecord> {
+    const id = randomUUID();
+    const res = await this.pool.query(
+      `INSERT INTO users (id)
+       VALUES ($1)
+       RETURNING id, email, email_verified, password_hash, google_sub,
+                 primary_wallet, legacy_siwe_eoa, created_at, updated_at`,
+      [id],
+    );
+    return rowToRecord(res.rows[0] as RawRow);
+  }
+
   /** Create a SIWE-only user (no email/password, only an EOA bind). */
   async createWithSiwe(args: { eoa: string }): Promise<UserRecord> {
     const id = randomUUID();

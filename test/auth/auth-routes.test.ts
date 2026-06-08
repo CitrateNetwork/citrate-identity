@@ -287,6 +287,120 @@ describe('POST /auth/webauthn/authenticate-options', () => {
   });
 });
 
+describe('POST /auth/webauthn/signup-* (WP-A passkey signup)', () => {
+  let h: Harness;
+  beforeAll(async () => {
+    h = await listenProvider();
+  });
+  afterAll(async () => {
+    await closeServer(h.server);
+  });
+
+  it('signup-options returns registration options with a base64url challenge and a server-side user.id', async () => {
+    const jar = await startInteraction(h.baseUrl);
+    const res = await fetch(`${h.baseUrl}/auth/webauthn/signup-options`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', cookie: jar.header() },
+      body: '{}',
+      redirect: 'manual',
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      challenge: string;
+      rp: { id: string; name: string };
+      user: { id: string; name: string; displayName: string };
+      pubKeyCredParams: unknown[];
+    };
+    expect(body.challenge).toMatch(/^[A-Za-z0-9_-]+$/);
+    expect(body.challenge.length).toBeGreaterThan(0);
+    expect(typeof body.user.id).toBe('string');
+    expect(body.user.id.length).toBeGreaterThan(0);
+    expect(body.user.name).toBe('New Citrate user');
+    expect(Array.isArray(body.pubKeyCredParams)).toBe(true);
+  });
+
+  it('signup-options rejects without an active interaction cookie (400)', async () => {
+    const res = await fetch(`${h.baseUrl}/auth/webauthn/signup-options`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{}',
+      redirect: 'manual',
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { reason: string };
+    expect(body.reason).toBe('no active interaction');
+  });
+
+  it('signup-verify rejects when no challenge is in flight (400)', async () => {
+    // Fresh interaction, no signup-options call → no pending challenge.
+    const jar = await startInteraction(h.baseUrl);
+    const res = await fetch(`${h.baseUrl}/auth/webauthn/signup-verify`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', cookie: jar.header() },
+      body: JSON.stringify({ response: { id: 'whatever' } }),
+      redirect: 'manual',
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { reason: string };
+    expect(body.reason).toBe('no challenge in flight (start over)');
+  });
+
+  it('signup-verify rejects a missing response body (400 after starting options)', async () => {
+    const jar = await startInteraction(h.baseUrl);
+    const opts = await fetch(`${h.baseUrl}/auth/webauthn/signup-options`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', cookie: jar.header() },
+      body: '{}',
+      redirect: 'manual',
+    });
+    expect(opts.status).toBe(200);
+    const res = await fetch(`${h.baseUrl}/auth/webauthn/signup-verify`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', cookie: jar.header() },
+      body: JSON.stringify({ /* no response */ deviceLabel: 'Pixel 8' }),
+      redirect: 'manual',
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { reason: string };
+    expect(body.reason).toBe('response is required');
+  });
+
+  it('signup-verify rejects an unverifiable registration response (400 invalid_grant)', async () => {
+    // The challenge will be present (signup-options call below), but the
+    // RegistrationResponseJSON we send is a synthetic shape that
+    // @simplewebauthn/server cannot verify — covers the verifyRegistration
+    // throw path → 400 invalid_grant.
+    const jar = await startInteraction(h.baseUrl);
+    const opts = await fetch(`${h.baseUrl}/auth/webauthn/signup-options`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', cookie: jar.header() },
+      body: '{}',
+      redirect: 'manual',
+    });
+    expect(opts.status).toBe(200);
+    const bogusResponse = {
+      id: 'AAAA',
+      rawId: 'AAAA',
+      type: 'public-key',
+      response: {
+        clientDataJSON: 'AAAA',
+        attestationObject: 'AAAA',
+        transports: ['internal'],
+      },
+      clientExtensionResults: {},
+    };
+    const res = await fetch(`${h.baseUrl}/auth/webauthn/signup-verify`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', cookie: jar.header() },
+      body: JSON.stringify({ response: bogusResponse }),
+      redirect: 'manual',
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe('invalid_grant');
+  });
+});
+
 describe('static assets (/brand, /fonts)', () => {
   let h: Harness;
   beforeAll(async () => {
