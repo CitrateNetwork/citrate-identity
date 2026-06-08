@@ -1,7 +1,8 @@
 /**
- * WebAuthn (passkey) HTTP routes (WP-6 slice B of EW-S1).
+ * WebAuthn (passkey) HTTP routes (WP-6 slice B of EW-S1 + WP-A of the
+ * portal registration ladder).
  *
- * Four POST endpoints mounted on the provider's Koa app:
+ * Six POST endpoints mounted on the provider's Koa app:
  *
  *   POST /auth/webauthn/authenticate-options
  *     → start a sign-in: generate options with allowCredentials=[] (the
@@ -12,6 +13,18 @@
  *     → finish sign-in: replay the stored challenge, verify the assertion,
  *       look up the credential → user, drive provider.interactionResult.
  *       Returns { redirectTo }.
+ *
+ *   POST /auth/webauthn/signup-options
+ *     → start a first-time passkey enrollment: mint a server-side pending
+ *       user UUID, generate registration options bound to it, store
+ *       challenge + pending uid under `signup:<interactionUid>`. Does NOT
+ *       require an existing accountId — this is how a fresh user gets one.
+ *
+ *   POST /auth/webauthn/signup-verify   { response, deviceLabel? }
+ *     → finish first-time enrollment: replay the stored challenge, verify
+ *       the registration, create the user + credential atomically, then
+ *       drive provider.interactionResult so the new user lands signed-in.
+ *       Returns 201 { userId, credentialId, redirectTo }.
  *
  *   POST /auth/webauthn/register-options
  *     → start "add a passkey" (post-signin): the caller MUST already have
@@ -29,6 +42,7 @@
  * mirror of {@link RedisNonceStore}.
  */
 
+import { randomUUID } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type Provider from 'oidc-provider';
 import type {
@@ -250,6 +264,111 @@ export function mountWebauthnRoutes(
         { mergeWithLastSubmission: false },
       );
       respondJson(ctx.res, 200, { userId: user.id, redirectTo });
+      return;
+    }
+
+    // ── Signup (first-time enrollment, no prior accountId) ──────────────
+    // signup-options + signup-verify are how a brand-new user gets an
+    // account by attesting a passkey. We mint a pending user UUID at
+    // signup-options time so the authenticator's stored userHandle matches
+    // the row we will eventually create.
+    if (ctx.path === '/auth/webauthn/signup-options') {
+      const pendingUserId = randomUUID();
+      const opts = await buildRegistrationOptions({
+        rp,
+        userId: pendingUserId,
+        userName: 'New Citrate user',
+        userDisplayName: 'New Citrate user',
+      });
+      challenges.put(`signup:${interactionUid}`, opts.challenge, pendingUserId);
+      respondJson(ctx.res, 200, opts);
+      return;
+    }
+
+    if (ctx.path === '/auth/webauthn/signup-verify') {
+      const pending = challenges.take(`signup:${interactionUid}`);
+      if (!pending || !pending.userId) {
+        respondJson(ctx.res, 400, {
+          error: 'invalid_request',
+          reason: 'no challenge in flight (start over)',
+        });
+        return;
+      }
+      let body: { response?: unknown; deviceLabel?: unknown };
+      try {
+        body = (await readJson(ctx.req)) as typeof body;
+      } catch {
+        respondJson(ctx.res, 400, {
+          error: 'invalid_request',
+          reason: 'bad_body',
+        });
+        return;
+      }
+      const response = body.response as RegistrationResponseJSON | undefined;
+      if (!response) {
+        respondJson(ctx.res, 400, {
+          error: 'invalid_request',
+          reason: 'response is required',
+        });
+        return;
+      }
+
+      let verified;
+      try {
+        verified = await verifyRegistration({
+          rp,
+          expectedChallenge: pending.challenge,
+          response,
+        });
+      } catch (err) {
+        respondJson(ctx.res, 400, {
+          error: 'invalid_grant',
+          reason: (err as Error).message,
+        });
+        return;
+      }
+
+      const credStore = getWebAuthnStore();
+      const collision = await credStore.findByCredentialId(verified.credentialId);
+      if (collision) {
+        respondJson(ctx.res, 409, {
+          error: 'conflict',
+          reason: 'credential already registered',
+        });
+        return;
+      }
+
+      const userStore = getUserStore();
+      const user = await userStore.createWithPasskey();
+      const rec = await credStore.insertCredential({
+        userId: user.id,
+        credentialId: verified.credentialId,
+        publicKeyCose: verified.publicKeyCose,
+        signCount: verified.signCount,
+        transports: verified.transports,
+        ...(verified.aaguid !== undefined ? { aaguid: verified.aaguid } : {}),
+        ...(typeof body.deviceLabel === 'string'
+          ? { deviceLabel: body.deviceLabel }
+          : {}),
+      });
+
+      const redirectTo = await provider.interactionResult(
+        ctx.req,
+        ctx.res,
+        {
+          login: {
+            accountId: user.id,
+            amr: ['webauthn'],
+            acr: 'urn:citrate:webauthn',
+          },
+        },
+        { mergeWithLastSubmission: false },
+      );
+      respondJson(ctx.res, 201, {
+        userId: user.id,
+        credentialId: rec.id,
+        redirectTo,
+      });
       return;
     }
 

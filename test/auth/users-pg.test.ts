@@ -60,6 +60,19 @@ describe('PgUserStore against pg-mem', () => {
     expect(byGoogle?.id).toBe(u.id);
   });
 
+  it('createWithPasskey inserts a passkey-only user with no email/password', async () => {
+    const store = new PgUserStore(ctx.makePool());
+    await store.ensureSchema();
+    const u = await store.createWithPasskey();
+    expect(u.id).toMatch(/^[0-9a-f]{8}-/);
+    expect(u.email).toBeUndefined();
+    expect(u.emailVerified).toBe(false);
+    expect(u.passwordHash).toBeUndefined();
+    expect(u.googleSub).toBeUndefined();
+    const found = await store.findById(u.id);
+    expect(found?.id).toBe(u.id);
+  });
+
   it('createWithSiwe normalizes EOA lowercase', async () => {
     const store = new PgUserStore(ctx.makePool());
     await store.ensureSchema();
