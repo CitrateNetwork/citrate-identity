@@ -44,6 +44,12 @@ services:
       CITRATE_AA_GUARDIAN_RECOVERY: ${CITRATE_AA_GUARDIAN_RECOVERY:-}
       CITRATE_AA_IDENTITY_SIGNER_ADDR: ${CITRATE_AA_IDENTITY_SIGNER_ADDR:-}
       CITRATE_AA_IDENTITY_SIGNER_KEY: ${CITRATE_AA_IDENTITY_SIGNER_KEY:-}
+      # Google federation. When BOTH are set, server.ts mounts /auth/google/*
+      # and the interaction page renders the "Continue with Google" button
+      # (else the Google tab shows a "not enabled" note). Redirect URI to
+      # register in Google Cloud Console: ${ISSUER_URL}/auth/google/callback
+      CITRATE_AA_GOOGLE_CLIENT_ID: ${CITRATE_AA_GOOGLE_CLIENT_ID:-}
+      CITRATE_AA_GOOGLE_CLIENT_SECRET: ${CITRATE_AA_GOOGLE_CLIENT_SECRET:-}
       # Point the app at the in-network postgres/redis services. The credentials
       # come from the same env vars the postgres/redis services consume below.
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}

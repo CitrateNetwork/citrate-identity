@@ -515,7 +515,8 @@ h1 {
           </div>
           <div class="field">
             <label for="pw-password">Password</label>
-            <input id="pw-password" name="password" type="password" autocomplete="current-password" required />
+            <input id="pw-password" name="password" type="password" autocomplete="current-password" minlength="8" required />
+            <p class="note" style="margin-top:6px">New here? Use at least 8 characters, then tap <strong>Register</strong> below.</p>
           </div>
           <div class="actions">
             <button id="signin-password" class="btn primary" type="submit">Sign in</button>
@@ -757,6 +758,7 @@ pwRegister.addEventListener('click', async () => {
   const email = document.getElementById('pw-email').value.trim();
   const password = document.getElementById('pw-password').value;
   if (!email || !password) { setStatus('Email and password are required to register.', true); pwRegister.disabled = false; return; }
+  if (password.length < 8) { setStatus('Password must be at least 8 characters.', true); pwRegister.disabled = false; return; }
   setStatus('Creating your account…');
   const r = await pwPost('/auth/password/register', email, password);
   if (!r.ok || !r.body.redirectTo) {
@@ -780,6 +782,28 @@ function setSiweBusy(busy) {
   injectedBtn.disabled = busy;
   if (wcBtn) wcBtn.disabled = busy;
 }
+// EIP-55 checksum the address. The server parses the SIWE message with
+// \`new SiweMessage(...)\` (@spruceid/siwe-parser), which REJECTS a non-checksummed
+// address as a "malformed message". Many wallets (and WalletConnect in particular)
+// return a lowercase address, so we must checksum it before it goes into the
+// signed message. Pure-JS keccak (no bundler / no viem in the page) via esm.sh.
+let _keccak = null;
+async function toChecksumAddress(addr) {
+  const a = String(addr).toLowerCase().replace(/^0x/, '');
+  if (!/^[0-9a-f]{40}$/.test(a)) return addr; // not an address — leave as-is
+  if (!_keccak) {
+    const mod = await import('https://esm.sh/@noble/hashes@1.3.3/sha3');
+    _keccak = mod.keccak_256;
+  }
+  const hash = _keccak(new TextEncoder().encode(a)); // keccak256 of the ascii lowercase hex
+  let hex = '';
+  for (const b of hash) hex += b.toString(16).padStart(2, '0');
+  let out = '0x';
+  for (let i = 0; i < 40; i++) {
+    out += parseInt(hex[i], 16) >= 8 ? a[i].toUpperCase() : a[i];
+  }
+  return out;
+}
 function buildSiweMessage(address, nonce) {
   const issuedAt = new Date();
   const expirationTime = new Date(issuedAt.getTime() + 10 * 60 * 1000);
@@ -799,6 +823,8 @@ function buildSiweMessage(address, nonce) {
   return lines.join('\\n');
 }
 async function completeSiwe(provider, address) {
+  // Checksum the address so the signed message parses server-side (EIP-55).
+  address = await toChecksumAddress(address);
   setStatus('Fetching challenge…');
   const challengeRes = await fetch('/siwe/challenge', { credentials: 'same-origin' });
   const { nonce } = await challengeRes.json();
