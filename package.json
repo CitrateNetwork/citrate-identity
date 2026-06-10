@@ -15,6 +15,8 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@node-rs/argon2": "^2.0.2",
+    "@simplewebauthn/server": "^13.3.1",
     "ioredis": "^5.11.1",
     "jose": "^5.9.6",
     "oidc-provider": "^8.5.3",

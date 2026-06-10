@@ -41,6 +41,10 @@ RUN mkdir -p /app/.keys && chown -R node:node /app
 COPY --chown=node:node package.json package-lock.json ./
 COPY --from=deps --chown=node:node /app/node_modules ./node_modules
 COPY --from=builder --chown=node:node /app/dist ./dist
+# WP-6 slice B brand assets + self-hosted fonts the interaction page
+# references at /brand/* and /fonts/*. Without these the page falls
+# back to system fonts and shows broken-image icons for the wordmarks.
+COPY --chown=node:node public ./public
 
 USER node
 

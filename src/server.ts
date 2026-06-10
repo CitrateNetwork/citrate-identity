@@ -12,8 +12,32 @@ import { mountSiweRoutes } from './siwe-routes.js';
 import { mountKycRoutes } from './kyc-routes.js';
 import { mountLogoutRoutes } from './logout-routes.js';
 import { mountHttpExtras } from './http-extras.js';
+import { mountAaRoutes } from './aa/aa-routes.js';
+import { loadAaConfig } from './aa/config.js';
+import { mountStaticAssets } from './static-assets.js';
+import { mountPasswordRoutes } from './auth/password-routes.js';
+import { mountWebauthnRoutes } from './auth/webauthn-routes.js';
+import { mountGoogleRoutes } from './auth/google-routes.js';
+import { initAuthStoresFromEnv } from './auth/stores.js';
+import { rpIdFromIssuer } from './auth/webauthn.js';
 import { initKycStoreFromEnv, getKycStore } from './kyc.js';
 import { PgKycStore } from './kyc-pg.js';
+import { resolve } from 'node:path';
+import { readFileSync } from 'node:fs';
+
+/** Resolve the package version once at boot for the interaction-page footer. */
+function readPackageVersion(): string {
+  try {
+    const raw = readFileSync(
+      resolve(process.cwd(), 'package.json'),
+      'utf8',
+    );
+    const parsed = JSON.parse(raw) as { version?: unknown };
+    return typeof parsed.version === 'string' ? parsed.version : 'dev';
+  } catch {
+    return 'dev';
+  }
+}
 import { createCitratePublicClient, type NonceStore } from './siwe.js';
 import { RedisNonceStore } from './nonce-redis.js';
 import { RedisSessionBus, getSessionBus, setSessionBus } from './session-bus.js';
@@ -76,6 +100,13 @@ export interface CreateProviderOptions {
    * authorization-code flow and never need this; tests of the direct path opt in.
    */
   allowDirectTokenGrant?: boolean;
+  /**
+   * Override the Google federation tab state on the interaction page. Defaults
+   * to `Boolean(CITRATE_AA_GOOGLE_CLIENT_ID)` from the environment. Tests pass
+   * `false` explicitly to keep the assertion deterministic regardless of the
+   * shell environment, and `true` to assert the active-button rendering.
+   */
+  googleEnabled?: boolean;
 }
 
 /**
@@ -133,6 +164,13 @@ export async function createProvider(
   // discovery advertises https URLs and secure cookies behave.
   provider.proxy = true;
 
+  // Branded static assets (brand marks + self-hosted fonts) are served from
+  // /brand/* and /fonts/*. Mounted FIRST so a request for a font/logo never
+  // touches panva's OIDC routing.
+  mountStaticAssets(provider, {
+    publicRoot: resolve(process.cwd(), 'public'),
+  });
+
   // CORS + /health first, so the cross-origin RP routes carry CORS headers and
   // the liveness probe answers without ever touching panva's OIDC routing.
   //   - Redis probe: a cheap round-trip (EXISTS on a throwaway key) against the
@@ -181,15 +219,80 @@ export async function createProvider(
   const walletConnectProjectId =
     options.walletConnectProjectId ?? WALLETCONNECT_PROJECT_ID;
 
+  // Google federation: ungated UI shows the tab unconditionally with a
+  // clear "not enabled" message; the active "Continue with Google" button
+  // (and the matching /auth/google/* routes — follow-up WP) only render
+  // when CITRATE_AA_GOOGLE_CLIENT_ID is set. No env wired yet anywhere; the
+  // flag is plumbed through so the prod deploy can turn it on later.
+  // Google federation requires BOTH the public client id (UI gate) AND the
+  // server-side secret (route gate). If either is missing the UI renders
+  // the "not enabled" copy and `mountGoogleRoutes` is skipped below — both
+  // must agree or a user clicks "Continue with Google" and hits a 404.
+  const googleEnabled =
+    options.googleEnabled ??
+    Boolean(
+      process.env.CITRATE_AA_GOOGLE_CLIENT_ID &&
+        process.env.CITRATE_AA_GOOGLE_CLIENT_SECRET,
+    );
+  // Footer build version: read once from package.json. Best-effort so dev/test
+  // never crash if the file's missing — we just label the build "dev".
+  const version = readPackageVersion();
+
   mountSiweRoutes(provider, {
     expectedDomain: siweDomainFromIssuer(issuer),
     issuer,
     signingJwk: jwks.keys[0],
     publicClient,
+    googleEnabled,
+    version,
     ...(nonceStore ? { nonceStore } : {}),
     ...(walletConnectProjectId ? { walletConnectProjectId } : {}),
     ...(options.allowDirectTokenGrant ? { allowDirectTokenGrant: true } : {}),
   });
+
+  // EW-S1 WP-6 slice B — email/password + WebAuthn login routes that the
+  // branded /interaction/:uid page calls. Read/write the user + credential
+  // stores wired by initAuthStoresFromEnv (Postgres in prod, in-memory in
+  // dev — same posture as the KYC store).
+  mountPasswordRoutes(provider);
+  const rpId = rpIdFromIssuer(issuer);
+  mountWebauthnRoutes(provider, {
+    rp: {
+      rpId,
+      rpName: 'Citrate',
+      // WebAuthn requires the origin match the issuer host; in dev that's
+      // http://localhost:PORT, in prod https://auth.citrate.ai.
+      expectedOrigin: issuer,
+    },
+  });
+
+  // EW-S1 WP-6 slice C — Google federation. Mount the OAuth start +
+  // callback routes ONLY when both the public client id (also the UI
+  // gate) AND the server-side secret are set. Without both, the
+  // interaction page falls back to the "not enabled" copy and these
+  // routes never register (a hit on /auth/google/start gets a 404
+  // from panva's catch-all).
+  const googleClientSecret = process.env.CITRATE_AA_GOOGLE_CLIENT_SECRET;
+  const googleClientId = process.env.CITRATE_AA_GOOGLE_CLIENT_ID;
+  if (googleEnabled && googleClientId && googleClientSecret) {
+    mountGoogleRoutes(provider, {
+      clientId: googleClientId,
+      clientSecret: googleClientSecret,
+      // The redirect URI Google compares byte-for-byte against the OAuth
+      // client's "Authorized redirect URIs" list. ISSUER_URL is
+      // https://auth.citrate.ai in prod and http://localhost:PORT in dev,
+      // so the operator just registers `<ISSUER_URL>/auth/google/callback`
+      // with Google and we mirror that here.
+      redirectUri: `${issuer}/auth/google/callback`,
+    });
+  } else if (googleEnabled && !googleClientSecret) {
+    // eslint-disable-next-line no-console
+    console.warn(
+      '[citrate-identity] CITRATE_AA_GOOGLE_CLIENT_ID is set but ' +
+        'CITRATE_AA_GOOGLE_CLIENT_SECRET is not — Google tab will render as ' +
+        '"not enabled" since the routes were not mounted.',
+    );
+  }
 
   // IDP-KYC: the vendor-webhook stand-in that writes the LIVE KYC claim record
   // into the store /userinfo reads from. Guarded by KYC_WEBHOOK_SECRET; fails
@@ -202,6 +305,16 @@ export async function createProvider(
   // ends its session, and publishes a `logout` on the session bus; GET
   // /sessions/events streams those events to subscribed relying parties (SSE).
   mountLogoutRoutes(provider);
+
+  // EW-S1 WP-5: /aa/* — smart-wallet address prediction + deploy-permit
+  // signing for the Citrate ERC-4337 stack. Only enabled when the AA env
+  // is set (CITRATE_AA_FACTORY etc.); production refuses to boot via
+  // loadAaConfig if the env is partial.
+  if (process.env.CITRATE_AA_FACTORY) {
+    const aaCfg = loadAaConfig(process.env);
+    const rpc = process.env.CITRATE_AA_RPC_URL ?? process.env.CITRATE_RPC_URL ?? 'https://rpc.citrate.ai';
+    mountAaRoutes(provider, { config: aaCfg, rpcUrl: rpc });
+  }
 
   return provider;
 }
@@ -222,6 +335,11 @@ async function main(): Promise<void> {
   // the in-memory store. assertProductionConfig above already refused to start in
   // production if DATABASE_URL was unset, so this only falls back to memory in dev.
   await initKycStoreFromEnv(process.env);
+
+  // WP-6 WP-B: install the user + WebAuthn credential stores. Same DATABASE_URL
+  // gate as KYC — Postgres in prod, in-memory in dev — so /auth/password/* and
+  // /auth/webauthn/* persist user records as soon as DATABASE_URL is set.
+  await initAuthStoresFromEnv(process.env);
 
   // HA / restart-safe: install the Redis-backed authority state for this env.
   // With REDIS_URL set this connects one shared client, installs the
