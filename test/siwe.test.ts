@@ -35,7 +35,9 @@ beforeAll(async () => {
 
   baseUrl = `http://127.0.0.1:${port}`;
   host = `127.0.0.1:${port}`;
-  const provider = await createProvider(baseUrl);
+  // This suite exercises the direct-token (Path B) path explicitly, so it opts
+  // into the out-of-band grant that is OFF by default (FUA-IDENTITY-01).
+  const provider = await createProvider(baseUrl, { allowDirectTokenGrant: true });
   server = createServer(provider.callback());
   await new Promise<void>((res) => server.listen(port, '127.0.0.1', res));
 });
@@ -70,7 +72,10 @@ function buildMessage(opts: {
     chainId: opts.chainId ?? CITRATE_CHAIN_ID,
     nonce: opts.nonce,
     issuedAt: new Date().toISOString(),
-    expirationTime: opts.expirationTime,
+    // A valid message carries an Expiration Time (required since FUA-IDENTITY-09).
+    // Default to 10 min out (matching the interaction page) unless overridden.
+    expirationTime:
+      opts.expirationTime ?? new Date(Date.now() + 10 * 60 * 1000).toISOString(),
   });
 }
 
@@ -251,6 +256,7 @@ describe('SIWE verification core (unit)', () => {
       version: '1',
       chainId: CITRATE_CHAIN_ID,
       nonce,
+      expirationTime: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
     });
     const message = siwe.prepareMessage();
     // Any non-recoverable signature blob; the contract (mock) is authoritative.

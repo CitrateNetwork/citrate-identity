@@ -76,6 +76,17 @@ export interface SiweRouteOptions {
    * never blocked by a missing project id (not fail-closed).
    */
   walletConnectProjectId?: string;
+  /**
+   * FUA-IDENTITY-01 (SECREM-02): enable the out-of-band "Path B" direct ID-token
+   * mint on `/siwe/verify` (a token signed by the authority JWKS for a caller
+   * with NO active OIDC interaction — no PKCE, no consent, no redirect_uri). This
+   * sidesteps the authorization-code machinery, so it is **disabled by default**
+   * (fail closed). Enable ONLY for a deliberate headless/server integration, in
+   * which case {@link audience} MUST name a registered first-party client so the
+   * minted token is bound to a real RP. Browser RPs use the code flow (Path A)
+   * and never need this.
+   */
+  allowDirectTokenGrant?: boolean;
 }
 
 /** Read a JSON request body with a hard size cap (anti-DoS). */
@@ -120,6 +131,53 @@ function escapeHtml(value: string): string {
 }
 
 /**
+ * Serialize a value as JSON safe to embed inside an inline `<script>` block
+ * (FUA-IDENTITY-07). `JSON.stringify` does NOT escape `<`, `>`, `&`, U+2028, or
+ * U+2029, so a value containing `</script>` would break out of the script
+ * context. We escape those to their `\uXXXX` forms — still valid JS string
+ * content, but inert as markup — so a hostile `client_id` (or any embedded
+ * value) cannot inject script. Mirrors the standard "JSON for `<script>`" guard.
+ */
+export function jsonForScript(value: unknown): string {
+  return JSON.stringify(value)
+    .replace(/</g, '\\u003c')
+    .replace(/>/g, '\\u003e')
+    .replace(/&/g, '\\u0026')
+    .replace(/\u2028/g, '\\u2028')
+    .replace(/\u2029/g, '\\u2029');
+}
+
+/**
+ * Reject cross-site state-changing POSTs (FUA-IDENTITY-04 — login-CSRF /
+ * forced-consent). The SIWE interaction (`/siwe/verify` Path A) and
+ * `/consent/approve` mutate the cookie-bound interaction, so a cross-site POST
+ * carrying the victim's interaction cookie must be refused. Returns `true` iff
+ * the request is safe to act on:
+ *   - `Sec-Fetch-Site` present (modern browsers, unforgeable by page JS): allow
+ *     only `same-origin` / `none` (a top-level same-site navigation).
+ *   - else fall back to `Origin`: allow only the authority's own origin.
+ *   - no browser signals at all → a non-browser client (no ambient cookie / not
+ *     a CSRF vector) → allow, so API clients and tests are unaffected.
+ * RP origins are intentionally NOT allowed here: these are the authority's own
+ * interaction pages, never driven cross-origin by an RP.
+ */
+function isSameOriginRequest(req: IncomingMessage, issuerOrigin: string): boolean {
+  const header = (name: string): string | undefined => {
+    const v = req.headers[name];
+    return Array.isArray(v) ? v[0] : v;
+  };
+  const secFetchSite = header('sec-fetch-site');
+  if (secFetchSite !== undefined) {
+    return secFetchSite === 'same-origin' || secFetchSite === 'none';
+  }
+  const origin = header('origin');
+  if (origin !== undefined) {
+    return origin === issuerOrigin;
+  }
+  return true; // no browser signals → not a browser CSRF vector
+}
+
+/**
  * The SIWE interaction page (Path A). panva 303s the browser here for an
  * in-flight `/auth` interaction. The page:
  *   1. fetches /siwe/challenge for a fresh nonce,
@@ -148,7 +206,10 @@ function renderInteractionPage(opts: {
   // Values that land inside the inline script as JSON literals. The
   // walletConnectProjectId is included only when configured; its presence is
   // what the page uses to decide whether to render the WalletConnect button.
-  const cfg = JSON.stringify({
+  // FUA-IDENTITY-07: serialize for the inline <script> with jsonForScript (not
+  // raw JSON.stringify) so a hostile clientId / value cannot break out of the
+  // script context.
+  const cfg = jsonForScript({
     uid: opts.uid,
     domain: opts.domain,
     uri: opts.uri,
@@ -616,6 +677,25 @@ export function mountSiweRoutes(
   // wallet signs for Citrate and the authority's chain check passes.
   const chainId = options.chainId ?? CITRATE_CHAIN_ID;
 
+  // The authority's own origin, for the cross-site (CSRF) guard on the
+  // state-changing interaction POSTs (FUA-IDENTITY-04).
+  let issuerOrigin: string;
+  try {
+    issuerOrigin = new URL(options.issuer).origin;
+  } catch {
+    issuerOrigin = options.issuer;
+  }
+
+  // FUA-IDENTITY-01: the out-of-band direct-token path is off unless explicitly
+  // enabled. When enabled it MUST be bound to a registered first-party client
+  // via `audience` — fail closed at mount rather than mint unbound tokens.
+  const directTokenAudience = options.audience ?? 'citrate-explorer';
+  if (options.allowDirectTokenGrant && !isTrustedFirstPartyClient(directTokenAudience)) {
+    throw new Error(
+      `allowDirectTokenGrant requires options.audience to be a registered first-party client (got "${directTokenAudience}")`,
+    );
+  }
+
   provider.use(async (ctx, next) => {
     const { method, path } = ctx;
 
@@ -765,6 +845,17 @@ export function mountSiweRoutes(
       try {
         const interaction = await provider.interactionDetails(ctx.req, ctx.res);
         if (interaction) {
+          // FUA-IDENTITY-04: interactionResult resolves the cookie-bound login
+          // (a state change). Refuse a cross-site POST carrying the victim's
+          // interaction cookie (login-CSRF). Same-origin browser requests and
+          // non-browser API clients are unaffected.
+          if (!isSameOriginRequest(ctx.req, issuerOrigin)) {
+            sendJson(ctx.res, 403, {
+              error: 'invalid_request',
+              reason: 'cross_site_forbidden',
+            });
+            return;
+          }
           const redirectTo = await provider.interactionResult(
             ctx.req,
             ctx.res,
@@ -784,12 +875,24 @@ export function mountSiweRoutes(
       }
 
       // PATH B — direct OIDC token, signed by the authority JWKS.
+      // FUA-IDENTITY-01: off unless explicitly enabled. This path mints an
+      // authority-signed token with no PKCE/consent/redirect_uri, so a default
+      // deployment fails closed and directs callers to the code flow (Path A).
+      if (!options.allowDirectTokenGrant) {
+        sendJson(ctx.res, 400, {
+          error: 'invalid_request',
+          reason:
+            'no active OIDC interaction; the direct token grant is disabled — use the authorization code flow',
+        });
+        return;
+      }
       const claims = await accountClaimsFor(provider, ctx, accountId);
       const idToken = await mintIdToken(
         {
           issuer: options.issuer,
           signingJwk: options.signingJwk,
-          audience: options.audience,
+          // Bound to a registered first-party client (validated at mount).
+          audience: directTokenAudience,
           idTokenTtlSeconds: options.idTokenTtlSeconds,
         },
         claims,
@@ -810,6 +913,15 @@ export function mountSiweRoutes(
     // live consent prompt; we then persist the same kind of real Grant the
     // trusted path builds and resume the /auth flow.
     if (method === 'POST' && path === '/consent/approve') {
+      // FUA-IDENTITY-04: persisting a consent Grant is a state change; refuse a
+      // cross-site POST riding the victim's interaction cookie (forced-consent).
+      if (!isSameOriginRequest(ctx.req, issuerOrigin)) {
+        sendJson(ctx.res, 403, {
+          error: 'invalid_request',
+          reason: 'cross_site_forbidden',
+        });
+        return;
+      }
       let interaction: Awaited<
         ReturnType<typeof provider.interactionDetails>
       > | null = null;
