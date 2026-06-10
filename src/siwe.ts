@@ -55,7 +55,13 @@ export type SiweFailureReason =
   | 'wrong_chain'
   | 'malleable_signature'
   | 'bad_signature'
-  | 'malformed_message';
+  | 'malformed_message'
+  // FUA-IDENTITY-09 (SECREM-02): a message that omits `expirationTime` never
+  // expires; one whose `uri` host is not the authority is not bound to us; one
+  // whose lifetime exceeds the cap is an over-long credential. All fail closed.
+  | 'missing_expiration'
+  | 'expiration_too_far'
+  | 'uri_mismatch';
 
 export class SiweVerificationError extends Error {
   constructor(public readonly reason: SiweFailureReason, message?: string) {
@@ -154,7 +160,21 @@ export interface VerifySiweParams {
   chainId?: number;
   /** Injectable clock for deterministic expiry tests. */
   now?: Date;
+  /**
+   * Maximum allowed lifetime of a SIWE message, measured from `now` to its
+   * `expirationTime` (ms). A message is rejected if it omits `expirationTime`
+   * (would never expire) or sets one beyond this cap (an over-long credential).
+   * Defaults to {@link MAX_SIWE_EXPIRATION_MS}. The interaction page mints
+   * 10-minute messages, well under the cap.
+   */
+  maxExpirationMs?: number;
 }
+
+/**
+ * Default cap on a SIWE message's lifetime (24h). The page uses 10 minutes; the
+ * cap exists so a hand-crafted message cannot request a near-infinite window.
+ */
+export const MAX_SIWE_EXPIRATION_MS = 24 * 60 * 60 * 1000;
 
 export interface VerifySiweResult {
   /** EIP-55 checksummed address that authenticated. Used as OIDC `accountId`. */
@@ -181,6 +201,7 @@ export async function verifySiweLogin(
     publicClient,
     chainId = CITRATE_CHAIN_ID,
     now = new Date(),
+    maxExpirationMs = MAX_SIWE_EXPIRATION_MS,
   } = params;
 
   let siwe: SiweMessage;
@@ -213,6 +234,46 @@ export async function verifySiweLogin(
 
   // 3) Malleability: reject high-S ECDSA signatures (no-op for 1271 blobs).
   assertLowS(signature as Hex);
+
+  // 3.5) Expiry + URI binding (FUA-IDENTITY-09). siwe.verify (step 4) enforces
+  //      `expirationTime` ONLY when the message carries one — a message that
+  //      omits it never expires. Require it explicitly, bound its lifetime, and
+  //      bind the message `uri` host to this authority so a message minted for a
+  //      different host is rejected. These fail closed before any token issues.
+  if (!siwe.expirationTime) {
+    throw new SiweVerificationError(
+      'missing_expiration',
+      'SIWE message must set an Expiration Time',
+    );
+  }
+  const expiresAtMs = Date.parse(siwe.expirationTime);
+  if (Number.isNaN(expiresAtMs)) {
+    throw new SiweVerificationError(
+      'missing_expiration',
+      'SIWE Expiration Time is not a valid timestamp',
+    );
+  }
+  if (expiresAtMs - now.getTime() > maxExpirationMs) {
+    throw new SiweVerificationError(
+      'expiration_too_far',
+      `SIWE Expiration Time exceeds the ${maxExpirationMs}ms cap`,
+    );
+  }
+  let uriHost: string;
+  try {
+    uriHost = new URL(siwe.uri).host;
+  } catch {
+    throw new SiweVerificationError(
+      'uri_mismatch',
+      'SIWE uri is not a valid URL',
+    );
+  }
+  if (uriHost !== expectedDomain) {
+    throw new SiweVerificationError(
+      'uri_mismatch',
+      `SIWE uri host ${uriHost} != authority ${expectedDomain}`,
+    );
+  }
 
   // 4) Domain binding + expiry/notBefore + nonce echo: let siwe enforce the
   //    EIP-4361 invariants. We pass our expectedDomain and the consumed nonce

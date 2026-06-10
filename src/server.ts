@@ -69,6 +69,13 @@ export interface CreateProviderOptions {
    * fail-closed). Tests pass it explicitly to assert both-connectors rendering.
    */
   walletConnectProjectId?: string;
+  /**
+   * FUA-IDENTITY-01: enable the out-of-band direct ID-token mint on
+   * `/siwe/verify` (no PKCE/consent). Off by default (fail closed). When set,
+   * `audience` must name a registered first-party client. Browser RPs use the
+   * authorization-code flow and never need this; tests of the direct path opt in.
+   */
+  allowDirectTokenGrant?: boolean;
 }
 
 /**
@@ -181,6 +188,7 @@ export async function createProvider(
     publicClient,
     ...(nonceStore ? { nonceStore } : {}),
     ...(walletConnectProjectId ? { walletConnectProjectId } : {}),
+    ...(options.allowDirectTokenGrant ? { allowDirectTokenGrant: true } : {}),
   });
 
   // IDP-KYC: the vendor-webhook stand-in that writes the LIVE KYC claim record

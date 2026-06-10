@@ -536,10 +536,23 @@ export async function buildConfiguration(
       // IDP-S2 / TD-5: token introspection is how a relying party (and our logout
       // test) asks the authority whether a token is still active. After /logout
       // revokes a token, introspection reports { active: false } — that is the
-      // "invalidates a token immediately" guarantee the cascade depends on. The
-      // default allowedPolicy restricts callers to the token's own client / a
-      // confidential client, which is the correct posture for first-party RPs.
-      introspection: { enabled: true },
+      // "invalidates a token immediately" guarantee the cascade depends on.
+      //
+      // FUA-IDENTITY-08 (SECREM-02): every RP is a PUBLIC client
+      // (token_endpoint_auth_method 'none'), so we cannot rely on client-secret
+      // auth to scope introspection. Pin an explicit allowedPolicy: a client may
+      // introspect ONLY tokens issued to itself — a caller asserting another
+      // client's id gets { active: false }, closing the cross-client
+      // token-activity probe. An RP checking its own token (the logout cascade)
+      // is unaffected, since there token.clientId === client.clientId.
+      introspection: {
+        enabled: true,
+        allowedPolicy: async (
+          _ctx: unknown,
+          client: { clientId: string },
+          token: { clientId?: string },
+        ): Promise<boolean> => token.clientId === client.clientId,
+      },
       // devInteractions OFF: panva's built-in dev login page cannot perform a
       // SIWE signature. We serve our own interaction view (see interactions.url).
       devInteractions: { enabled: false },
