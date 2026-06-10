@@ -254,7 +254,8 @@ describe('IDP-S2 — logout, revocation, and session-bus cascade (TD-5)', () => 
     // logout event frame arrives. An AbortController tears the connection down.
     const ac = new AbortController();
     const sseRes = await fetch(`${baseUrl}/sessions/events`, {
-      headers: { accept: 'text/event-stream' },
+      // FUA-IDENTITY-02: the SSE stream now requires an authenticated subscriber.
+      headers: { accept: 'text/event-stream', authorization: `Bearer ${token}` },
       signal: ac.signal,
     });
     expect(sseRes.status).toBe(200);
@@ -288,6 +289,69 @@ describe('IDP-S2 — logout, revocation, and session-bus cascade (TD-5)', () => 
     expect(frame).toContain('event: logout');
     expect(frame).toContain('"type":"logout"');
     expect(frame).toContain(account.address);
+
+    ac.abort();
+    await reader.cancel().catch(() => {});
+  });
+
+  // FUA-IDENTITY-02 (SECREM-02): the SSE stream must not be an open firehose.
+  it('GET /sessions/events with NO token fails closed (401)', async () => {
+    const res = await fetch(`${baseUrl}/sessions/events`, {
+      headers: { accept: 'text/event-stream' },
+    });
+    expect(res.status).toBe(401);
+    await res.body?.cancel().catch(() => {});
+  });
+
+  it('GET /sessions/events with a garbage token fails closed (401)', async () => {
+    const res = await fetch(`${baseUrl}/sessions/events`, {
+      headers: { accept: 'text/event-stream', authorization: 'Bearer not-a-real-token' },
+    });
+    expect(res.status).toBe(401);
+    await res.body?.cancel().catch(() => {});
+  });
+
+  it('GET /sessions/events delivers ONLY the subscriber’s own sub (no cross-user leak)', async () => {
+    const token = await loginForAccessToken(); // subscriber == account.address
+    const ac = new AbortController();
+    const sseRes = await fetch(`${baseUrl}/sessions/events`, {
+      headers: { accept: 'text/event-stream', authorization: `Bearer ${token}` },
+      signal: ac.signal,
+    });
+    expect(sseRes.status).toBe(200);
+    const reader = sseRes.body!.getReader();
+    const decoder = new TextDecoder();
+
+    // Read until OUR OWN logout frame arrives (which unblocks the stream). If
+    // the scope filter were bypassed, the foreign frame published first would
+    // already be in the buffer by the time ours arrives.
+    const ownFrame = (async (): Promise<string> => {
+      let buffer = '';
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) return buffer;
+        buffer += decoder.decode(value, { stream: true });
+        if (buffer.includes(`"sub":"${account.address}"`)) return buffer;
+      }
+    })();
+
+    await new Promise((r) => setTimeout(r, 50));
+    const foreignSub = '0x000000000000000000000000000000000000dEaD';
+    // Foreign subject FIRST (must be filtered out), then our own (must arrive).
+    getSessionBus().publish(foreignSub, { type: 'logout', sid: 'x', at: Date.now() });
+    getSessionBus().publish(account.address, { type: 'logout', at: Date.now() });
+
+    const buffer = await Promise.race([
+      ownFrame,
+      new Promise<string>((_, rej) =>
+        setTimeout(() => rej(new Error('own SSE frame did not arrive')), 3000),
+      ),
+    ]);
+
+    // Our own event arrived…
+    expect(buffer).toContain(`"sub":"${account.address}"`);
+    // …but the foreign subject was never delivered to this stream.
+    expect(buffer).not.toContain(foreignSub);
 
     ac.abort();
     await reader.cancel().catch(() => {});

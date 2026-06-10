@@ -34,7 +34,16 @@ export interface LogoutRouteOptions {
    * connection out. A comment ping is sent every interval. Default 25s.
    */
   sseHeartbeatMs?: number;
+  /**
+   * FUA-IDENTITY-05: maximum concurrent `/sessions/events` SSE connections.
+   * Over the cap the endpoint returns 503 rather than accept unbounded
+   * fan-out. Default 1000.
+   */
+  maxSseConnections?: number;
 }
+
+/** Live count of open `/sessions/events` streams (FUA-IDENTITY-05 cap). */
+let activeSseConnections = 0;
 
 /** Extract a Bearer access token from the Authorization header, if present. */
 function bearerToken(req: IncomingMessage): string | undefined {
@@ -78,6 +87,7 @@ export function mountLogoutRoutes(
   options: LogoutRouteOptions = {},
 ): void {
   const heartbeatMs = options.sseHeartbeatMs ?? 25_000;
+  const maxSseConnections = options.maxSseConnections ?? 1000;
 
   provider.use(async (ctx, next) => {
     const { method, path } = ctx;
@@ -85,6 +95,47 @@ export function mountLogoutRoutes(
     // --- GET /sessions/events — SSE fan-out of session-bus events. ---
     if (method === 'GET' && path === '/sessions/events') {
       const res = ctx.res;
+
+      // FUA-IDENTITY-02 (SECREM-02): require an authenticated subscriber and
+      // scope the stream to that subscriber's own `sub`. Previously this was
+      // unauthenticated and fanned out EVERY user's `sub` + `sid` to any client —
+      // a real-time correlation leak from the IdP. Resolve the presented access
+      // token (same path /logout uses); fail closed (401) if absent/invalid.
+      const token = bearerToken(ctx.req);
+      if (!token) {
+        sendJson(ctx.res, 401, {
+          error: 'invalid_request',
+          reason: 'a Bearer access token is required to subscribe',
+        });
+        return;
+      }
+      let subscriberAt: FoundAccessToken | undefined;
+      try {
+        subscriberAt = (await provider.AccessToken.find(token)) as
+          | FoundAccessToken
+          | undefined;
+      } catch {
+        subscriberAt = undefined;
+      }
+      if (!subscriberAt || !subscriberAt.accountId) {
+        sendJson(ctx.res, 401, {
+          error: 'invalid_grant',
+          reason: 'the presented token is not active',
+        });
+        return;
+      }
+      const subscriberSub = subscriberAt.accountId;
+
+      // FUA-IDENTITY-05 (SSE-flood): cap concurrent streams; refuse over the cap.
+      if (activeSseConnections >= maxSseConnections) {
+        sendJson(ctx.res, 503, {
+          error: 'temporarily_unavailable',
+          reason: 'too many active subscriptions',
+        });
+        return;
+      }
+      activeSseConnections += 1;
+
       res.writeHead(200, {
         'content-type': 'text/event-stream; charset=utf-8',
         'cache-control': 'no-store',
@@ -94,6 +145,8 @@ export function mountLogoutRoutes(
       res.write(': connected\n\n');
 
       const onEvent = (event: SessionEvent): void => {
+        // FUA-IDENTITY-02: deliver ONLY this subscriber's own events.
+        if (event.sub !== subscriberSub) return;
         // SSE framing: a named event with a JSON data line.
         res.write(`event: ${event.type}\n`);
         res.write(`data: ${JSON.stringify(event)}\n\n`);
@@ -106,7 +159,11 @@ export function mountLogoutRoutes(
       // Don't let the heartbeat keep the process alive on its own.
       if (typeof heartbeat.unref === 'function') heartbeat.unref();
 
+      let cleanedUp = false;
       const cleanup = (): void => {
+        if (cleanedUp) return;
+        cleanedUp = true;
+        activeSseConnections -= 1;
         clearInterval(heartbeat);
         unsubscribe();
       };

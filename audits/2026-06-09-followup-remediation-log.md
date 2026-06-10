@@ -24,8 +24,19 @@ baseline_test_count: 100
 | FUA-IDENTITY-08 | Low | 1.3 | existing `logout.test.ts` cascade still green (regression guard) | introspection `allowedPolicy`: a client may introspect only tokens issued to itself — `config.ts` | 109 ✓ | logout cascade green post-change | **FIXED** (dedicated cross-client probe test = follow-up) |
 | FUA-IDENTITY-09 | Low | 1.3 | hardening test → missing `expirationTime` / too-far / uri-host mismatch all rejected | require `expirationTime` (+ NaN guard), cap lifetime at `MAX_SIWE_EXPIRATION_MS` (24h), bind `uri` host to authority — `siwe.ts` | 109 ✓ | M1 equivalent (redundant NaN guard); both-guards-removed → test FAIL (killed); M4 (uri) killed | **FIXED** |
 
-### Deferred to later phases (not issuer-side; tracked, not done here)
-- FUA-IDENTITY-02 (unauth `/sessions/events` leak), -03 (CDN import / CSP),
+## Phase 2 — control-surface (WP 2.2)
+
+| Finding | Sev | Red test(s) | Fix (file) | Suite (≥109?) | Mutation | Disposition |
+|---|---|---|---|---|---|---|
+| FUA-IDENTITY-02 | Med | `logout.test.ts` → SSE no-token/garbage-token → 401; "delivers ONLY the subscriber's own sub" | `/sessions/events` requires a valid access token (resolve via `provider.AccessToken.find`); `onEvent` delivers only `event.sub === subscriberSub` — `src/logout-routes.ts` | 112 ✓ | killed: bypass auth → 2 tests FAIL; bypass scope filter → scoping test FAIL | **FIXED** |
+| FUA-IDENTITY-05 | Med | (cap is code-guarded; per-IP throttle = follow-up) | `maxSseConnections` cap (default 1000) → 503 over cap on `/sessions/events`; auth requirement (above) already bounds the firehose — `src/logout-routes.ts` | 112 ✓ | — | **PARTIAL** — SSE cap + auth done; per-IP nonce/verify throttle deferred (best at Caddy, per audit) |
+| FUA-IDENTITY-03 | Med | — | — | — | — | **OPEN** — strict CSP + self-host the WalletConnect bundle (drop the esm.sh runtime import). Larger change; the Phase-1 `jsonForScript` escaping already cut the inline-XSS surface. Follow-up. |
+
+### Still deferred to later phases (tracked, not done here)
+- FUA-IDENTITY-03 (CDN import / CSP) — above; FUA-IDENTITY-06 (signing-key rotation) → KEYSAFE-K2.
+
+### (Original Phase-1 note)
+- FUA-IDENTITY-02 (unauth `/sessions/events` leak — **now FIXED above**), -03 (CDN import / CSP),
   -05 (rate limiting) → **Phase 2.2** (control-surface seam). -06 (key rotation)
   → **KEYSAFE-K2**.
 
