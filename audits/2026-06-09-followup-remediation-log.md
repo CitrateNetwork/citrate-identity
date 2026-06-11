@@ -52,3 +52,18 @@ baseline_test_count: 100
 - Semgrep tripwire(s): **TODO Phase 8** — encode "fail-open OIDC token validation"
   + "out-of-band token mint" patterns.
 - Branch: `audit/secrem02-identity-issuer-hardening`.
+
+## KEYSAFE K2 — FUA-IDENTITY-06 (signing-key lifecycle)
+
+| Finding | Sev | Red test(s) | Fix (file) | Suite (≥200?) | Mutation | Disposition |
+|---|---|---|---|---|---|---|
+| FUA-IDENTITY-06 | Low | `test/jwks-keysafe.test.ts` (6 tests) — JWKS created 0600; loose mode repaired on load; 0600 survives rotation rewrite; rotation overlap (retiring-key token still verifies, new tokens carry new kid); two-deep publish window; live `/jwks` serves both kids and no private members. All 5 runnable tests FAILED pre-fix (rotateJwks absent; file written default 0644) | `src/config.ts`: `assertJwksFileMode()` (assert/repair 0600 on every load, **fail closed** — throws if the mode can't be restricted), `persistJwks()` (write `mode: 0o600` + assert), `generateSigningJwk()` (collision-proof kid), `rotateJwks()` (new key signs at `keys[0]`, previous signer retained as published-but-retiring verify-only key, window depth 2), `JWKS_PATH` env override; `src/server.ts` comment pins the keys[0]-signs invariant (direct-path `mintIdToken` already uses `keys[0]`); panva serves the whole `jwks` → both kids published; ops: `npm run rotate-key` (`scripts/rotate-jwks.ts`, prints kids only); KMS/HSM upgrade path documented in `docs/KEY_MANAGEMENT.md`; live `.keys/jwks.json` chmod'd 600 in place | 206 ✓ (baseline this session 200, 22 files; +6) | M1 (file mode reverted to 0644): 3 tests FAIL — killed. M2 (retiring-key retention dropped from `rotateJwks`): 2 tests FAIL — killed. Restored, suite re-green 206 | **FIXED** (KMS/HSM move = documented follow-up, not in K2 scope) |
+
+### Notes
+- The persisted JWKS path is now overridable (`JWKS_PATH` env or explicit arg) so
+  tests use ephemeral keys instead of the repo-local `.keys/` file.
+- Fail-closed posture: boot aborts if the key file cannot be restricted to 0600
+  (POSIX; Windows ACL caveat noted in code).
+- No key material was read, copied, or logged during this WP; `rotate-jwks.ts`
+  prints kids only.
+- Branch: `audit/secrem02-keysafe-k2`.

@@ -201,7 +201,10 @@ export async function createProvider(
   });
 
   // SIWE login. The signing JWK is the same RS256 key the authority publishes
-  // via JWKS, so direct-path ID tokens verify against `/jwks`.
+  // via JWKS, so direct-path ID tokens verify against `/jwks`. `keys[0]` is
+  // the ACTIVE signer by invariant (loadOrCreateJwks/rotateJwks); any further
+  // keys are published-but-retiring verify-only keys kept for the rotation
+  // overlap window (FUA-IDENTITY-06).
   const jwks = await loadOrCreateJwks();
   const rpcUrl = options.rpcUrl ?? process.env.CITRATE_RPC_URL;
   const publicClient =

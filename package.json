@@ -12,6 +12,7 @@
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
     "start": "node dist/server.js",
+    "rotate-key": "tsx scripts/rotate-jwks.ts",
     "test": "vitest run"
   },
   "dependencies": {

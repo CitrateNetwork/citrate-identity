@@ -1,4 +1,12 @@
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
+import {
+  readFileSync,
+  writeFileSync,
+  existsSync,
+  mkdirSync,
+  statSync,
+  chmodSync,
+} from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { dirname, resolve } from 'node:path';
 import { exportJWK, generateKeyPair, type JWK } from 'jose';
 import { getAddress, isAddress } from 'viem';
@@ -116,39 +124,125 @@ export const MIN_COOKIE_KEY_LENGTH = 32;
 
 /**
  * Where to persist the signing keys so they survive restarts in dev. If absent,
- * a fresh RS256 key is generated and written. Tests use ephemeral keys (the file
- * is created under a temp-ish project path and ignored by git).
+ * a fresh RS256 key is generated and written. Tests use ephemeral keys (either
+ * via the explicit `path` argument or the `JWKS_PATH` env override). Read at
+ * call time (not module load) so tests/ops can repoint it.
  */
-const JWKS_PATH = resolve(process.cwd(), '.keys/jwks.json');
+function defaultJwksPath(): string {
+  return process.env.JWKS_PATH
+    ? resolve(process.env.JWKS_PATH)
+    : resolve(process.cwd(), '.keys/jwks.json');
+}
+
+/** Private-key material on disk must be owner-read/write only. */
+const JWKS_FILE_MODE = 0o600;
+
+/**
+ * How many JWKs stay published at once. Exactly two: the active signer
+ * (`keys[0]`) plus one published-but-retiring verify-only key, giving every
+ * rotation an overlap window in which tokens signed by the previous key still
+ * verify against `/jwks` (FUA-IDENTITY-06).
+ */
+const MAX_PUBLISHED_JWKS = 2;
 
 interface PersistedJwks {
   keys: JWK[];
 }
 
 /**
+ * Assert the on-disk JWKS is mode 0600, repairing it when it is not.
+ * FAIL CLOSED: if the mode cannot be restricted (chmod throws, or the
+ * repaired mode still is not 0600) the authority must not boot with a
+ * world/group-readable private key, so we throw. POSIX-only — Windows has
+ * no comparable mode bits (ACLs govern access there).
+ */
+function assertJwksFileMode(path: string): void {
+  if (process.platform === 'win32') return;
+  const mode = statSync(path).mode & 0o777;
+  if (mode === JWKS_FILE_MODE) return;
+  chmodSync(path, JWKS_FILE_MODE); // throws → fail closed
+  const repaired = statSync(path).mode & 0o777;
+  if (repaired !== JWKS_FILE_MODE) {
+    throw new Error(
+      `JWKS file ${path} has mode 0${repaired.toString(8)} and could not be ` +
+        `restricted to 0600 — refusing to use a readable signing key`,
+    );
+  }
+}
+
+/** Persist the private JWKS with 0600 enforced (create and rewrite paths). */
+function persistJwks(jwks: PersistedJwks, path: string): void {
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  // `mode` only applies when the file is created; assert/repair covers the
+  // rewrite-of-existing-file path.
+  writeFileSync(path, JSON.stringify(jwks, null, 2), {
+    encoding: 'utf8',
+    mode: JWKS_FILE_MODE,
+  });
+  assertJwksFileMode(path);
+}
+
+/** Generate a fresh RS256 signing JWK with a unique `kid`. */
+async function generateSigningJwk(): Promise<JWK> {
+  const { privateKey } = await generateKeyPair('RS256', { extractable: true });
+  const jwk = await exportJWK(privateKey);
+  jwk.use = 'sig';
+  jwk.alg = 'RS256';
+  // Date.now() alone can collide when a rotation happens in the same
+  // millisecond as the original generation; suffix with randomness.
+  jwk.kid = `citrate-${Date.now()}-${randomUUID().slice(0, 8)}`;
+  return jwk;
+}
+
+/**
  * Load an RS256 JWKS from disk, or generate one and persist it. Returns the
  * private JWKS in the shape oidc-provider expects (`jwks.keys`).
+ *
+ * Invariants (FUA-IDENTITY-06):
+ *  - `keys[0]` is the ACTIVE signing key (panva signs with the first suitable
+ *    key; the SIWE direct path is handed `keys[0]` explicitly).
+ *  - Any further keys are published-but-retiring: served by `/jwks` so
+ *    outstanding tokens keep verifying, never used to sign.
+ *  - The file is asserted/repaired to mode 0600 on every load, failing closed
+ *    when it cannot be restricted.
  */
-export async function loadOrCreateJwks(): Promise<PersistedJwks> {
-  if (existsSync(JWKS_PATH)) {
-    const raw = readFileSync(JWKS_PATH, 'utf8');
+export async function loadOrCreateJwks(
+  path: string = defaultJwksPath(),
+): Promise<PersistedJwks> {
+  if (existsSync(path)) {
+    assertJwksFileMode(path);
+    const raw = readFileSync(path, 'utf8');
     const parsed = JSON.parse(raw) as PersistedJwks;
     if (Array.isArray(parsed.keys) && parsed.keys.length > 0) {
       return parsed;
     }
   }
 
-  const { privateKey } = await generateKeyPair('RS256', { extractable: true });
-  const jwk = await exportJWK(privateKey);
-  jwk.use = 'sig';
-  jwk.alg = 'RS256';
-  jwk.kid = `citrate-${Date.now()}`;
-
-  const jwks: PersistedJwks = { keys: [jwk] };
-
-  mkdirSync(dirname(JWKS_PATH), { recursive: true });
-  writeFileSync(JWKS_PATH, JSON.stringify(jwks, null, 2), 'utf8');
+  const jwks: PersistedJwks = { keys: [await generateSigningJwk()] };
+  persistJwks(jwks, path);
   return jwks;
+}
+
+/**
+ * Rotate the signing key with an overlap window (FUA-IDENTITY-06): a fresh
+ * JWK becomes the active signer (`keys[0]`) while the previous signer stays
+ * published as a verify-only retiring key. A subsequent rotation drops it —
+ * the publish window is {@link MAX_PUBLISHED_JWKS} keys deep, so run two
+ * rotations at least one ID-token TTL apart to fully retire a key. Ops
+ * entrypoint: `npm run rotate-key` (see `docs/KEY_MANAGEMENT.md`).
+ */
+export async function rotateJwks(
+  path: string = defaultJwksPath(),
+): Promise<PersistedJwks> {
+  const current = await loadOrCreateJwks(path);
+  const next: PersistedJwks = {
+    keys: [await generateSigningJwk(), ...current.keys].slice(
+      0,
+      MAX_PUBLISHED_JWKS,
+    ),
+  };
+  persistJwks(next, path);
+  return next;
 }
 
 /**
