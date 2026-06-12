@@ -65,6 +65,17 @@ export const STUDIO_ORIGIN = process.env.STUDIO_ORIGIN;
 export const WALLETCONNECT_PROJECT_ID = process.env.WALLETCONNECT_PROJECT_ID;
 
 /**
+ * The citrate-wallet-extension's Chrome-identity redirect URI (EW-S1
+ * WP-9). `chrome.identity.launchWebAuthFlow` redirects to
+ * `https://<extension-id>.chromiumapp.org/auth/callback`; the id is
+ * install-specific, so the deployment registers the exact value here.
+ * OPTIONAL and not fail-closed: unset simply means the extension RP
+ * client is not registered on this authority instance.
+ */
+export const WALLET_EXTENSION_REDIRECT_URI =
+  process.env.WALLET_EXTENSION_REDIRECT_URI;
+
+/**
  * The RP web origins the authority echoes for CORS on its cross-origin routes
  * (`/siwe/*` Path B, `/sessions/events`, `/token`, `/userinfo`, `/jwks`,
  * `/me`, introspection/revocation). Only these exact origins are echoed back in
@@ -611,6 +622,42 @@ export async function buildConfiguration(
         ],
         scope: 'openid profile wallet kyc offline_access',
       },
+      {
+        // citrate-gui-native — the Tauri/Slint desktop wallet (EW-S1
+        // WP-8 "Link this device"). Same RFC 8252 native posture as
+        // citrate-studio: PUBLIC client, loopback redirects on any
+        // ephemeral port, PKCE S256 enforced globally, rotating
+        // refresh tokens via offline_access.
+        client_id: 'citrate-gui-native',
+        token_endpoint_auth_method: 'none',
+        application_type: 'native',
+        grant_types: ['authorization_code', 'refresh_token'],
+        response_types: ['code'],
+        redirect_uris: [
+          `http://127.0.0.1${CALLBACK_PATH}`,
+          `http://localhost${CALLBACK_PATH}`,
+          LOOPBACK_REDIRECT,
+        ],
+        scope: 'openid profile wallet kyc offline_access',
+      },
+      // citrate-wallet-extension — Chrome MV3 popup (EW-S1 WP-9 "Link
+      // this wallet"). chrome.identity.launchWebAuthFlow redirects to
+      // the install-specific https://<ext-id>.chromiumapp.org URI, so
+      // the client only registers when the deployment pins that URI
+      // via WALLET_EXTENSION_REDIRECT_URI. PUBLIC client + PKCE S256.
+      ...(WALLET_EXTENSION_REDIRECT_URI
+        ? [
+            {
+              client_id: 'citrate-wallet-extension',
+              token_endpoint_auth_method: 'none' as const,
+              application_type: 'web' as const,
+              grant_types: ['authorization_code', 'refresh_token'],
+              response_types: ['code' as const],
+              redirect_uris: [WALLET_EXTENSION_REDIRECT_URI],
+              scope: 'openid profile wallet kyc offline_access',
+            },
+          ]
+        : []),
     ],
     // `offline_access` is what turns on the `refresh_token` grant_type in panva
     // (lib/helpers/configuration.js): without a refresh-capable scope the
