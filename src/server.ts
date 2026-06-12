@@ -39,7 +39,8 @@ function readPackageVersion(): string {
     return 'dev';
   }
 }
-import { createCitratePublicClient, type NonceStore } from './siwe.js';
+import { createCitratePublicClient, CITRATE_CHAIN_ID, InMemoryNonceStore, type NonceStore } from './siwe.js';
+import { mountIdentityRegistryRoutes } from './identity-registry.js';
 import { RedisNonceStore } from './nonce-redis.js';
 import { RedisSessionBus, getSessionBus, setSessionBus } from './session-bus.js';
 import { createRedis, type RedisLike } from './redis.js';
@@ -259,6 +260,16 @@ export async function createProvider(
   // stores wired by initAuthStoresFromEnv (Postgres in prod, in-memory in
   // dev — same posture as the KYC store).
   mountPasswordRoutes(provider);
+
+  // IDP-S3: identity ↔ wallet registry. The link proof rides the SAME
+  // one-time nonce store SIWE uses (Redis in prod), so a proof can
+  // never be replayed; canonical = first wallet per the ADR.
+  mountIdentityRegistryRoutes(provider, {
+    authority: siweDomainFromIssuer(issuer),
+    chainId: CITRATE_CHAIN_ID,
+    nonceStore: nonceStore ?? new InMemoryNonceStore(),
+  });
+
   const rpId = rpIdFromIssuer(issuer);
   mountWebauthnRoutes(provider, {
     rp: {
