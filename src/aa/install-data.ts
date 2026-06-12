@@ -194,6 +194,72 @@ export function kernelInitializeCalldata(args: {
   });
 }
 
+// ── Kernel installModule() calldata (initConfig entries) ─────────────
+
+/** Kernel `execute(bytes32,bytes)` selector — non-root validators need
+ * an explicit grant for it (Kernel checks `allowedSelectors` on every
+ * non-root validateUserOp). */
+export const KERNEL_EXECUTE_SELECTOR = '0xe9ae5c53' as const;
+
+/**
+ * Encode a Kernel `installModule(uint256,address,bytes)` self-call for
+ * a VALIDATOR-type module. Kernel's validator initData wire shape is
+ * `hook(20 bytes) ++ abi.encode(validatorData, hookData, selectorData)`
+ * — proven end-to-end (deploy → M-of-N recovery → fresh-passkey op) in
+ * citrate-chain `test/aa/GuardianRecoveryE2E.t.sol`.
+ */
+export function kernelInstallModuleCalldata(args: {
+  module: Address;
+  validatorData: Hex;
+  hook?: Address;
+  hookData?: Hex;
+  /** 4-byte selector to grant (defaults to `execute`). */
+  grantSelector?: Hex;
+}): Hex {
+  const inner = encodeAbiParameters(
+    [{ type: 'bytes' }, { type: 'bytes' }, { type: 'bytes' }],
+    [args.validatorData, args.hookData ?? '0x', args.grantSelector ?? KERNEL_EXECUTE_SELECTOR],
+  );
+  const hook = args.hook ?? '0x0000000000000000000000000000000000000000';
+  return encodeFunctionData({
+    abi: [
+      {
+        type: 'function',
+        name: 'installModule',
+        inputs: [
+          { name: 'moduleType', type: 'uint256' },
+          { name: 'module', type: 'address' },
+          { name: 'initData', type: 'bytes' },
+        ],
+        outputs: [],
+        stateMutability: 'payable',
+      },
+    ],
+    functionName: 'installModule',
+    args: [1n /* MODULE_TYPE_VALIDATOR */, args.module, concatHex([hook, inner])],
+  });
+}
+
+/**
+ * The ready-to-use `initConfig` entry installing the
+ * GuardianRecoveryModule with a user's nomination — append it to
+ * `kernelInitializeCalldata({ …, initConfig: [thisEntry] })` so the
+ * guardians are live from the wallet's first block.
+ */
+export function guardianInstallModuleCall(args: {
+  recoveryModule: Address;
+  threshold: number;
+  guardians: Address[];
+}): Hex {
+  return kernelInstallModuleCalldata({
+    module: args.recoveryModule,
+    validatorData: guardianInstallData({
+      threshold: args.threshold,
+      guardians: args.guardians,
+    }),
+  });
+}
+
 // ── helpers ───────────────────────────────────────────────────────────
 
 function expectBytes(name: string, hex: Hex, byteCount: number): void {

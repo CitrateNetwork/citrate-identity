@@ -221,6 +221,16 @@ describe('branded /interaction/:uid login surface', () => {
       expect(html).toMatch(/finishSignin\(result\)/);
       expect(html).toMatch(/finishSignin\(r\.body\)/);
     });
+
+    it('offers optional guardian nomination on the wallet panel (WP-10 item 31)', () => {
+      expect(html).toContain('id="guardian-toggle"');
+      expect(html).toContain('id="guardian-form"');
+      expect(html).toContain('id="guardian-threshold"');
+      expect(html).toContain('id="guardian-save"');
+      // Posts to the nomination endpoint; copy states Citrate is never a guardian.
+      expect(html).toMatch(/fetch\('\/auth\/guardians'/);
+      expect(html).toContain('Citrate is never a guardian');
+    });
   });
 
   describe('with WALLETCONNECT_PROJECT_ID set', () => {
