@@ -21,9 +21,15 @@ import { createProvider } from '../../src/server.js';
 import {
   setUserStore,
   setWebAuthnStore,
+  getUserStore,
   InMemoryUserStore,
   InMemoryWebAuthnCredentialStore,
 } from '../../src/auth/stores.js';
+import {
+  setWalletClaimsConfig,
+  uuidToUserId,
+} from '../../src/aa/wallet-claims.js';
+import { predictWalletAddress } from '../../src/aa/predict.js';
 
 class CookieJar {
   private readonly jar = new Map<string, string>();
@@ -130,6 +136,42 @@ describe('POST /auth/password/*', () => {
     const body = (await res.json()) as { userId: string; redirectTo: string };
     expect(typeof body.userId).toBe('string');
     expect(body.redirectTo).toMatch(/\/auth\/?/);
+  });
+
+  it('register records signing_method and returns the predicted wallet (EW-S1 WP-6)', async () => {
+    setWalletClaimsConfig({
+      factory: '0xd951Cb15495cb6541F7541b9194B2D311E12FD57',
+      kernelImpl: '0x99b370120E7F0A4EA4F85cfcb86D4B8d41C3239b',
+    });
+    try {
+      const jar = await startInteraction(h.baseUrl);
+      const res = await fetch(`${h.baseUrl}/auth/password/register`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', cookie: jar.header() },
+        body: JSON.stringify({ email: 'wallet-claims@example.com', password: 'correct-horse' }),
+        redirect: 'manual',
+      });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        userId: string;
+        redirectTo: string;
+        walletAddress?: string;
+      };
+      // The response carries the counterfactual smart-wallet address so the
+      // interaction page can show it before the browser leaves for the RP.
+      expect(body.walletAddress).toBe(
+        predictWalletAddress(
+          '0xd951Cb15495cb6541F7541b9194B2D311E12FD57',
+          '0x99b370120E7F0A4EA4F85cfcb86D4B8d41C3239b',
+          uuidToUserId(body.userId),
+        ),
+      );
+      // The store records the sign-in method for the signing_method claim.
+      const rec = await getUserStore().findByEmail('wallet-claims@example.com');
+      expect(rec?.lastSigningMethod).toBe('email-pw');
+    } finally {
+      setWalletClaimsConfig(undefined);
+    }
   });
 
   it('register rejects a duplicate email with 409', async () => {

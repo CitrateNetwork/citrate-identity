@@ -38,25 +38,38 @@ export interface UserRecord {
   googleSub?: string;
   primaryWallet?: string;
   legacySiweEoa?: string;
+  /** Method of the most recent successful sign-in
+   * (`email-pw` | `passkey` | `google`). Surfaced as the
+   * `signing_method` OIDC claim (EW-S1 WP-6). */
+  lastSigningMethod?: string;
   createdAt: Date;
   updatedAt: Date;
 }
 
 const CREATE_TABLE_SQL = `
 CREATE TABLE IF NOT EXISTS users (
-  id              uuid PRIMARY KEY,
-  email           text UNIQUE,
-  email_verified  boolean NOT NULL DEFAULT false,
-  password_hash   text,
-  google_sub      text UNIQUE,
-  primary_wallet  text UNIQUE,
-  legacy_siwe_eoa text UNIQUE,
-  created_at      timestamptz NOT NULL DEFAULT now(),
-  updated_at      timestamptz NOT NULL DEFAULT now()
+  id                  uuid PRIMARY KEY,
+  email               text UNIQUE,
+  email_verified      boolean NOT NULL DEFAULT false,
+  password_hash       text,
+  google_sub          text UNIQUE,
+  primary_wallet      text UNIQUE,
+  legacy_siwe_eoa     text UNIQUE,
+  last_signing_method text,
+  created_at          timestamptz NOT NULL DEFAULT now(),
+  updated_at          timestamptz NOT NULL DEFAULT now()
 )`;
 
 const TABLE_EXISTS_SQL =
   "SELECT 1 AS present FROM information_schema.tables WHERE table_name = 'users' LIMIT 1";
+
+// Migration probe for deployments whose `users` table predates the
+// `last_signing_method` column (EW-S1 WP-6, 2026-06-11).
+const COLUMN_EXISTS_SQL =
+  "SELECT 1 AS present FROM information_schema.columns WHERE table_name = 'users' AND column_name = 'last_signing_method' LIMIT 1";
+
+const ADD_COLUMN_SQL =
+  'ALTER TABLE users ADD COLUMN last_signing_method text';
 
 interface RawRow {
   id: string;
@@ -66,6 +79,7 @@ interface RawRow {
   google_sub: string | null;
   primary_wallet: string | null;
   legacy_siwe_eoa: string | null;
+  last_signing_method: string | null;
   created_at: Date;
   updated_at: Date;
 }
@@ -79,6 +93,7 @@ function rowToRecord(row: RawRow): UserRecord {
     googleSub: row.google_sub ?? undefined,
     primaryWallet: row.primary_wallet ?? undefined,
     legacySiweEoa: row.legacy_siwe_eoa ?? undefined,
+    lastSigningMethod: row.last_signing_method ?? undefined,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -99,6 +114,14 @@ export class PgUserStore {
     const probe = await this.pool.query(TABLE_EXISTS_SQL);
     if (probe.rows.length === 0) {
       await this.pool.query(CREATE_TABLE_SQL);
+      return;
+    }
+    // Existing table: bring it up to the current shape. Column probe
+    // (instead of `ADD COLUMN IF NOT EXISTS`) keeps pg-mem-driven tests
+    // on the portable SQL subset.
+    const col = await this.pool.query(COLUMN_EXISTS_SQL);
+    if (col.rows.length === 0) {
+      await this.pool.query(ADD_COLUMN_SQL);
     }
   }
 
@@ -117,7 +140,8 @@ export class PgUserStore {
     const res = await this.pool.query(
       `INSERT INTO users (id, email, password_hash) VALUES ($1, $2, $3)
        RETURNING id, email, email_verified, password_hash, google_sub,
-                 primary_wallet, legacy_siwe_eoa, created_at, updated_at`,
+                 primary_wallet, legacy_siwe_eoa, last_signing_method,
+                 created_at, updated_at`,
       [id, normalizeEmail(args.email), args.passwordHash],
     );
     return rowToRecord(res.rows[0] as RawRow);
@@ -130,7 +154,8 @@ export class PgUserStore {
       `INSERT INTO users (id, email, email_verified, google_sub)
        VALUES ($1, $2, true, $3)
        RETURNING id, email, email_verified, password_hash, google_sub,
-                 primary_wallet, legacy_siwe_eoa, created_at, updated_at`,
+                 primary_wallet, legacy_siwe_eoa, last_signing_method,
+                 created_at, updated_at`,
       [id, args.email ? normalizeEmail(args.email) : null, args.googleSub],
     );
     return rowToRecord(res.rows[0] as RawRow);
@@ -147,7 +172,8 @@ export class PgUserStore {
       `INSERT INTO users (id)
        VALUES ($1)
        RETURNING id, email, email_verified, password_hash, google_sub,
-                 primary_wallet, legacy_siwe_eoa, created_at, updated_at`,
+                 primary_wallet, legacy_siwe_eoa, last_signing_method,
+                 created_at, updated_at`,
       [id],
     );
     return rowToRecord(res.rows[0] as RawRow);
@@ -160,7 +186,8 @@ export class PgUserStore {
       `INSERT INTO users (id, legacy_siwe_eoa)
        VALUES ($1, $2)
        RETURNING id, email, email_verified, password_hash, google_sub,
-                 primary_wallet, legacy_siwe_eoa, created_at, updated_at`,
+                 primary_wallet, legacy_siwe_eoa, last_signing_method,
+                 created_at, updated_at`,
       [id, args.eoa.toLowerCase()],
     );
     return rowToRecord(res.rows[0] as RawRow);
@@ -170,7 +197,7 @@ export class PgUserStore {
 
   async findById(id: string): Promise<UserRecord | undefined> {
     const res = await this.pool.query(
-      'SELECT id, email, email_verified, password_hash, google_sub, primary_wallet, legacy_siwe_eoa, created_at, updated_at FROM users WHERE id = $1',
+      'SELECT id, email, email_verified, password_hash, google_sub, primary_wallet, legacy_siwe_eoa, last_signing_method, created_at, updated_at FROM users WHERE id = $1',
       [id],
     );
     const row = res.rows[0] as RawRow | undefined;
@@ -179,7 +206,7 @@ export class PgUserStore {
 
   async findByEmail(email: string): Promise<UserRecord | undefined> {
     const res = await this.pool.query(
-      'SELECT id, email, email_verified, password_hash, google_sub, primary_wallet, legacy_siwe_eoa, created_at, updated_at FROM users WHERE email = $1',
+      'SELECT id, email, email_verified, password_hash, google_sub, primary_wallet, legacy_siwe_eoa, last_signing_method, created_at, updated_at FROM users WHERE email = $1',
       [normalizeEmail(email)],
     );
     const row = res.rows[0] as RawRow | undefined;
@@ -188,7 +215,7 @@ export class PgUserStore {
 
   async findByGoogleSub(googleSub: string): Promise<UserRecord | undefined> {
     const res = await this.pool.query(
-      'SELECT id, email, email_verified, password_hash, google_sub, primary_wallet, legacy_siwe_eoa, created_at, updated_at FROM users WHERE google_sub = $1',
+      'SELECT id, email, email_verified, password_hash, google_sub, primary_wallet, legacy_siwe_eoa, last_signing_method, created_at, updated_at FROM users WHERE google_sub = $1',
       [googleSub],
     );
     const row = res.rows[0] as RawRow | undefined;
@@ -197,7 +224,7 @@ export class PgUserStore {
 
   async findBySiweEoa(eoa: string): Promise<UserRecord | undefined> {
     const res = await this.pool.query(
-      'SELECT id, email, email_verified, password_hash, google_sub, primary_wallet, legacy_siwe_eoa, created_at, updated_at FROM users WHERE legacy_siwe_eoa = $1',
+      'SELECT id, email, email_verified, password_hash, google_sub, primary_wallet, legacy_siwe_eoa, last_signing_method, created_at, updated_at FROM users WHERE legacy_siwe_eoa = $1',
       [eoa.toLowerCase()],
     );
     const row = res.rows[0] as RawRow | undefined;
@@ -231,6 +258,16 @@ export class PgUserStore {
     await this.pool.query(
       'UPDATE users SET password_hash = $1, updated_at = now() WHERE id = $2',
       [passwordHash, id],
+    );
+  }
+
+  /** Record the method of the most recent successful sign-in
+   * (`email-pw` | `passkey` | `google`) — surfaced as the
+   * `signing_method` OIDC claim. */
+  async setLastSigningMethod(id: string, method: string): Promise<void> {
+    await this.pool.query(
+      'UPDATE users SET last_signing_method = $1, updated_at = now() WHERE id = $2',
+      [method, id],
     );
   }
 }

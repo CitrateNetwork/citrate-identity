@@ -27,6 +27,7 @@ import type Provider from 'oidc-provider';
 
 import { hashPassword, verifyPassword, PasswordError } from './password.js';
 import { getUserStore } from './stores.js';
+import { predictedWalletForAccount } from '../aa/wallet-claims.js';
 
 type Ctx = Parameters<Parameters<Provider['use']>[0]>[0];
 type Next = Parameters<Parameters<Provider['use']>[0]>[1];
@@ -166,6 +167,7 @@ export function mountPasswordRoutes(provider: Provider): void {
         throw err;
       }
       const user = await store.createWithEmailPassword({ email, passwordHash });
+      await store.setLastSigningMethod(user.id, 'email-pw');
       const redirectTo = await finishLogin(
         provider,
         ctx.req,
@@ -174,7 +176,12 @@ export function mountPasswordRoutes(provider: Provider): void {
         ['pwd'],
         'urn:citrate:password',
       );
-      respondJson(ctx.res, 200, { userId: user.id, redirectTo });
+      const walletAddress = predictedWalletForAccount(user.id);
+      respondJson(ctx.res, 200, {
+        userId: user.id,
+        redirectTo,
+        ...(walletAddress ? { walletAddress } : {}),
+      });
       return;
     }
 
@@ -197,6 +204,7 @@ export function mountPasswordRoutes(provider: Provider): void {
       });
       return;
     }
+    await store.setLastSigningMethod(user.id, 'email-pw');
     const redirectTo = await finishLogin(
       provider,
       ctx.req,
@@ -205,6 +213,11 @@ export function mountPasswordRoutes(provider: Provider): void {
       ['pwd'],
       'urn:citrate:password',
     );
-    respondJson(ctx.res, 200, { userId: user.id, redirectTo });
+    const walletAddress = predictedWalletForAccount(user.id);
+    respondJson(ctx.res, 200, {
+      userId: user.id,
+      redirectTo,
+      ...(walletAddress ? { walletAddress } : {}),
+    });
   });
 }

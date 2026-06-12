@@ -302,6 +302,7 @@ export function mountGoogleRoutes(
       });
     }
 
+    await store.setLastSigningMethod(user.id, 'google');
     const redirectTo = await provider.interactionResult(
       ctx.req,
       ctx.res,

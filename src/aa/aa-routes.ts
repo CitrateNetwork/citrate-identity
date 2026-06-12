@@ -25,6 +25,7 @@ import { createPublicClient, http, type Address, type Hex } from 'viem';
 import { type AaConfig } from './config.js';
 import { buildPermit } from './permit.js';
 import { predictWalletAddress } from './predict.js';
+import { accountIdToAaUserId } from './wallet-claims.js';
 
 type Ctx = Parameters<Parameters<Provider['use']>[0]>[0];
 type Next = Parameters<Parameters<Provider['use']>[0]>[1];
@@ -279,17 +280,10 @@ async function resolveAccount(provider: Provider, ctx: Ctx): Promise<Hex | null>
     if (!token || token.isExpired) return null;
     const acct = token.accountId;
     if (typeof acct !== 'string') return null;
-    // Accept any 0x-32-byte-hex accountId. Other shapes (e.g. UUIDs)
-    // aren't valid Kernel salts; we surface that via a 403 on the
-    // userId-match check, not here.
-    if (acct.startsWith('0x') && acct.length === 66) return acct as Hex;
-    if (acct.startsWith('0x') && acct.length === 42) {
-      // SIWE-bound EOA — wrap to 32 bytes by zero-padding on the left
-      // so the factory's CREATE2 salt is computable from a wallet
-      // address as a degenerate userId.
-      return ('0x' + acct.slice(2).padStart(64, '0')) as Hex;
-    }
-    return null;
+    // All three account shapes resolve to a 32-byte AA userId:
+    // raw 32-byte hex, zero-padded SIWE EOA, or keccak256(uuid) for
+    // the UUID-keyed passkey/email/Google users (EW-S1 WP-6).
+    return accountIdToAaUserId(acct);
   } catch {
     return null;
   }
@@ -298,15 +292,11 @@ async function resolveAccount(provider: Provider, ctx: Ctx): Promise<Hex | null>
 /**
  * Compute the userId form an OIDC account string. Public so callers
  * (and tests) can reproduce the same wrapping logic without going
- * through the HTTP layer.
+ * through the HTTP layer. Delegates to the wallet-claims seam so the
+ * UUID mapping has exactly one definition.
  */
 export function accountIdToUserId(accountId: string): Hex | null {
-  if (typeof accountId !== 'string') return null;
-  if (accountId.startsWith('0x') && accountId.length === 66) return accountId as Hex;
-  if (accountId.startsWith('0x') && accountId.length === 42) {
-    return ('0x' + accountId.slice(2).padStart(64, '0')) as Hex;
-  }
-  return null;
+  return accountIdToAaUserId(accountId);
 }
 
 // Re-export the route helper types for callers.

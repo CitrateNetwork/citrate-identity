@@ -44,6 +44,13 @@ export interface UserStore {
    * callback when the Google account matches an existing email but
    * has no `google_sub` yet). */
   linkGoogleSub(id: string, googleSub: string): Promise<void>;
+  /** Bind an explicit wallet address to the user (dashboard enrollment;
+   * overrides the predicted smart-wallet address in claims). */
+  setPrimaryWallet(id: string, walletAddress: string): Promise<void>;
+  /** Record the method of the most recent successful sign-in
+   * (`email-pw` | `passkey` | `google`) — surfaced as the
+   * `signing_method` OIDC claim (EW-S1 WP-6). */
+  setLastSigningMethod(id: string, method: string): Promise<void>;
 }
 
 /** WebAuthn credential store shape used by the webauthn HTTP routes. */
@@ -167,6 +174,20 @@ export class InMemoryUserStore implements UserStore {
     rec.emailVerified = true;
     rec.updatedAt = new Date();
     this.byGoogleSub.set(googleSub, id);
+  }
+
+  async setPrimaryWallet(id: string, walletAddress: string): Promise<void> {
+    const rec = this.byId.get(id);
+    if (!rec) return;
+    rec.primaryWallet = walletAddress.toLowerCase();
+    rec.updatedAt = new Date();
+  }
+
+  async setLastSigningMethod(id: string, method: string): Promise<void> {
+    const rec = this.byId.get(id);
+    if (!rec) return;
+    rec.lastSigningMethod = method;
+    rec.updatedAt = new Date();
   }
 }
 
