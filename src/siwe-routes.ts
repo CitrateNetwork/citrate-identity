@@ -259,6 +259,7 @@ function renderInteractionPage(opts: {
   const ICON_GOOGLE = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7 v10 M7 12 h10"/></svg>';
   const ICON_WALLET = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="6" width="18" height="13" rx="2.5"/><path d="M3 10 H21 M16.5 14 h.01"/></svg>';
   const ICON_SHIELD = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3 L19 6 V11 c0 5-3 8-7 10 c-4-2-7-5-7-10 V6 Z"/><path d="M9 12 L11 14 L15 9.5"/></svg>';
+  const ICON_CHECK = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5 L10 17.5 L19 7"/></svg>';
 
   return `<!doctype html>
 <html lang="en" data-theme="light">
@@ -490,6 +491,10 @@ h1 {
 }
 .connected.show { display: flex; }
 .connected .addr { font-family: var(--font-mono); color: var(--text-1); }
+/* R1 / TD-EW-A: pre-audit small-value notice — visible wherever the
+   smart wallet is presented. */
+.audit-note { color: var(--warning); }
+.audit-note svg { color: var(--warning); }
 
 /* Footer eyebrow row. */
 .footer-eyebrow {
@@ -549,7 +554,7 @@ h1 {
     <section class="card" aria-label="Sign in or register">
       <div class="eyebrow" aria-hidden="true">SIGN IN OR REGISTER</div>
       <h1>Welcome to Citrate</h1>
-      <p class="lede">Continue to <span class="app-chip" id="app-name">${escapeHtml(opts.clientId)}</span> &mdash; a secure, embedded wallet is created for you on the Citrate network.</p>
+      <p class="lede">Continue to <span class="app-chip" id="app-name">${escapeHtml(opts.clientId)}</span> &mdash; a secure, embedded wallet is created for you on the Citrate network. <span class="audit-note">Citrate smart wallets are pre-audit: small-value only &mdash; audit pending.</span></p>
 
       <div class="tabs" role="tablist" aria-label="Sign-in methods" data-default-tab="passkey">
         <button id="tab-passkey" role="tab" aria-controls="panel-passkey" aria-selected="true" data-method="passkey">${ICON_KEY}<span>Passkey</span></button>
@@ -610,6 +615,22 @@ h1 {
         <p class="note" style="margin-top: 12px;">${ICON_SHIELD}<span>You'll sign a Sign-In with Ethereum (EIP-4361) message bound to <span style="font-family: var(--font-mono);">${escapeHtml(opts.domain)}</span> on chain ${opts.chainId}. It proves you control your address &mdash; never a transaction.</span></p>
       </div>
 
+      <!-- Post-signin wallet interstitial (EW-S1 WP-6 item 23): shown in
+           place of the method tabs once a sign-in/signup response carries
+           the predicted smart-wallet address, so the user SEES their
+           Citrate wallet before leaving for the relying party. -->
+      <div id="panel-wallet-success" class="panel" role="region" aria-label="Your Citrate wallet" data-active="false">
+        <div class="eyebrow" aria-hidden="true">YOUR CITRATE WALLET</div>
+        <p class="note">${ICON_CHECK}<span>You're signed in. This is your Citrate smart-wallet address &mdash; the same address on every device you link.</span></p>
+        <div class="connected" role="status" style="display:flex">
+          ${ICON_WALLET}<span class="addr" id="wallet-success-addr"></span>
+        </div>
+        <p class="note audit-note">${ICON_SHIELD}<span>Small-value only &mdash; the Citrate wallet contracts are awaiting external audit.</span></p>
+        <div class="actions">
+          <button id="wallet-success-continue" class="btn primary" type="button">Continue</button>
+        </div>
+      </div>
+
       <p id="status" role="status" aria-live="polite"></p>
     </section>
 
@@ -641,6 +662,24 @@ function activate(method) {
   setStatus('');
 }
 tabs.forEach((t) => t.addEventListener('click', () => activate(t.dataset.method)));
+
+// --- Post-signin wallet interstitial (WP-6 item 23). ---
+// When the sign-in/signup response carries the predicted smart-wallet
+// address, show it (with the pre-audit small-value notice) BEFORE
+// resuming the OIDC flow; the user clicks Continue to head to the RP.
+// Without a walletAddress (AA env not configured) redirect immediately —
+// the pre-change behaviour.
+function finishSignin(body) {
+  if (!body.walletAddress) { window.location = body.redirectTo; return; }
+  document.querySelector('.tabs').style.display = 'none';
+  panels.forEach((p) => p.setAttribute('data-active', 'false'));
+  document.getElementById('wallet-success-addr').textContent = body.walletAddress;
+  const successPanel = document.getElementById('panel-wallet-success');
+  successPanel.setAttribute('data-active', 'true');
+  const cont = document.getElementById('wallet-success-continue');
+  cont.addEventListener('click', () => { cont.disabled = true; window.location = body.redirectTo; });
+  setStatus('');
+}
 
 // --- PASSKEY flow (/auth/webauthn/authenticate-{options,verify}). ---
 const passkeyBtn = document.getElementById('signin-passkey');
@@ -686,8 +725,8 @@ passkeyBtn.addEventListener('click', async () => {
       setStatus('Passkey sign-in failed: ' + (result.reason || result.error || verifyRes.status), true);
       passkeyBtn.disabled = false; return;
     }
-    setStatus('Signed in. Redirecting…');
-    window.location = result.redirectTo;
+    setStatus('Signed in.');
+    finishSignin(result);
   } catch (err) {
     setStatus('Error: ' + describeError(err), true);
     passkeyBtn.disabled = false;
@@ -779,8 +818,8 @@ passkeySignupBtn.addEventListener('click', async () => {
       setStatus('Passkey signup failed: ' + (result.reason || result.error || verifyRes.status), true);
       passkeySignupBtn.disabled = false; return;
     }
-    setStatus('Account created. Redirecting…');
-    window.location = result.redirectTo;
+    setStatus('Account created.');
+    finishSignin(result);
   } catch (err) {
     setStatus('Error: ' + describeError(err), true);
     passkeySignupBtn.disabled = false;
@@ -811,8 +850,8 @@ pwForm.addEventListener('submit', async (ev) => {
     setStatus('Sign-in failed: ' + (r.body.reason || r.body.error || r.status), true);
     pwSubmit.disabled = false; return;
   }
-  setStatus('Signed in. Redirecting…');
-  window.location = r.body.redirectTo;
+  setStatus('Signed in.');
+  finishSignin(r.body);
 });
 pwRegister.addEventListener('click', async () => {
   pwRegister.disabled = true;
@@ -826,8 +865,8 @@ pwRegister.addEventListener('click', async () => {
     setStatus('Registration failed: ' + (r.body.reason || r.body.error || r.status), true);
     pwRegister.disabled = false; return;
   }
-  setStatus('Account created. Redirecting…');
-  window.location = r.body.redirectTo;
+  setStatus('Account created.');
+  finishSignin(r.body);
 });
 
 // --- SIWE flow (preserves /siwe/challenge + /siwe/verify + personal_sign). ---

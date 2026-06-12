@@ -13,6 +13,7 @@ import { mountKycRoutes } from './kyc-routes.js';
 import { mountLogoutRoutes } from './logout-routes.js';
 import { mountHttpExtras } from './http-extras.js';
 import { mountAaRoutes } from './aa/aa-routes.js';
+import { setWalletClaimsConfig } from './aa/wallet-claims.js';
 import { loadAaConfig } from './aa/config.js';
 import { mountStaticAssets } from './static-assets.js';
 import { mountPasswordRoutes } from './auth/password-routes.js';
@@ -317,6 +318,13 @@ export async function createProvider(
     const aaCfg = loadAaConfig(process.env);
     const rpc = process.env.CITRATE_AA_RPC_URL ?? process.env.CITRATE_RPC_URL ?? 'https://rpc.citrate.ai';
     mountAaRoutes(provider, { config: aaCfg, rpcUrl: rpc });
+    // EW-S1 WP-6: with the AA stack configured, every UUID-keyed user's
+    // ID token carries their (counterfactual) smart-wallet address —
+    // findAccount predicts it through this seam.
+    setWalletClaimsConfig({
+      factory: aaCfg.factory,
+      kernelImpl: aaCfg.kernelImpl,
+    });
   }
 
   return provider;

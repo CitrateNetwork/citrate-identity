@@ -201,6 +201,26 @@ describe('branded /interaction/:uid login surface', () => {
       // No `.dot` placeholder square (the prior page used one as a stand-in).
       expect(html).not.toMatch(/class="brand"[^>]*>[\s\S]*<span class="dot"/);
     });
+
+    it('carries the "small-value only — audit pending" notice (R1 / TD-EW-A)', () => {
+      // The pre-audit warning must be in the UI copy of the first release —
+      // both in the lede everyone sees and on the wallet success panel.
+      expect(html).toContain('small-value only &mdash; audit pending');
+      expect(html).toContain('awaiting external audit');
+    });
+
+    it('ships the post-signin wallet interstitial (WP-6 item 23)', () => {
+      // The success panel that shows the predicted smart-wallet address
+      // before the browser leaves for the relying party.
+      expect(html).toContain('id="panel-wallet-success"');
+      expect(html).toContain('id="wallet-success-addr"');
+      expect(html).toContain('id="wallet-success-continue"');
+      // The page script routes every sign-in success through finishSignin
+      // so a walletAddress in the response surfaces the panel.
+      expect(html).toContain('function finishSignin');
+      expect(html).toMatch(/finishSignin\(result\)/);
+      expect(html).toMatch(/finishSignin\(r\.body\)/);
+    });
   });
 
   describe('with WALLETCONNECT_PROJECT_ID set', () => {

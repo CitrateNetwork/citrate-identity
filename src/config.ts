@@ -12,6 +12,8 @@ import { exportJWK, generateKeyPair, type JWK } from 'jose';
 import { getAddress, isAddress } from 'viem';
 import type { Account, Configuration, FindAccount } from 'oidc-provider';
 import { getKycStore, effectiveVerified, type KycStatus } from './kyc.js';
+import { getUserStore } from './auth/stores.js';
+import { predictedWalletForAccount } from './aa/wallet-claims.js';
 import { createRedisAdapterFactory } from './redis-adapter.js';
 import type { RedisLike } from './redis.js';
 
@@ -465,14 +467,27 @@ export const findAccount: FindAccount = (_ctx, sub): Account => {
     accountId,
     async claims() {
       if (isUuid) {
-        // UUID-keyed user (password / WebAuthn sign-in). No wallet bound yet —
-        // RP code reading `wallet_address` should treat absence as "user has
-        // no Citrate wallet bound on the issuer record" and surface an
-        // enroll-wallet flow. KYC is not yet keyed on UUIDs (the vendor
-        // attaches verification to a wallet); the dashboard wires that the
-        // moment the user enrolls a wallet.
+        // UUID-keyed user (passkey / email-pw / Google sign-in). Per
+        // EW-S1 the smart wallet exists counterfactually from signup:
+        // `wallet_address` is the CREATE2 prediction for this userId
+        // (deployed lazily on the first UserOp), unless the user has
+        // explicitly bound a wallet (`primary_wallet`), which wins.
+        // When the AA env is not configured (dev), the claim is
+        // omitted and RPs treat absence as "no wallet bound".
+        // `signing_method` is the most recent successful sign-in
+        // method persisted by the auth routes; per-session method
+        // remains the standard `amr` claim. KYC is not yet keyed on
+        // UUIDs (the vendor attaches verification to a wallet).
+        const rec = await getUserStore().findById(accountId);
+        const wallet = rec?.primaryWallet
+          ? getAddress(rec.primaryWallet)
+          : predictedWalletForAccount(accountId);
         return {
           sub: accountId,
+          ...(wallet ? { wallet_address: wallet, wallets: [wallet] } : {}),
+          ...(rec?.lastSigningMethod
+            ? { signing_method: rec.lastSigningMethod }
+            : {}),
           kyc_status: 'none',
         };
       }
@@ -494,6 +509,7 @@ export const findAccount: FindAccount = (_ctx, sub): Account => {
         sub: accountId,
         wallet_address: accountId,
         wallets: [accountId],
+        signing_method: 'siwe',
         kyc_status,
         kyc_verified_at: claim?.verified_at,
         kyc_expires_at: claim?.expires_at,
@@ -603,9 +619,11 @@ export async function buildConfiguration(
     claims: {
       openid: ['sub'],
       profile: ['name', 'email'],
-      // Citrate extension: canonical wallet + linked wallets surfaced under the
-      // `wallet` scope. Populated by the identity registry in later stages (S3).
-      wallet: ['wallet_address', 'wallets'],
+      // Citrate extension: canonical wallet + linked wallets + the most
+      // recent signing method, surfaced under the `wallet` scope (EW-S1
+      // WP-6 seam — explorer/dashboard RPs + Lane B's PIN-S4 consume this
+      // shape; keep it stable). Linked-wallets list grows in IDP-S3.
+      wallet: ['wallet_address', 'wallets', 'signing_method'],
       // IDP-KYC: live, revocable KYC status under its own `kyc` scope. These are
       // read from the KYC store at claims() time so /userinfo reflects the
       // CURRENT record (revocation/expiry), not a stale token snapshot. Record

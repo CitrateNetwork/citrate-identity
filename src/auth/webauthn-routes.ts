@@ -58,6 +58,7 @@ import {
   type RelyingPartyConfig,
 } from './webauthn.js';
 import { getUserStore, getWebAuthnStore } from './stores.js';
+import { predictedWalletForAccount } from '../aa/wallet-claims.js';
 
 type Ctx = Parameters<Parameters<Provider['use']>[0]>[0];
 type Next = Parameters<Parameters<Provider['use']>[0]>[1];
@@ -251,6 +252,7 @@ export function mountWebauthnRoutes(
         return;
       }
 
+      await userStore.setLastSigningMethod(user.id, 'passkey');
       const redirectTo = await provider.interactionResult(
         ctx.req,
         ctx.res,
@@ -263,7 +265,12 @@ export function mountWebauthnRoutes(
         },
         { mergeWithLastSubmission: false },
       );
-      respondJson(ctx.res, 200, { userId: user.id, redirectTo });
+      const walletAddress = predictedWalletForAccount(user.id);
+      respondJson(ctx.res, 200, {
+        userId: user.id,
+        redirectTo,
+        ...(walletAddress ? { walletAddress } : {}),
+      });
       return;
     }
 
@@ -352,6 +359,7 @@ export function mountWebauthnRoutes(
           : {}),
       });
 
+      await userStore.setLastSigningMethod(user.id, 'passkey');
       const redirectTo = await provider.interactionResult(
         ctx.req,
         ctx.res,
@@ -364,10 +372,12 @@ export function mountWebauthnRoutes(
         },
         { mergeWithLastSubmission: false },
       );
+      const walletAddress = predictedWalletForAccount(user.id);
       respondJson(ctx.res, 201, {
         userId: user.id,
         credentialId: rec.id,
         redirectTo,
+        ...(walletAddress ? { walletAddress } : {}),
       });
       return;
     }
