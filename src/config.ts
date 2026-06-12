@@ -14,6 +14,7 @@ import type { Account, Configuration, FindAccount } from 'oidc-provider';
 import { getKycStore, effectiveVerified, type KycStatus } from './kyc.js';
 import { getUserStore } from './auth/stores.js';
 import { predictedWalletForAccount } from './aa/wallet-claims.js';
+import { getWalletRegistry } from './identity-registry.js';
 import { createRedisAdapterFactory } from './redis-adapter.js';
 import type { RedisLike } from './redis.js';
 
@@ -453,6 +454,31 @@ const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 /**
+ * The `wallets` claim (IDP-S3): the identity's primary wallet first,
+ * then every registry-linked wallet (proof-verified, in link order,
+ * deduped). Read at claims() time so links/unlinks reflect on the next
+ * /userinfo call without re-login.
+ */
+async function linkedWalletsFor(
+  sub: string,
+  primary: string | undefined,
+): Promise<string[]> {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  if (primary) {
+    out.push(primary);
+    seen.add(primary.toLowerCase());
+  }
+  for (const w of await getWalletRegistry().list(sub)) {
+    if (!seen.has(w.address)) {
+      out.push(getAddress(w.address));
+      seen.add(w.address);
+    }
+  }
+  return out;
+}
+
+/**
  * Account resolver — both SIWE (wallet-bound) and password / WebAuthn
  * (user-UUID-bound).
  *
@@ -493,9 +519,11 @@ export const findAccount: FindAccount = (_ctx, sub): Account => {
         const wallet = rec?.primaryWallet
           ? getAddress(rec.primaryWallet)
           : predictedWalletForAccount(accountId);
+        const linked = await linkedWalletsFor(accountId, wallet);
         return {
           sub: accountId,
-          ...(wallet ? { wallet_address: wallet, wallets: [wallet] } : {}),
+          ...(wallet ? { wallet_address: wallet } : {}),
+          ...(linked.length > 0 ? { wallets: linked } : {}),
           ...(rec?.lastSigningMethod
             ? { signing_method: rec.lastSigningMethod }
             : {}),
@@ -519,7 +547,7 @@ export const findAccount: FindAccount = (_ctx, sub): Account => {
       return {
         sub: accountId,
         wallet_address: accountId,
-        wallets: [accountId],
+        wallets: await linkedWalletsFor(accountId, accountId),
         signing_method: 'siwe',
         kyc_status,
         kyc_verified_at: claim?.verified_at,
