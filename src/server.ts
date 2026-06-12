@@ -13,6 +13,7 @@ import { mountKycRoutes } from './kyc-routes.js';
 import { mountLogoutRoutes } from './logout-routes.js';
 import { mountHttpExtras } from './http-extras.js';
 import { mountAaRoutes } from './aa/aa-routes.js';
+import { mountGuardianRoutes } from './aa/guardian-routes.js';
 import { setWalletClaimsConfig } from './aa/wallet-claims.js';
 import { loadAaConfig } from './aa/config.js';
 import { mountStaticAssets } from './static-assets.js';
@@ -329,6 +330,16 @@ export async function createProvider(
     const aaCfg = loadAaConfig(process.env);
     const rpc = process.env.CITRATE_AA_RPC_URL ?? process.env.CITRATE_RPC_URL ?? 'https://rpc.citrate.ai';
     mountAaRoutes(provider, { config: aaCfg, rpcUrl: rpc });
+    // EW-S1 WP-10 item 31: guardian nominations — stored at signup,
+    // installed on-chain with the wallet's first deploy (the SDK appends
+    // the served initConfig entry to initialize()). Citrate's own signer
+    // can never be nominated.
+    mountGuardianRoutes(provider, {
+      ...(process.env.CITRATE_AA_GUARDIAN_RECOVERY
+        ? { recoveryModule: process.env.CITRATE_AA_GUARDIAN_RECOVERY as `0x${string}` }
+        : {}),
+      ...(aaCfg.identitySignerAddr ? { forbidden: [aaCfg.identitySignerAddr] } : {}),
+    });
     // EW-S1 WP-6: with the AA stack configured, every UUID-keyed user's
     // ID token carries their (counterfactual) smart-wallet address —
     // findAccount predicts it through this seam.

@@ -626,6 +626,26 @@ h1 {
           ${ICON_WALLET}<span class="addr" id="wallet-success-addr"></span>
         </div>
         <p class="note audit-note">${ICON_SHIELD}<span>Small-value only &mdash; the Citrate wallet contracts are awaiting external audit.</span></p>
+
+        <!-- WP-10 item 23/31: optional guardian nomination, stored now and
+             installed on-chain with the wallet's first deploy. -->
+        <div id="guardian-setup">
+          <button id="guardian-toggle" class="altlink" type="button">Add recovery guardians (optional)</button>
+          <div id="guardian-form" style="display:none">
+            <p class="note">${ICON_SHIELD}<span>Nominate 2&ndash;3 wallet addresses of people you trust. If you lose this passkey, M of them can approve a rotation to a new one. Citrate is never a guardian.</span></p>
+            <div class="field"><label for="guardian-1">Guardian 1</label><input id="guardian-1" type="text" placeholder="0x&hellip;" autocomplete="off" /></div>
+            <div class="field"><label for="guardian-2">Guardian 2</label><input id="guardian-2" type="text" placeholder="0x&hellip;" autocomplete="off" /></div>
+            <div class="field"><label for="guardian-3">Guardian 3 (optional)</label><input id="guardian-3" type="text" placeholder="0x&hellip;" autocomplete="off" /></div>
+            <div class="field"><label for="guardian-threshold">Approvals required</label>
+              <select id="guardian-threshold"><option value="2" selected>2</option><option value="1">1</option><option value="3">3</option></select>
+            </div>
+            <div class="actions">
+              <button id="guardian-save" class="btn" type="button">Save guardians</button>
+            </div>
+            <p id="guardian-status" role="status" aria-live="polite"></p>
+          </div>
+        </div>
+
         <div class="actions">
           <button id="wallet-success-continue" class="btn primary" type="button">Continue</button>
         </div>
@@ -680,6 +700,44 @@ function finishSignin(body) {
   cont.addEventListener('click', () => { cont.disabled = true; window.location = body.redirectTo; });
   setStatus('');
 }
+
+// --- WP-10: guardian nomination on the wallet success panel. ---
+const guardianToggle = document.getElementById('guardian-toggle');
+guardianToggle.addEventListener('click', () => {
+  const form = document.getElementById('guardian-form');
+  const open = form.style.display !== 'none';
+  form.style.display = open ? 'none' : 'block';
+  guardianToggle.textContent = open
+    ? 'Add recovery guardians (optional)'
+    : 'Hide recovery guardians';
+});
+document.getElementById('guardian-save').addEventListener('click', async () => {
+  const saveBtn = document.getElementById('guardian-save');
+  const statusEl2 = document.getElementById('guardian-status');
+  const guardians = ['guardian-1', 'guardian-2', 'guardian-3']
+    .map((id) => document.getElementById(id).value.trim())
+    .filter((v) => v !== '');
+  const threshold = Number(document.getElementById('guardian-threshold').value);
+  saveBtn.disabled = true;
+  statusEl2.textContent = 'Saving…';
+  try {
+    const res = await fetch('/auth/guardians', {
+      method: 'POST', credentials: 'same-origin',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ guardians, threshold }),
+    });
+    const out = await res.json();
+    if (!res.ok) {
+      statusEl2.textContent = 'Could not save: ' + (out.reason || out.error || res.status);
+      saveBtn.disabled = false;
+      return;
+    }
+    statusEl2.textContent = 'Guardians saved — they activate with your wallet\\u2019s first transaction.';
+  } catch (err) {
+    statusEl2.textContent = 'Error: ' + describeError(err);
+    saveBtn.disabled = false;
+  }
+});
 
 // --- PASSKEY flow (/auth/webauthn/authenticate-{options,verify}). ---
 const passkeyBtn = document.getElementById('signin-passkey');
