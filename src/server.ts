@@ -14,6 +14,8 @@ import { mountLogoutRoutes } from './logout-routes.js';
 import { mountHttpExtras } from './http-extras.js';
 import { mountAaRoutes } from './aa/aa-routes.js';
 import { mountGuardianRoutes } from './aa/guardian-routes.js';
+import { mountBundlerKeyRoutes } from './aa/bundler-key-routes.js';
+import { parseAdminSubs } from './aa/bundler-keys.js';
 import { setWalletClaimsConfig } from './aa/wallet-claims.js';
 import { loadAaConfig } from './aa/config.js';
 import { mountStaticAssets } from './static-assets.js';
@@ -348,6 +350,20 @@ export async function createProvider(
       kernelImpl: aaCfg.kernelImpl,
     });
   }
+
+  // EW-S1 WP-4 slice B (item 12): admin-gated `bk_` bundler-API-key minting.
+  // Mounted unconditionally so POST /aa/bundler-keys returns a clear 503 when
+  // unconfigured (rather than 404). Enabled only when BOTH the bundler's Redis
+  // (BUNDLER_REDIS_URL — the set the gate reads) and an operator allowlist
+  // (BUNDLER_KEY_ADMIN_SUBS) are set; a bk_ key authorizes paymaster-sponsored
+  // UserOps, so minting is never open self-serve.
+  const bundlerRedis = process.env.BUNDLER_REDIS_URL
+    ? await createRedis(process.env.BUNDLER_REDIS_URL)
+    : undefined;
+  mountBundlerKeyRoutes(provider, {
+    ...(bundlerRedis ? { redis: bundlerRedis } : {}),
+    adminSubs: parseAdminSubs(process.env.BUNDLER_KEY_ADMIN_SUBS),
+  });
 
   return provider;
 }
