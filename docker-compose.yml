@@ -25,6 +25,9 @@ services:
       COOKIE_KEYS: ${COOKIE_KEYS}
       EXPLORER_ORIGIN: ${EXPLORER_ORIGIN}
       DASHBOARD_ORIGIN: ${DASHBOARD_ORIGIN}
+      # memrizz RP (federated agent-memory webapp). Echoed for CORS + the memrizz
+      # redirect origin; assertProductionConfig fails closed on a localhost value.
+      MEMRIZZ_ORIGIN: ${MEMRIZZ_ORIGIN}
       STUDIO_ORIGIN: ${STUDIO_ORIGIN:-}
       WALLETCONNECT_PROJECT_ID: ${WALLETCONNECT_PROJECT_ID:-}
       KYC_WEBHOOK_SECRET: ${KYC_WEBHOOK_SECRET}
