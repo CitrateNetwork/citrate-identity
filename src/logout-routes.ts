@@ -92,6 +92,19 @@ export function mountLogoutRoutes(
   provider.use(async (ctx, next) => {
     const { method, path } = ctx;
 
+    // --- GET /logout — convenience alias for RP-initiated (browser) logout. ---
+    // The OIDC end-session endpoint is `/session/end` (advertised in discovery),
+    // but some relying parties (e.g. memrizz) redirect the browser to `/logout`.
+    // 302 to `/session/end`, preserving the query string so `id_token_hint` /
+    // `post_logout_redirect_uri` / `state` flow through and the standard
+    // post_logout_redirect_uri validation + seamless redirect apply. (Distinct
+    // from `POST /logout`, the token-revoke API below.)
+    if (method === 'GET' && path === '/logout') {
+      const qs = ctx.querystring ? `?${ctx.querystring}` : '';
+      ctx.redirect(`/session/end${qs}`);
+      return;
+    }
+
     // --- GET /sessions/events — SSE fan-out of session-bus events. ---
     if (method === 'GET' && path === '/sessions/events') {
       const res = ctx.res;

@@ -48,6 +48,16 @@ export const DASHBOARD_ORIGIN =
   process.env.DASHBOARD_ORIGIN ?? 'http://localhost:3002';
 
 /**
+ * The memrizz relying party's web origin (the federated agent-memory webapp,
+ * formerly "Mnemosyne"). Mirrors {@link EXPLORER_ORIGIN}: memrizz completes login
+ * by redirecting the browser to `${MEMRIZZ_ORIGIN}/auth/callback`, so that path is
+ * what must be registered as a redirect_uri (and echoed for CORS). Defaults to the
+ * local dev memrizz on :3003; production sets MEMRIZZ_ORIGIN=https://memrizz.citrate.ai.
+ */
+export const MEMRIZZ_ORIGIN =
+  process.env.MEMRIZZ_ORIGIN ?? 'http://localhost:3003';
+
+/**
  * Web origin of the citrate-studio relying party, when it runs as a hosted web
  * surface (the native shell uses loopback PKCE and needs no CORS). Optional —
  * only added to the CORS allow-list when set. No dev default: studio is native
@@ -87,7 +97,7 @@ export const WALLET_EXTENSION_REDIRECT_URI =
  * Built once at module load from the resolved origin env vars.
  */
 export const ALLOWED_CORS_ORIGINS: ReadonlySet<string> = new Set(
-  [EXPLORER_ORIGIN, DASHBOARD_ORIGIN, STUDIO_ORIGIN].filter(
+  [EXPLORER_ORIGIN, DASHBOARD_ORIGIN, STUDIO_ORIGIN, MEMRIZZ_ORIGIN].filter(
     (o): o is string => typeof o === 'string' && o.trim() !== '',
   ),
 );
@@ -123,6 +133,10 @@ export const TRUSTED_FIRST_PARTY_CLIENT_IDS: ReadonlySet<string> = new Set([
   // native client using the loopback PKCE flow (RFC 8252). First-party,
   // Citrate-owned end-to-end, so consent is auto-granted like the web RPs.
   'citrate-studio',
+  // memrizz — the federated agent-memory webapp (formerly "Mnemosyne"). PUBLIC
+  // web client (Authorization Code + PKCE). First-party, Citrate-owned, so
+  // consent is auto-granted like the other web RPs.
+  'memrizz',
 ]);
 
 /** True iff `clientId` is a Citrate-owned trusted first-party RP (TD-8). */
@@ -282,6 +296,9 @@ export interface ConfigEnv {
   ISSUER_URL?: string;
   EXPLORER_ORIGIN?: string;
   DASHBOARD_ORIGIN?: string;
+  /** Hosted memrizz web origin (formerly Mnemosyne). Widens CORS and is the
+   * memrizz RP redirect origin; validated for a local host like the others. */
+  MEMRIZZ_ORIGIN?: string;
   /**
    * Optional hosted citrate-studio web origin. Only used to widen the CORS
    * allow-list; never required (studio is native-first). Validated for a local
@@ -404,6 +421,11 @@ export function assertProductionConfig(env: ConfigEnv): { warnings: string[] } {
   if (isLocalUrl(env.DASHBOARD_ORIGIN)) {
     problems.push(
       `DASHBOARD_ORIGIN points at a local host: ${env.DASHBOARD_ORIGIN}`,
+    );
+  }
+  if (isLocalUrl(env.MEMRIZZ_ORIGIN)) {
+    problems.push(
+      `MEMRIZZ_ORIGIN points at a local host: ${env.MEMRIZZ_ORIGIN}`,
     );
   }
   // STUDIO_ORIGIN is optional (studio is native-first). Only validate it when
@@ -625,6 +647,38 @@ export async function buildConfiguration(
         // `kyc` is available (advertised below) but NOT required for the
         // dashboard's baseline `openid profile wallet`; offline_access enables
         // the refresh_token grant the same way it does for the explorer.
+        scope: 'openid profile wallet kyc offline_access',
+      },
+      {
+        // memrizz — the federated agent-memory webapp (formerly "Mnemosyne").
+        // Hosted web RP, same posture as explorer/dashboard: PUBLIC client (no
+        // secret), Authorization Code + PKCE (S256, enforced globally below),
+        // rotating refresh tokens via offline_access. The Vercel BFF forwards the
+        // user's id_token (aud = client_id `memrizz`) to mem-gateway, which
+        // independently re-verifies it (iss + aud + exp, RS256) — so this
+        // client_id and the gateway's OIDC_AUDIENCE must stay in lockstep.
+        client_id: 'memrizz',
+        token_endpoint_auth_method: 'none',
+        application_type: 'web',
+        grant_types: ['authorization_code', 'refresh_token'],
+        response_types: ['code'],
+        redirect_uris: [
+          // Web callback for the configured (local/dev) memrizz origin.
+          `${MEMRIZZ_ORIGIN}${CALLBACK_PATH}`,
+          // Hosted production memrizz.
+          `https://memrizz.citrate.ai${CALLBACK_PATH}`,
+          // Loopback for native/CLI flows (RFC 8252).
+          LOOPBACK_REDIRECT,
+        ],
+        // RP-initiated logout (GET /session/end, or the /logout alias) lands the
+        // browser back on memrizz once the session ends. panva matches these
+        // exactly, so register the bare origins (with + without trailing slash).
+        post_logout_redirect_uris: [
+          MEMRIZZ_ORIGIN,
+          `${MEMRIZZ_ORIGIN}/`,
+          'https://memrizz.citrate.ai',
+          'https://memrizz.citrate.ai/',
+        ],
         scope: 'openid profile wallet kyc offline_access',
       },
       {
