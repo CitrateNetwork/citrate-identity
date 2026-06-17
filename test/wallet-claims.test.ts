@@ -36,6 +36,7 @@ import {
   setUserStore,
   getUserStore,
 } from '../src/auth/stores.js';
+import { InMemoryKycStore, setKycStore } from '../src/kyc.js';
 
 const FACTORY = '0xd951Cb15495cb6541F7541b9194B2D311E12FD57' as Address;
 const KERNEL_IMPL = '0x99b370120E7F0A4EA4F85cfcb86D4B8d41C3239b' as Address;
@@ -151,6 +152,30 @@ describe('findAccount claims — UUID-keyed users (the seam fix)', () => {
     const claims = await account!.claims('id_token', 'openid wallet', {} as never, [] as never);
     expect(claims.wallet_address).toBeUndefined();
     expect(claims.kyc_status).toBe('none');
+  });
+
+  it('surfaces a LIVE kyc_status keyed on the UUID accountId (COMP-S1 seam)', async () => {
+    // The store is keyed on the OIDC accountId — exactly the externalUserId
+    // /kyc/start hands the vendor and /kyc/_set writes back under. A UUID-keyed
+    // user is now as KYC-able as a SIWE one (pre-EW-S1 this was hardcoded 'none').
+    const store = new InMemoryUserStore();
+    setUserStore(store);
+    const user = await store.createWithPasskey();
+    const kyc = new InMemoryKycStore();
+    setKycStore(kyc);
+    try {
+      await kyc.set(user.id, {
+        status: 'verified',
+        vendor_ref: 'sumsub:applicant-xyz',
+        verified_at: '2026-06-17T00:00:00.000Z',
+      });
+      const account = await findAccount(undefined as never, user.id);
+      const claims = await account!.claims('id_token', 'openid wallet kyc', {} as never, [] as never);
+      expect(claims.kyc_status).toBe('verified');
+      expect(claims.kyc_verified_at).toBe('2026-06-17T00:00:00.000Z');
+    } finally {
+      setKycStore(new InMemoryKycStore());
+    }
   });
 });
 

@@ -476,6 +476,39 @@ const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 /**
+ * Live KYC claim fields for an OIDC accountId, read fresh at claims() time.
+ *
+ * The KYC store is keyed on the OIDC accountId — which `/kyc/start` (WP-C)
+ * hands the vendor as `externalUserId`, and which the `/kyc/_set` webhook
+ * writes back under. For SIWE subs the accountId IS the EIP-55 address; for
+ * UUID-keyed subs (passkey / email-pw / Google) it is the user UUID. Either
+ * way one human → one key → one KYC record, so both account shapes resolve
+ * verification identically (COMP-S1 seam, unblocked once EW-S1 gave every
+ * account shape a wallet). panva calls claims() afresh per /userinfo, so a
+ * revoke or an expiry that lands after a token was minted is reflected on the
+ * next call.
+ */
+async function kycClaimFields(accountId: string): Promise<{
+  kyc_status: KycStatus | 'none' | 'expired';
+  kyc_verified_at?: string;
+  kyc_expires_at?: string;
+}> {
+  const claim = await getKycStore().get(accountId);
+  const kyc_status: KycStatus | 'none' | 'expired' = claim
+    ? effectiveVerified(claim)
+      ? 'verified'
+      : claim.status === 'verified'
+        ? 'expired'
+        : claim.status
+    : 'none';
+  return {
+    kyc_status,
+    kyc_verified_at: claim?.verified_at,
+    kyc_expires_at: claim?.expires_at,
+  };
+}
+
+/**
  * The `wallets` claim (IDP-S3): the identity's primary wallet first,
  * then every registry-linked wallet (proof-verified, in link order,
  * deduped). Read at claims() time so links/unlinks reflect on the next
@@ -542,6 +575,11 @@ export const findAccount: FindAccount = (_ctx, sub): Account => {
           ? getAddress(rec.primaryWallet)
           : predictedWalletForAccount(accountId);
         const linked = await linkedWalletsFor(accountId, wallet);
+        // KYC is keyed on the OIDC accountId (the UUID here), which is exactly
+        // the `externalUserId` /kyc/start handed the vendor. Surface it live —
+        // the smart wallet exists counterfactually from signup, so a UUID-keyed
+        // user is as KYC-able as a SIWE one (COMP-S1 seam, post-EW-S1).
+        const kyc = await kycClaimFields(accountId);
         return {
           sub: accountId,
           ...(wallet ? { wallet_address: wallet } : {}),
@@ -549,31 +587,18 @@ export const findAccount: FindAccount = (_ctx, sub): Account => {
           ...(rec?.lastSigningMethod
             ? { signing_method: rec.lastSigningMethod }
             : {}),
-          kyc_status: 'none',
+          ...kyc,
         };
       }
-      // Wallet-bound path (SIWE). Read the CURRENT KYC record at claims()
-      // time. panva invokes claims() afresh for every /userinfo call (it
-      // is not cached against a token), so a revoke or an expiry that
-      // lands AFTER a token was minted is reflected the next time an RP
-      // calls /userinfo.
-      const claim = await getKycStore().get(accountId);
-      const verified = effectiveVerified(claim);
-      const kyc_status: KycStatus | 'none' | 'expired' = claim
-        ? verified
-          ? 'verified'
-          : claim.status === 'verified'
-            ? 'expired'
-            : claim.status
-        : 'none';
+      // Wallet-bound path (SIWE). Same live KYC read as the UUID path, keyed
+      // on the accountId (here the EIP-55 address).
+      const kyc = await kycClaimFields(accountId);
       return {
         sub: accountId,
         wallet_address: accountId,
         wallets: await linkedWalletsFor(accountId, accountId),
         signing_method: 'siwe',
-        kyc_status,
-        kyc_verified_at: claim?.verified_at,
-        kyc_expires_at: claim?.expires_at,
+        ...kyc,
       };
     },
   };
