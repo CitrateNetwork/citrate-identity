@@ -9,7 +9,8 @@ import {
   WALLETCONNECT_PROJECT_ID,
 } from './config.js';
 import { mountSiweRoutes } from './siwe-routes.js';
-import { mountKycRoutes } from './kyc-routes.js';
+import { mountKycRoutes, mountKycStartRoute } from './kyc-routes.js';
+import { initKycProviderFromEnv } from './kyc-providers/index.js';
 import { mountLogoutRoutes } from './logout-routes.js';
 import { mountHttpExtras } from './http-extras.js';
 import { mountAaRoutes } from './aa/aa-routes.js';
@@ -319,6 +320,12 @@ export async function createProvider(
     ? { webhookSecret: options.kycWebhookSecret }
     : {});
 
+  // Portal-registration WP-C: user-facing /kyc/start. Requires an active OIDC
+  // interaction whose session carries an accountId. 503 when KYC_PROVIDER is
+  // unset (the env init left the singleton undefined). The route reads the
+  // active vendor name from KYC_PROVIDER to choose the SDK URL pattern.
+  mountKycStartRoute(provider);
+
   // IDP-S2 / TD-5 (authority side): POST /logout revokes the presented token,
   // ends its session, and publishes a `logout` on the session bus; GET
   // /sessions/events streams those events to subscribed relying parties (SSE).
@@ -389,6 +396,11 @@ async function main(): Promise<void> {
   // gate as KYC — Postgres in prod, in-memory in dev — so /auth/password/* and
   // /auth/webauthn/* persist user records as soon as DATABASE_URL is set.
   await initAuthStoresFromEnv(process.env);
+
+  // Portal-registration WP-C: install the KycProvider singleton from env.
+  // With KYC_PROVIDER unset, /kyc/start fails closed (503). Production
+  // routinely sets KYC_PROVIDER=sumsub; dev/test set =mock.
+  await initKycProviderFromEnv(process.env);
 
   // HA / restart-safe: install the Redis-backed authority state for this env.
   // With REDIS_URL set this connects one shared client, installs the

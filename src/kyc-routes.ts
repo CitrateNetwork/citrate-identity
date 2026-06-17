@@ -27,6 +27,8 @@ import {
   type KycClaim,
   type KycStatus,
 } from './kyc.js';
+import { getKycProvider } from './kyc-providers/index.js';
+import { KYC_LEVELS, type KycLevel } from './kyc-providers/level-hints.js';
 
 export interface KycRouteOptions {
   /**
@@ -36,6 +38,21 @@ export interface KycRouteOptions {
    * by an unauthenticated caller.
    */
   webhookSecret?: string;
+}
+
+/** Options for {@link mountKycStartRoute}. */
+export interface KycStartRouteOptions {
+  /**
+   * Active vendor name — drives the SDK URL pattern when the provider's
+   * `mintClientSession` doesn't return a hosted `redirectUrl` (Sumsub).
+   * Defaults to `process.env.KYC_PROVIDER`. For `clear` the provider's
+   * own `redirectUrl` is preferred; for `mock` a deterministic
+   * `kyc-mock.invalid` URL is built; for `sumsub` the Sumsub idensic
+   * URL is built from the token.
+   */
+  vendor?: string;
+  /** TTL the WebSDK token is requested with (seconds). Default 600. */
+  ttlSec?: number;
 }
 
 async function readJson(
@@ -185,5 +202,208 @@ export function mountKycRoutes(
     const claim: KycClaim = { status, vendor_ref, verified_at, expires_at };
     await getKycStore().set(address, claim);
     sendJson(ctx.res, 200, { address, kyc_status: status });
+  });
+}
+
+/**
+ * Map the user-facing tier query (`?level=T3` / `?level=T4`) to the
+ * vendor-neutral `levelHint` the {@link KycProvider} interface speaks.
+ * Returns undefined for an unrecognised string so the caller can 400.
+ */
+function tierToKycLevel(tier: string | undefined): KycLevel | undefined {
+  switch ((tier ?? 'T3').toUpperCase()) {
+    case 'T3':
+      return KYC_LEVELS.BASIC_INDIVIDUAL;
+    case 'T4':
+      return KYC_LEVELS.KYB_ENTITY;
+    default:
+      return undefined;
+  }
+}
+
+/**
+ * Build the URL the user-agent gets 303'd to after `mintClientSession`.
+ * The provider may return its own hosted URL (CLEAR style); when it
+ * doesn't (Sumsub, Mock), we construct one from the token. URL
+ * construction is the route's responsibility so the provider interface
+ * stays focused on credentials.
+ */
+function buildKycRedirectUrl(args: {
+  vendor: string;
+  token: string;
+  applicantId: string;
+  hostedRedirectUrl?: string;
+}): string {
+  if (args.hostedRedirectUrl) return args.hostedRedirectUrl;
+  switch (args.vendor) {
+    case 'sumsub':
+      return `https://api.sumsub.com/idensic/l/#/?accessToken=${encodeURIComponent(args.token)}`;
+    case 'mock':
+      return (
+        `https://kyc-mock.invalid/sdk?token=${encodeURIComponent(args.token)}` +
+        `&applicantId=${encodeURIComponent(args.applicantId)}`
+      );
+    default:
+      throw new Error(`buildKycRedirectUrl: no URL pattern for vendor "${args.vendor}"`);
+  }
+}
+
+/**
+ * Process-local cache of `accountId → applicantId`. The vendor side is
+ * already idempotent on `externalUserId` (Sumsub returns the existing
+ * applicantId; Mock does too), but caching here avoids the round-trip
+ * when a user clicks "Verify identity" repeatedly. Mirrors the
+ * webauthn challenge store's posture: process-local Map is sufficient
+ * for the single-instance authority; multi-instance moves to Redis when
+ * we move sessions there.
+ */
+class ApplicantCache {
+  private readonly byAccountId = new Map<string, string>();
+  get(accountId: string): string | undefined {
+    return this.byAccountId.get(accountId);
+  }
+  set(accountId: string, applicantId: string): void {
+    this.byAccountId.set(accountId, applicantId);
+  }
+}
+
+/**
+ * Mount `GET /kyc/start` — the user-facing identity-verification kickoff
+ * endpoint (WP-C of the portal registration ladder).
+ *
+ * Contract:
+ *   - Requires an active OIDC interaction (`provider.interactionDetails`)
+ *     whose session carries an `accountId`. Without an interaction → 400.
+ *     With an interaction but no accountId → 401 "sign in first".
+ *   - Reads `?level=T3` (default) or `?level=T4`. T3 → BASIC_INDIVIDUAL;
+ *     T4 → KYB_ENTITY. Other values → 400.
+ *   - Calls `getKycProvider().createApplicant({externalUserId, levelHint})`
+ *     (cached per session — see {@link ApplicantCache}), then
+ *     `mintClientSession`, then 303s the browser to a vendor-shaped URL
+ *     built from the token.
+ *   - 503 if `KYC_PROVIDER` is unset (no provider installed); 501 if the
+ *     adapter rejects the level (e.g. Sumsub's KYB-not-yet-configured).
+ *
+ * Per ADR-2026-06-03 data-controller boundary: this route only
+ * brokers — it never sees PII. The user uploads documents directly to
+ * the vendor; the verdict comes back over the webhook to `/kyc/_set`.
+ */
+export function mountKycStartRoute(
+  provider: Provider,
+  options: KycStartRouteOptions = {},
+): void {
+  const vendor = options.vendor ?? process.env.KYC_PROVIDER;
+  const ttlSec = options.ttlSec ?? 600;
+  const cache = new ApplicantCache();
+
+  provider.use(async (ctx, next) => {
+    if (ctx.method !== 'GET') return next();
+    // Match the literal path AND any querystring on `?level=...`.
+    const path = ctx.path;
+    if (path !== '/kyc/start') return next();
+
+    // Active interaction is required: this surface lives behind a
+    // sign-in flow, exactly like /auth/webauthn/register-options.
+    let interaction: Awaited<
+      ReturnType<typeof provider.interactionDetails>
+    > | null = null;
+    try {
+      interaction = await provider.interactionDetails(ctx.req, ctx.res);
+    } catch {
+      interaction = null;
+    }
+    if (!interaction) {
+      sendJson(ctx.res, 400, {
+        error: 'invalid_request',
+        reason: 'no active interaction',
+      });
+      return;
+    }
+
+    const accountId = interaction.session?.accountId;
+    if (!accountId) {
+      sendJson(ctx.res, 401, {
+        error: 'unauthorized',
+        reason: 'sign in first, then start identity verification',
+      });
+      return;
+    }
+
+    const levelHint = tierToKycLevel(ctx.query['level'] as string | undefined);
+    if (!levelHint) {
+      sendJson(ctx.res, 400, {
+        error: 'invalid_request',
+        reason: 'level must be T3 (individual KYC) or T4 (entity KYB)',
+      });
+      return;
+    }
+
+    const kycProvider = getKycProvider();
+    if (!kycProvider) {
+      sendJson(ctx.res, 503, {
+        error: 'kyc_unconfigured',
+        reason:
+          'KYC_PROVIDER is not set; user-facing identity verification disabled',
+      });
+      return;
+    }
+    if (!vendor) {
+      // The singleton is installed but no vendor name to build the
+      // SDK URL with. Fail closed — a runtime config mismatch.
+      sendJson(ctx.res, 503, {
+        error: 'kyc_unconfigured',
+        reason: 'KYC vendor name unavailable for SDK URL construction',
+      });
+      return;
+    }
+
+    try {
+      let applicantId = cache.get(accountId);
+      if (!applicantId) {
+        const created = await kycProvider.createApplicant({
+          externalUserId: accountId,
+          levelHint,
+        });
+        applicantId = created.applicantId;
+        cache.set(accountId, applicantId);
+      }
+      const session = await kycProvider.mintClientSession({
+        applicantId,
+        externalUserId: accountId,
+        ttlSec,
+      });
+      const url = buildKycRedirectUrl({
+        vendor,
+        token: session.token,
+        applicantId,
+        ...(session.redirectUrl ? { hostedRedirectUrl: session.redirectUrl } : {}),
+      });
+      ctx.res.writeHead(303, {
+        location: url,
+        'cache-control': 'no-store',
+      });
+      ctx.res.end();
+      return;
+    } catch (err) {
+      const message = (err as Error).message ?? 'unknown error';
+      // The Sumsub adapter throws a clear "not configured at COMP-S1"
+      // for KYB today; surface that as 501 so the dashboard can render
+      // a "coming soon" copy without guessing.
+      if (
+        message.includes('KYB_ENTITY not configured') ||
+        message.includes('ENHANCED_INDIVIDUAL not configured')
+      ) {
+        sendJson(ctx.res, 501, {
+          error: 'not_implemented',
+          reason: message,
+        });
+        return;
+      }
+      sendJson(ctx.res, 502, {
+        error: 'kyc_vendor_error',
+        reason: message,
+      });
+      return;
+    }
   });
 }
