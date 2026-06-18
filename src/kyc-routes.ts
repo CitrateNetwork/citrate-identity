@@ -605,6 +605,9 @@ export function mountKycStartRoute(
         applicantId,
         externalUserId: accountId,
         ttlSec,
+        // Native post-verification redirect back to the data room (Sumsub
+        // external-link `redirect`). Also stashed in the /kyc/return cookie above.
+        ...(returnTo ? { returnTo } : {}),
       });
       const url = buildKycRedirectUrl({
         vendor,
