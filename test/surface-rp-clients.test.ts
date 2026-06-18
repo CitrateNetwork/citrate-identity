@@ -43,4 +43,15 @@ describe('wallet-surface RP clients', () => {
     );
     expect(c).toBeUndefined();
   });
+
+  it('registers citrate-buyer-webapp as a public web PKCE client with an /auth/callback redirect (AUTHSPINE S3-WP1)', async () => {
+    const c = (await clients()).find((x) => x.client_id === 'citrate-buyer-webapp');
+    expect(c).toBeDefined();
+    expect(c?.application_type).toBe('web');
+    expect(c?.token_endpoint_auth_method).toBe('none'); // public client; PKCE carries PoP
+    expect(c?.redirect_uris?.some((u) => u.endsWith('/auth/callback'))).toBe(true);
+    expect(
+      c?.redirect_uris?.includes('https://citrate-buyer-webapp.vercel.app/auth/callback'),
+    ).toBe(true);
+  });
 });

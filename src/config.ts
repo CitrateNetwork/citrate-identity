@@ -59,6 +59,16 @@ export const MEMRIZZ_ORIGIN =
   process.env.MEMRIZZ_ORIGIN ?? 'http://localhost:3003';
 
 /**
+ * The citrate-buyer-webapp relying party's web origin (AUTHSPINE S3-WP1). Mirrors
+ * {@link EXPLORER_ORIGIN}: the buyer app completes login by redirecting the browser
+ * to `${BUYER_WEBAPP_ORIGIN}/auth/callback`, so that path must be a registered
+ * redirect_uri. Dev default :3004 (explorer 3001 / dashboard 3002 / memrizz 3003);
+ * production sets BUYER_WEBAPP_ORIGIN to the hosted origin.
+ */
+export const BUYER_WEBAPP_ORIGIN =
+  process.env.BUYER_WEBAPP_ORIGIN ?? 'http://localhost:3004';
+
+/**
  * The Citrate Atlas docs app's web origin (citrate-docs, deployed at
  * `docs.citrate.ai` / `citrate-atlas.vercel.app`). Atlas completes login by
  * redirecting the browser to `${ATLAS_ORIGIN}/api/auth/callback` — a Next.js API
@@ -127,6 +137,7 @@ export const ALLOWED_CORS_ORIGINS: ReadonlySet<string> = new Set(
     MEMRIZZ_ORIGIN,
     ATLAS_ORIGIN,
     DATAROOM_ORIGIN,
+    BUYER_WEBAPP_ORIGIN,
   ].filter(
     (o): o is string => typeof o === 'string' && o.trim() !== '',
   ),
@@ -174,6 +185,10 @@ export const TRUSTED_FIRST_PARTY_CLIENT_IDS: ReadonlySet<string> = new Set([
   // client (Authorization Code + PKCE). First-party, Citrate-owned end-to-end, so
   // the investor is not shown a consent screen for our own room.
   'citrate-dataroom',
+  // citrate-buyer-webapp — the marketplace buyer app (AUTHSPINE S3-WP1). PUBLIC web
+  // client (Authorization Code + PKCE); identity on the spine, Privy kept only as the
+  // wallet/signer. First-party, Citrate-owned end-to-end → consent auto-granted.
+  'citrate-buyer-webapp',
 ]);
 
 /** True iff `clientId` is a Citrate-owned trusted first-party RP (TD-8). */
@@ -747,6 +762,34 @@ export async function buildConfiguration(
         // `kyc` is available (advertised below) but NOT required for the
         // dashboard's baseline `openid profile wallet`; offline_access enables
         // the refresh_token grant the same way it does for the explorer.
+        scope: 'openid profile wallet kyc offline_access',
+      },
+      {
+        // citrate-buyer-webapp — the marketplace buyer app (AUTHSPINE S3-WP1).
+        // Same posture as explorer/dashboard: PUBLIC client (no secret),
+        // Authorization Code + PKCE (S256, enforced globally below), rotating
+        // refresh tokens via offline_access. Identity is on the spine; Privy is
+        // retained only as the in-app wallet/signer (it never talks to /token).
+        client_id: 'citrate-buyer-webapp',
+        token_endpoint_auth_method: 'none',
+        application_type: 'web',
+        grant_types: ['authorization_code', 'refresh_token'],
+        response_types: ['code'],
+        redirect_uris: [
+          // Web callback for the configured (local/dev) buyer-webapp origin.
+          `${BUYER_WEBAPP_ORIGIN}${CALLBACK_PATH}`,
+          // Hosted buyer-webapp (Vercel) — replace/extend when a custom
+          // *.citrate.ai domain lands (set BUYER_WEBAPP_ORIGIN to it).
+          `https://citrate-buyer-webapp.vercel.app${CALLBACK_PATH}`,
+          // Loopback for native/CLI flows (RFC 8252).
+          LOOPBACK_REDIRECT,
+        ],
+        post_logout_redirect_uris: [
+          BUYER_WEBAPP_ORIGIN,
+          `${BUYER_WEBAPP_ORIGIN}/`,
+          'https://citrate-buyer-webapp.vercel.app',
+          'https://citrate-buyer-webapp.vercel.app/',
+        ],
         scope: 'openid profile wallet kyc offline_access',
       },
       {
