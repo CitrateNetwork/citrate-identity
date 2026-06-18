@@ -10,6 +10,8 @@ import {
   requireRole,
   accountHubUrl,
   kycStartUrl,
+  recheckKyc,
+  recheckKycVerified,
   ENTITLEMENT_CLAIM,
 } from '../packages/oidc-client/src/index.js';
 
@@ -71,6 +73,52 @@ describe('@citrate/oidc-client — gates', () => {
     const a = parseClaims(ent({ tier: 'confidential', orgId: null, citrateRole: 'admin' }));
     expect(requireRole(a, 'admin')).toBe(true);
     expect(requireRole(a, 'auditor')).toBe(false);
+  });
+});
+
+describe('@citrate/oidc-client — recheckKyc (S4-WP2 revocation cascade)', () => {
+  // A stub fetch that records the request and returns a canned response.
+  const stub = (status: number, body: unknown) => {
+    const calls: { url: string; init?: RequestInit }[] = [];
+    const fn = (async (url: string, init?: RequestInit) => {
+      calls.push({ url, init });
+      return {
+        ok: status >= 200 && status < 300,
+        status,
+        json: async () => body,
+      } as Response;
+    }) as unknown as typeof fetch;
+    return Object.assign(fn, { calls });
+  };
+
+  it('queries /kyc/status?sub= with a Bearer secret and parses live status', async () => {
+    const f = stub(200, { sub: 'u1', kyc_status: 'verified', kyc_expires_at: '2027-01-01T00:00:00Z' });
+    const live = await recheckKyc('https://auth.citrate.ai/', 'u1', 'sekret', f);
+    expect(live.kycStatus).toBe('verified');
+    expect(live.kycExpiresAt).toBe('2027-01-01T00:00:00Z');
+    expect(f.calls[0].url).toBe('https://auth.citrate.ai/kyc/status?sub=u1');
+    expect((f.calls[0].init?.headers as Record<string, string>).authorization).toBe('Bearer sekret');
+  });
+
+  it('a REVOKED live status overrides a stale "verified" snapshot (cascade)', async () => {
+    const f = stub(200, { sub: 'u1', kyc_status: 'revoked' });
+    expect(await recheckKycVerified('https://auth.citrate.ai', 'u1', 's', f)).toBe(false);
+  });
+
+  it('fails CLOSED on non-200 (→ none, gate denies)', async () => {
+    expect((await recheckKyc('https://auth.citrate.ai', 'u1', 's', stub(401, {}))).kycStatus).toBe('none');
+    expect(await recheckKycVerified('https://auth.citrate.ai', 'u1', 's', stub(503, {}))).toBe(false);
+  });
+
+  it('fails CLOSED when the authority is unreachable (throws → none)', async () => {
+    const boom = (async () => { throw new Error('ECONNREFUSED'); }) as unknown as typeof fetch;
+    expect((await recheckKyc('https://auth.citrate.ai', 'u1', 's', boom)).kycStatus).toBe('none');
+    expect(await recheckKycVerified('https://auth.citrate.ai', 'u1', 's', boom)).toBe(false);
+  });
+
+  it('honors live expiry: verified-but-expired ⇒ not verified', async () => {
+    const f = stub(200, { sub: 'u1', kyc_status: 'verified', kyc_expires_at: '2000-01-01T00:00:00Z' });
+    expect(await recheckKycVerified('https://auth.citrate.ai', 'u1', 's', f)).toBe(false);
   });
 });
 
