@@ -28,6 +28,9 @@ services:
       # memrizz RP (federated agent-memory webapp). Echoed for CORS + the memrizz
       # redirect origin; assertProductionConfig fails closed on a localhost value.
       MEMRIZZ_ORIGIN: ${MEMRIZZ_ORIGIN}
+      # citrate-atlas RP (docs app, docs.citrate.ai). Echoed for CORS + the Atlas
+      # redirect origin; assertProductionConfig fails closed on a localhost value.
+      ATLAS_ORIGIN: ${ATLAS_ORIGIN}
       STUDIO_ORIGIN: ${STUDIO_ORIGIN:-}
       WALLETCONNECT_PROJECT_ID: ${WALLETCONNECT_PROJECT_ID:-}
       KYC_WEBHOOK_SECRET: ${KYC_WEBHOOK_SECRET}
