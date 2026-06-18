@@ -68,7 +68,7 @@ function runContractSuite(name: string, factory: AdapterFactory): void {
       expect(second.applicantId).toBe(first.applicantId);
     });
 
-    it('mintClientSession returns a token + expiresAt', async () => {
+    it('mintClientSession returns a hosted redirectUrl + expiresAt', async () => {
       const { applicantId } = await provider.createApplicant({
         externalUserId: 'user-mint-1',
         levelHint: KYC_LEVELS.BASIC_INDIVIDUAL,
@@ -78,7 +78,9 @@ function runContractSuite(name: string, factory: AdapterFactory): void {
         externalUserId: 'user-mint-1',
         ttlSec: 600,
       });
-      expect(session.token).toBeTruthy();
+      // Sumsub now returns a hosted external WebSDK link (redirectUrl), not an
+      // embedded-SDK token — redirecting to the latter breaks WebSDK init.
+      expect(session.redirectUrl).toMatch(/^https:\/\//);
       expect(session.expiresAt).toBeGreaterThan(Math.floor(Date.now() / 1000));
     });
 
@@ -187,13 +189,13 @@ runContractSuite('SumsubKycProvider', async () => {
       return;
     }
 
-    if (req.method === 'POST' && path === '/resources/accessTokens/sdk') {
+    if (req.method === 'POST' && path === '/resources/sdkIntegrations/levels/-/websdkLink') {
       const chunks: Buffer[] = [];
       req.on('data', (c) => chunks.push(c));
       req.on('end', () => {
         const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { userId: string };
         res.writeHead(200, { 'content-type': 'application/json' });
-        res.end(JSON.stringify({ token: `tok_${body.userId}_${Date.now()}`, userId: body.userId }));
+        res.end(JSON.stringify({ url: `https://in.sumsub.com/websdk/p/${body.userId}` }));
       });
       return;
     }

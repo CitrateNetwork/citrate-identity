@@ -91,15 +91,22 @@ export class MockKycProvider implements KycProvider {
     applicantId: string;
     externalUserId: string;
     ttlSec: number;
+    returnTo?: string;
   }): Promise<{ token: string; expiresAt: number; redirectUrl?: string }> {
     this.record('mintClientSession', [input]);
     if (!this.applicants.has(input.applicantId)) {
       throw new Error(`mock: unknown applicantId ${input.applicantId}`);
     }
     const expiresAt = Math.floor(Date.now() / 1000) + Math.max(1, input.ttlSec);
+    // Mirror the real adapter: return a hosted redirectUrl (deterministic
+    // kyc-mock.invalid link), carrying the return target when provided.
+    const redirectUrl =
+      `https://kyc-mock.invalid/websdk?applicantId=${encodeURIComponent(input.applicantId)}` +
+      (input.returnTo ? `&return=${encodeURIComponent(input.returnTo)}` : '');
     return {
       token: `mocksdk_${input.applicantId}_${expiresAt}`,
       expiresAt,
+      redirectUrl,
     };
   }
 

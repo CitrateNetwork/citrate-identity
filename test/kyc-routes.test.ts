@@ -223,7 +223,8 @@ describe('GET /kyc/start (WP-C portal registration ladder)', () => {
     expect(res.status).toBe(303);
     const loc = res.headers.get('location');
     expect(loc).toBeTruthy();
-    expect(loc!).toMatch(/^https:\/\/kyc-mock\.invalid\/sdk\?token=/);
+    // Now a hosted WebSDK link (redirectUrl), not a hand-built token URL.
+    expect(loc!).toMatch(/^https:\/\/kyc-mock\.invalid\/websdk\?applicantId=/);
     expect(loc!).toMatch(/applicantId=mock_/);
     // Provider was hit exactly once for createApplicant + once for
     // mintClientSession on the first call.

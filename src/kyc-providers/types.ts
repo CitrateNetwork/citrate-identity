@@ -96,12 +96,22 @@ export interface KycProvider {
     externalUserId: string;
     /** Requested TTL in seconds; vendor may cap. */
     ttlSec: number;
+    /**
+     * Where to send the user after verification, when the vendor supports a
+     * native post-flow redirect (Sumsub external WebSDK link `redirect`). The
+     * caller validates this against an allowlist first.
+     */
+    returnTo?: string;
   }): Promise<{
-    /** SDK access token (Sumsub). */
+    /** Embedded-SDK access token. Empty when a hosted `redirectUrl` is used. */
     token: string;
     /** Unix seconds at which the token expires. */
     expiresAt: number;
-    /** Hosted-flow redirect URL (CLEAR). */
+    /**
+     * Hosted-flow redirect URL the browser is 303'd to. Sumsub returns its
+     * external WebSDK link here (a real hosted page — NOT the embedded-SDK
+     * access token, which cannot be opened as a URL). CLEAR returns its authorize URL.
+     */
     redirectUrl?: string;
   }>;
 

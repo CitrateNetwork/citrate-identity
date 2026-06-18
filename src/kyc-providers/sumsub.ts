@@ -160,19 +160,36 @@ export class SumsubKycProvider implements KycProvider {
     applicantId: string;
     externalUserId: string;
     ttlSec: number;
+    returnTo?: string;
   }): Promise<{ token: string; expiresAt: number; redirectUrl?: string }> {
     const ttl = Math.max(60, Math.min(input.ttlSec, 3600));
+    // Generate a HOSTED external WebSDK link (a real, redirectable URL).
+    // Redirecting the browser to the idensic page with an embedded-SDK access
+    // token yields "Initialization failed. Unknown url." — that token is for
+    // snsWebSdk.init() inside a page, not a URL. `userId` (= our externalUserId)
+    // links to the applicant createApplicant already made; `redirect` sends the
+    // user back to the data room natively after verification.
     const body = JSON.stringify({
-      userId: input.externalUserId,
       levelName: this.config.basicLevelName,
+      userId: input.externalUserId,
       ttlInSecs: ttl,
+      ...(input.returnTo
+        ? { redirect: { successUrl: input.returnTo, rejectUrl: input.returnTo } }
+        : {}),
     });
-    const res = await this.signedFetch('POST', '/resources/accessTokens/sdk', body);
-    const json = (await res.json()) as { token?: string; userId?: string };
-    if (!json.token) throw new Error('Sumsub: mintClientSession: no token in response');
+    const res = await this.signedFetch(
+      'POST',
+      '/resources/sdkIntegrations/levels/-/websdkLink',
+      body,
+    );
+    const json = (await res.json()) as { url?: string };
+    if (!json.url) {
+      throw new Error('Sumsub: mintClientSession: no url in websdkLink response');
+    }
     return {
-      token: json.token,
+      token: '',
       expiresAt: Math.floor(Date.now() / 1000) + ttl,
+      redirectUrl: json.url,
     };
   }
 
