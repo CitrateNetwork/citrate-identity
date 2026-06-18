@@ -56,6 +56,27 @@ const CREATE_IDX_SQL = [
 const TABLE_EXISTS_SQL = `SELECT 1 AS present FROM information_schema.tables WHERE table_name = 'entitlements' LIMIT 1`;
 
 const INSERT_BASELINE_SQL = `INSERT INTO entitlements (sub, tier) VALUES ($1, $2)`;
+const INSERT_FULL_SQL = `INSERT INTO entitlements
+  (sub, email, wallet, tier, org_id, citrate_role, milestone, expires_at)
+  VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`;
+
+/** The tiers the authority recognizes (the RBAC ADR pins their meaning). */
+export const TIERS: readonly EntitlementClaim['tier'][] = [
+  'public', 'commercial', 'commercial.kyc', 'academic', 'confidential',
+];
+
+/** A full entitlement grant (admin API). At least one of sub/email/wallet is required. */
+export interface EntitlementGrant {
+  sub?: string | null;
+  email?: string | null;
+  wallet?: string | null;
+  tier: EntitlementClaim['tier'];
+  orgId?: string | null;
+  citrateRole?: string | null;
+  milestone?: string | null;
+  /** ISO-8601 or null (no expiry). */
+  expiresAt?: string | null;
+}
 
 /**
  * The tier a freshly KYC-verified principal is auto-granted (AUTHSPINE S1-WP2 / D2):
@@ -134,6 +155,25 @@ export class EntitlementStore {
     await this.pool.query(INSERT_BASELINE_SQL, [sub, tier]);
     return true;
   }
+
+  /**
+   * Append a full entitlement row (admin grant/raise/revoke). The roster is
+   * append-only and {@link lookup} takes the freshest matching row, so this both
+   * grants and supersedes prior grants (revoke = grant `public`). The insert IS the
+   * audit record (created_at). Higher tiers / roles are issued only through here.
+   */
+  async grant(g: EntitlementGrant): Promise<void> {
+    await this.pool.query(INSERT_FULL_SQL, [
+      g.sub ?? null,
+      g.email ?? null,
+      g.wallet ?? null,
+      g.tier,
+      g.orgId ?? null,
+      g.citrateRole ?? null,
+      g.milestone ?? null,
+      g.expiresAt ?? null,
+    ]);
+  }
 }
 
 // --- lazy singleton over DATABASE_URL (mirrors the KYC store) ---------------
@@ -198,4 +238,15 @@ export async function grantKycBaseline(
   const store = await getStore();
   if (!store) return false;
   return store.grantBaselineIfAbsent(sub, wallet, email, KYC_BASELINE_TIER);
+}
+
+/**
+ * Append an admin-issued entitlement grant. Returns false when no store is
+ * configured (dev). Throws on a DB error so the admin caller sees the failure.
+ */
+export async function grantEntitlement(g: EntitlementGrant): Promise<boolean> {
+  const store = await getStore();
+  if (!store) return false;
+  await store.grant(g);
+  return true;
 }
