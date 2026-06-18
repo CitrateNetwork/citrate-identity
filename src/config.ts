@@ -58,6 +58,17 @@ export const MEMRIZZ_ORIGIN =
   process.env.MEMRIZZ_ORIGIN ?? 'http://localhost:3003';
 
 /**
+ * The Citrate Atlas docs app's web origin (citrate-docs, deployed at
+ * `docs.citrate.ai` / `citrate-atlas.vercel.app`). Atlas completes login by
+ * redirecting the browser to `${ATLAS_ORIGIN}/api/auth/callback` — a Next.js API
+ * route, so the path is `/api/auth/callback`, NOT the `/auth/callback` the other
+ * web RPs use. Defaults to local dev on :3000; production sets
+ * ATLAS_ORIGIN=https://docs.citrate.ai.
+ */
+export const ATLAS_ORIGIN =
+  process.env.ATLAS_ORIGIN ?? 'http://localhost:3000';
+
+/**
  * Web origin of the citrate-studio relying party, when it runs as a hosted web
  * surface (the native shell uses loopback PKCE and needs no CORS). Optional —
  * only added to the CORS allow-list when set. No dev default: studio is native
@@ -97,7 +108,7 @@ export const WALLET_EXTENSION_REDIRECT_URI =
  * Built once at module load from the resolved origin env vars.
  */
 export const ALLOWED_CORS_ORIGINS: ReadonlySet<string> = new Set(
-  [EXPLORER_ORIGIN, DASHBOARD_ORIGIN, STUDIO_ORIGIN, MEMRIZZ_ORIGIN].filter(
+  [EXPLORER_ORIGIN, DASHBOARD_ORIGIN, STUDIO_ORIGIN, MEMRIZZ_ORIGIN, ATLAS_ORIGIN].filter(
     (o): o is string => typeof o === 'string' && o.trim() !== '',
   ),
 );
@@ -137,6 +148,9 @@ export const TRUSTED_FIRST_PARTY_CLIENT_IDS: ReadonlySet<string> = new Set([
   // web client (Authorization Code + PKCE). First-party, Citrate-owned, so
   // consent is auto-granted like the other web RPs.
   'memrizz',
+  // citrate-atlas — the Citrate Atlas documentation app (citrate-docs). PUBLIC web
+  // client (Authorization Code + PKCE). First-party, Citrate-owned end-to-end.
+  'citrate-atlas',
 ]);
 
 /** True iff `clientId` is a Citrate-owned trusted first-party RP (TD-8). */
@@ -299,6 +313,9 @@ export interface ConfigEnv {
   /** Hosted memrizz web origin (formerly Mnemosyne). Widens CORS and is the
    * memrizz RP redirect origin; validated for a local host like the others. */
   MEMRIZZ_ORIGIN?: string;
+  /** Hosted Citrate Atlas web origin (docs.citrate.ai). Widens CORS + is the Atlas
+   * RP redirect origin; validated for a local host like the others. */
+  ATLAS_ORIGIN?: string;
   /**
    * Optional hosted citrate-studio web origin. Only used to widen the CORS
    * allow-list; never required (studio is native-first). Validated for a local
@@ -426,6 +443,11 @@ export function assertProductionConfig(env: ConfigEnv): { warnings: string[] } {
   if (isLocalUrl(env.MEMRIZZ_ORIGIN)) {
     problems.push(
       `MEMRIZZ_ORIGIN points at a local host: ${env.MEMRIZZ_ORIGIN}`,
+    );
+  }
+  if (isLocalUrl(env.ATLAS_ORIGIN)) {
+    problems.push(
+      `ATLAS_ORIGIN points at a local host: ${env.ATLAS_ORIGIN}`,
     );
   }
   // STUDIO_ORIGIN is optional (studio is native-first). Only validate it when
@@ -703,6 +725,35 @@ export async function buildConfiguration(
           `${MEMRIZZ_ORIGIN}/`,
           'https://memrizz.citrate.ai',
           'https://memrizz.citrate.ai/',
+        ],
+        scope: 'openid profile wallet kyc offline_access',
+      },
+      {
+        // citrate-atlas — the Citrate Atlas documentation app (citrate-docs),
+        // hosted at docs.citrate.ai (+ citrate-atlas.vercel.app). Hosted web RP,
+        // PUBLIC client (no secret), Authorization Code + PKCE (S256), rotating
+        // refresh tokens via offline_access. NOTE the callback is the Next.js API
+        // route `/api/auth/callback`, NOT the `/auth/callback` the other web RPs
+        // use. Its `aud` is the client_id `citrate-atlas` (Atlas enforces aud).
+        client_id: 'citrate-atlas',
+        token_endpoint_auth_method: 'none',
+        application_type: 'web',
+        grant_types: ['authorization_code', 'refresh_token'],
+        response_types: ['code'],
+        redirect_uris: [
+          // Configured (local/dev) Atlas origin.
+          `${ATLAS_ORIGIN}/api/auth/callback`,
+          // Hosted production Atlas — custom domain + the Vercel alias.
+          'https://docs.citrate.ai/api/auth/callback',
+          'https://citrate-atlas.vercel.app/api/auth/callback',
+        ],
+        post_logout_redirect_uris: [
+          ATLAS_ORIGIN,
+          `${ATLAS_ORIGIN}/`,
+          'https://docs.citrate.ai',
+          'https://docs.citrate.ai/',
+          'https://citrate-atlas.vercel.app',
+          'https://citrate-atlas.vercel.app/',
         ],
         scope: 'openid profile wallet kyc offline_access',
       },
