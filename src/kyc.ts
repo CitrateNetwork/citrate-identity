@@ -94,6 +94,14 @@ export function isExpired(claim: KycClaim, now: Date = new Date()): boolean {
   if (!claim.expires_at) return false;
   const expiry = Date.parse(claim.expires_at);
   if (Number.isNaN(expiry)) return false;
+  // Degenerate-expiry guard: if expires_at is at or before verified_at, the TTL
+  // is zero/negative — a write anomaly, not a real expiry. Treat it as "no
+  // meaningful expiry" so a freshly-verified user is never silently locked out
+  // by a bad timestamp; genuine re-KYC is driven by a real future expiry.
+  if (claim.verified_at) {
+    const verified = Date.parse(claim.verified_at);
+    if (!Number.isNaN(verified) && expiry <= verified) return false;
+  }
   return now.getTime() > expiry;
 }
 
