@@ -205,6 +205,134 @@ export function mountKycRoutes(
   });
 }
 
+/** Read the raw request body as a Buffer (HMAC needs the exact bytes). */
+async function readRaw(
+  req: IncomingMessage,
+  maxBytes = 256 * 1024,
+): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for await (const chunk of req) {
+    const buf = chunk as Buffer;
+    size += buf.length;
+    if (size > maxBytes) throw new Error('payload too large');
+    chunks.push(buf);
+  }
+  return Buffer.concat(chunks);
+}
+
+/** Lower-case every header name so adapters can read them case-insensitively. */
+function lowerHeaders(req: IncomingMessage): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(req.headers)) {
+    if (typeof v === 'string') out[k.toLowerCase()] = v;
+    else if (Array.isArray(v)) out[k.toLowerCase()] = v.join(',');
+  }
+  return out;
+}
+
+/** Options for {@link mountKycWebhookRoute}. */
+export interface KycWebhookRouteOptions {
+  /** Verified-claim validity. Default 365 days; override via KYC_VERIFIED_TTL_MS. */
+  verifiedTtlMs?: number;
+}
+
+/**
+ * Mount `POST /kyc/webhook` — the REAL vendor webhook (Sumsub/CLEAR), as opposed
+ * to the `/kyc/_set` bearer stand-in. The active {@link KycProvider} verifies the
+ * vendor's signature over the RAW body (Sumsub: HMAC in `x-payload-digest`, keyed
+ * by `SUMSUB_WEBHOOK_SECRET`), then `parseWebhookEvent` decodes it to the
+ * vendor-neutral four-state {@link KycEventKind}. We persist ONLY the closed
+ * {@link KycClaim} (no PII, ADR-2026-06-03), keyed on `externalUserId` — which IS
+ * the OIDC accountId we handed Sumsub at `/kyc/start`, so `/userinfo` reflects it.
+ *
+ * Fails CLOSED: 503 when no provider is configured, 401 on a bad/missing
+ * signature. Acks 2xx for events it can't key/act on so the vendor stops retrying.
+ */
+export function mountKycWebhookRoute(
+  provider: Provider,
+  options: KycWebhookRouteOptions = {},
+): void {
+  const verifiedTtlMs =
+    options.verifiedTtlMs ??
+    (Number(process.env.KYC_VERIFIED_TTL_MS) || 365 * 24 * 60 * 60 * 1000);
+
+  provider.use(async (ctx, next) => {
+    if (ctx.method !== 'POST' || ctx.path !== '/kyc/webhook') return next();
+
+    const kycProvider = getKycProvider();
+    if (!kycProvider) {
+      sendJson(ctx.res, 503, {
+        error: 'kyc_unconfigured',
+        reason: 'KYC_PROVIDER is not set; webhook disabled',
+      });
+      return;
+    }
+
+    let raw: Buffer;
+    try {
+      raw = await readRaw(ctx.req);
+    } catch {
+      sendJson(ctx.res, 400, { error: 'invalid_request', reason: 'bad_body' });
+      return;
+    }
+
+    // Authenticity FIRST: an unverified body is never parsed for effect.
+    if (!kycProvider.verifyWebhook(lowerHeaders(ctx.req), raw)) {
+      sendJson(ctx.res, 401, {
+        error: 'unauthorized',
+        reason: 'invalid or missing webhook signature',
+      });
+      return;
+    }
+
+    let event;
+    try {
+      event = await kycProvider.parseWebhookEvent(raw);
+    } catch {
+      sendJson(ctx.res, 400, { error: 'invalid_request', reason: 'unparseable_event' });
+      return;
+    }
+
+    // externalUserId IS our OIDC accountId (set at /kyc/start). Without it we
+    // can't key the claim — ack so the vendor stops retrying, but change nothing.
+    const key = event.externalUserId;
+    if (!key) {
+      sendJson(ctx.res, 202, { ok: true, ignored: 'no externalUserId on event' });
+      return;
+    }
+
+    const occurred = event.occurredAt ?? Date.now();
+    const iso = (ms: number) => new Date(ms).toISOString();
+    switch (event.kind) {
+      case 'verified':
+        await getKycStore().set(key, {
+          status: 'verified',
+          vendor_ref: event.applicantId,
+          verified_at: iso(occurred),
+          expires_at: iso(occurred + verifiedTtlMs),
+        });
+        break;
+      case 'pending':
+        await getKycStore().set(key, {
+          status: 'pending',
+          vendor_ref: event.applicantId,
+        });
+        break;
+      case 'rejected':
+      case 'reset':
+        // Both leave the subject NOT verified; record as revoked (fail-closed),
+        // preserving the vendor ref for audit.
+        await getKycStore().set(key, {
+          status: 'revoked',
+          vendor_ref: event.applicantId,
+        });
+        break;
+    }
+    sendJson(ctx.res, 200, { ok: true, kind: event.kind });
+  });
+}
+
 /**
  * Map the user-facing tier query (`?level=T3` / `?level=T4`) to the
  * vendor-neutral `levelHint` the {@link KycProvider} interface speaks.
