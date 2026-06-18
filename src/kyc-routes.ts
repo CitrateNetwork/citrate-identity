@@ -30,6 +30,9 @@ import {
 } from './kyc.js';
 import { getKycProvider } from './kyc-providers/index.js';
 import { KYC_LEVELS, type KycLevel } from './kyc-providers/level-hints.js';
+import { grantKycBaseline } from './entitlements.js';
+import { getUserStore } from './auth/stores.js';
+import { predictedWalletForAccount } from './aa/wallet-claims.js';
 
 export interface KycRouteOptions {
   /**
@@ -341,6 +344,21 @@ export function mountKycWebhookRoute(
           verified_at: iso(occurred),
           expires_at: iso(occurred + verifiedTtlMs),
         });
+        // AUTHSPINE S1-WP2: verified KYC OPENS ecosystem access — auto-grant the
+        // baseline tier (no-op if the user already has an entitlement). Best-effort:
+        // never fail the webhook on a grant hiccup — the claim is already persisted.
+        try {
+          const rec = await getUserStore().findById(key);
+          const wallet = rec?.primaryWallet ?? predictedWalletForAccount(key) ?? null;
+          const granted = await grantKycBaseline(key, wallet, rec?.email ?? null);
+          if (granted) {
+            // eslint-disable-next-line no-console
+            console.log(`[kyc] baseline entitlement auto-granted on verify: ${key}`);
+          }
+        } catch (e) {
+          // eslint-disable-next-line no-console
+          console.warn(`[kyc] baseline auto-grant skipped (${(e as Error).message}) for ${key}`);
+        }
         break;
       case 'pending':
         await getKycStore().set(key, {

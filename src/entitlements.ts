@@ -55,6 +55,16 @@ const CREATE_IDX_SQL = [
 ];
 const TABLE_EXISTS_SQL = `SELECT 1 AS present FROM information_schema.tables WHERE table_name = 'entitlements' LIMIT 1`;
 
+const INSERT_BASELINE_SQL = `INSERT INTO entitlements (sub, tier) VALUES ($1, $2)`;
+
+/**
+ * The tier a freshly KYC-verified principal is auto-granted (AUTHSPINE S1-WP2 / D2):
+ * passing KYC OPENS ecosystem access. `commercial.kyc` = a verified, transacting
+ * member (T1 actions: sell / withdraw / bulk-buy). Higher tiers (academic /
+ * confidential) and roles remain explicit grants. Tunable via the RBAC ADR (S1-WP5).
+ */
+export const KYC_BASELINE_TIER: EntitlementClaim['tier'] = 'commercial.kyc';
+
 /** Most specific match wins: sub, then wallet, then email; freshest row first. */
 const LOOKUP_SQL = `
 SELECT tier, org_id, citrate_role, milestone, expires_at
@@ -105,6 +115,25 @@ export class EntitlementStore {
       expiresAt,
     };
   }
+
+  /**
+   * Grant `tier` to `sub` ONLY if the principal has NO entitlement yet (by sub /
+   * wallet / email). This never shadows or downgrades an existing — possibly
+   * higher or role-bearing — grant (e.g. an owner's email-keyed `confidential`).
+   * Returns true iff a baseline row was inserted. Idempotent across repeated
+   * verified webhooks for the same principal.
+   */
+  async grantBaselineIfAbsent(
+    sub: string,
+    wallet: string | null,
+    email: string | null,
+    tier: EntitlementClaim['tier'],
+  ): Promise<boolean> {
+    const existing = await this.lookup(sub, wallet, email);
+    if (existing) return false;
+    await this.pool.query(INSERT_BASELINE_SQL, [sub, tier]);
+    return true;
+  }
 }
 
 // --- lazy singleton over DATABASE_URL (mirrors the KYC store) ---------------
@@ -151,4 +180,22 @@ export async function resolveEntitlementClaim(
     return { tier: 'public', orgId: null, expiresAt: null };
   }
   return ent;
+}
+
+/**
+ * On verified KYC, ensure the principal has at least the baseline tier so passing
+ * KYC OPENS ecosystem access (AUTHSPINE S1-WP2 / D2). No-op when no store is
+ * configured (dev) or the principal already has an entitlement (their explicit
+ * grant stands; the KYC gate in {@link resolveEntitlementClaim} keeps it effective).
+ * Returns true iff a baseline row was granted. Best-effort: callers should not fail
+ * the KYC webhook if this throws (the claim is already persisted).
+ */
+export async function grantKycBaseline(
+  sub: string,
+  wallet: string | null,
+  email: string | null,
+): Promise<boolean> {
+  const store = await getStore();
+  if (!store) return false;
+  return store.grantBaselineIfAbsent(sub, wallet, email, KYC_BASELINE_TIER);
 }
