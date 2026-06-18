@@ -18,6 +18,7 @@ import {
 } from './kyc-routes.js';
 import { initKycProviderFromEnv } from './kyc-providers/index.js';
 import { mountLogoutRoutes } from './logout-routes.js';
+import { mountAccountRoute } from './account-routes.js';
 import { mountHttpExtras } from './http-extras.js';
 import { mountAaRoutes } from './aa/aa-routes.js';
 import { mountGuardianRoutes } from './aa/guardian-routes.js';
@@ -342,6 +343,10 @@ export async function createProvider(
   // /kyc/status?sub= (service-guarded owner re-check; fail-closed without a secret).
   mountKycReturnRoute(provider);
   mountKycStatusRoute(provider);
+
+  // AUTHSPINE S1-WP3: the Account Hub (/account) — the universal authenticated
+  // surface every RP links to (identity, wallet, KYC status + CTA, access tier).
+  mountAccountRoute(provider);
 
   // IDP-S2 / TD-5 (authority side): POST /logout revokes the presented token,
   // ends its session, and publishes a `logout` on the session bus; GET

@@ -54,9 +54,14 @@ const KYC_RETURN_COOKIE = 'kyc_return';
  * (/kyc/return), so a tampered cookie can only ever redirect to an allowed origin.
  */
 function returnAllowlist(): string[] {
+  // The authority's own origin is always allowed so the Account Hub (/account)
+  // can round-trip through KYC (S1-WP3).
+  const self = (process.env.ISSUER_URL || 'https://auth.citrate.ai').replace(/\/+$/, '');
   const env = process.env.KYC_RETURN_ALLOWED_ORIGINS;
-  if (env && env.trim()) return env.split(',').map((s) => s.trim()).filter(Boolean);
-  return ['https://dataroom.citrate.ai', 'https://citrate-dataroom.vercel.app'];
+  const base = env && env.trim()
+    ? env.split(',').map((s) => s.trim()).filter(Boolean)
+    : ['https://dataroom.citrate.ai', 'https://citrate-dataroom.vercel.app'];
+  return base.includes(self) ? base : [...base, self];
 }
 
 /** A `return_to` is accepted only if it is an absolute https URL on the allowlist. */
