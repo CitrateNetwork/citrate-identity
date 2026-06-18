@@ -582,12 +582,12 @@ h1 {
           <div class="field">
             <label for="pw-password">Password</label>
             <input id="pw-password" name="password" type="password" autocomplete="current-password" minlength="8" required />
-            <p class="note" style="margin-top:6px">New here? Use at least 8 characters, then tap <strong>Register</strong> below.</p>
+            <p class="note" style="margin-top:6px">Same email &amp; password either way (min 8 characters). New here? Pick <strong>Create account</strong> — or just sign in and we'll set it up.</p>
           </div>
-          <div class="actions">
+          <div class="actions" style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
             <button id="signin-password" class="btn primary" type="submit">Sign in</button>
+            <button id="register-password" class="btn" type="button">Create account</button>
           </div>
-          <button id="register-password" class="altlink" type="button">First time? Register a new account.</button>
         </form>
       </div>
 
@@ -920,7 +920,10 @@ pwRegister.addEventListener('click', async () => {
   setStatus('Creating your account…');
   const r = await pwPost('/auth/password/register', email, password);
   if (!r.ok || !r.body.redirectTo) {
-    setStatus('Registration failed: ' + (r.body.reason || r.body.error || r.status), true);
+    const msg = r.status === 409
+      ? 'You already have an account with this email — tap Sign in.'
+      : 'Could not create account: ' + (r.body.reason || r.body.error || r.status);
+    setStatus(msg, true);
     pwRegister.disabled = false; return;
   }
   setStatus('Account created.');

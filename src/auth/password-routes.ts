@@ -185,17 +185,63 @@ export function mountPasswordRoutes(provider: Provider): void {
       return;
     }
 
-    // /auth/password/login — find + verify + resume.
+    // /auth/password/login — sign-in-or-create.
     const user = await store.findByEmail(email);
-    // Same failure shape for "unknown email" and "wrong password" so a caller
-    // cannot enumerate registered accounts.
+
+    // No account yet → this is someone who meant to sign UP (the common
+    // accidental-"Sign in" case). Auto-create the account with these credentials
+    // and continue to the address modal, rather than dead-ending at a confusing
+    // 401. (AUTHSPINE S1-WP1.) A WRONG PASSWORD on an EXISTING account still
+    // fails — that is a real error, below. NOTE: this makes the unknown-email
+    // response (200, `created:true`) differ from the wrong-password response
+    // (401), which is a deliberate UX trade-off over strict account-enumeration
+    // resistance; the enumeration-free path is passwordless/magic-link (future).
     if (!user || !user.passwordHash) {
-      respondJson(ctx.res, 401, {
-        error: 'invalid_grant',
-        reason: 'invalid email or password',
+      let passwordHash: string;
+      try {
+        passwordHash = await hashPassword(password);
+      } catch (err) {
+        if (err instanceof PasswordError) {
+          respondJson(ctx.res, 400, { error: 'invalid_request', reason: err.message });
+          return;
+        }
+        throw err;
+      }
+      let created;
+      try {
+        created = await store.createWithEmailPassword({ email, passwordHash });
+      } catch {
+        // Lost a create race (email registered between findByEmail and now):
+        // fall back to a normal verify against the now-existing account.
+        const racer = await store.findByEmail(email);
+        if (racer?.passwordHash && (await verifyPassword(password, racer.passwordHash))) {
+          await store.setLastSigningMethod(racer.id, 'email-pw');
+          const redirectTo = await finishLogin(
+            provider, ctx.req, ctx.res, racer.id, ['pwd'], 'urn:citrate:password',
+          );
+          const walletAddress = predictedWalletForAccount(racer.id);
+          respondJson(ctx.res, 200, {
+            userId: racer.id, redirectTo, ...(walletAddress ? { walletAddress } : {}),
+          });
+          return;
+        }
+        respondJson(ctx.res, 401, { error: 'invalid_grant', reason: 'invalid email or password' });
+        return;
+      }
+      await store.setLastSigningMethod(created.id, 'email-pw');
+      const redirectTo = await finishLogin(
+        provider, ctx.req, ctx.res, created.id, ['pwd'], 'urn:citrate:password',
+      );
+      const walletAddress = predictedWalletForAccount(created.id);
+      respondJson(ctx.res, 200, {
+        userId: created.id,
+        redirectTo,
+        created: true,
+        ...(walletAddress ? { walletAddress } : {}),
       });
       return;
     }
+
     const ok = await verifyPassword(password, user.passwordHash);
     if (!ok) {
       respondJson(ctx.res, 401, {
