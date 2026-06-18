@@ -53,3 +53,38 @@ describe('entitlements — resolveEntitlementClaim', () => {
     expect(ent).toBeNull();
   });
 });
+
+/** A pool that returns `lookupRows` for SELECTs and records every query. */
+function recordingPool(lookupRows: Record<string, unknown>[]) {
+  const calls: { text: string; params?: unknown[] }[] = [];
+  const pool: PgLike & { calls: typeof calls } = {
+    calls,
+    async query(text: string, params?: unknown[]) {
+      calls.push({ text, params });
+      return { rows: /^\s*SELECT/i.test(text) ? lookupRows : [] };
+    },
+  };
+  return pool;
+}
+
+describe('entitlements — grantBaselineIfAbsent (AUTHSPINE S1-WP2)', () => {
+  it('inserts the baseline tier when the principal has NO entitlement', async () => {
+    const pool = recordingPool([]);
+    const store = new EntitlementStore(pool);
+    const granted = await store.grantBaselineIfAbsent('sub-new', null, 'new@x.io', 'commercial.kyc');
+    expect(granted).toBe(true);
+    const insert = pool.calls.find((c) => /INSERT/i.test(c.text));
+    expect(insert).toBeDefined();
+    expect(insert!.params).toEqual(['sub-new', 'commercial.kyc']);
+  });
+
+  it('does NOT shadow an existing (e.g. confidential/admin) grant', async () => {
+    const pool = recordingPool([
+      { tier: 'confidential', org_id: null, citrate_role: 'admin', milestone: null, expires_at: null },
+    ]);
+    const store = new EntitlementStore(pool);
+    const granted = await store.grantBaselineIfAbsent('owner-sub', null, 'owner@x.io', 'commercial.kyc');
+    expect(granted).toBe(false);
+    expect(pool.calls.some((c) => /INSERT/i.test(c.text))).toBe(false);
+  });
+});
