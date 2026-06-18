@@ -19,6 +19,7 @@ import {
 import { initKycProviderFromEnv } from './kyc-providers/index.js';
 import { mountLogoutRoutes } from './logout-routes.js';
 import { mountAccountRoute } from './account-routes.js';
+import { mountAdminEntitlementsRoute } from './admin-routes.js';
 import { mountHttpExtras } from './http-extras.js';
 import { mountAaRoutes } from './aa/aa-routes.js';
 import { mountGuardianRoutes } from './aa/guardian-routes.js';
@@ -347,6 +348,10 @@ export async function createProvider(
   // AUTHSPINE S1-WP3: the Account Hub (/account) — the universal authenticated
   // surface every RP links to (identity, wallet, KYC status + CTA, access tier).
   mountAccountRoute(provider);
+
+  // AUTHSPINE S1-WP4: admin entitlement grant API (service-guarded; fail-closed
+  // when ENTITLEMENTS_ADMIN_SECRET is unset). Grants/raises higher tiers + roles.
+  mountAdminEntitlementsRoute(provider);
 
   // IDP-S2 / TD-5 (authority side): POST /logout revokes the presented token,
   // ends its session, and publishes a `logout` on the session bus; GET
