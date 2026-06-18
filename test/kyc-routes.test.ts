@@ -189,11 +189,13 @@ describe('GET /kyc/start (WP-C portal registration ladder)', () => {
     delete process.env.KYC_PROVIDER;
   });
 
-  it('rejects without an active interaction cookie (400)', async () => {
+  it('rejects with 401 when there is neither an interaction nor a session (C.2)', async () => {
+    // Post-C.2, /kyc/start falls back from interaction → session; with neither,
+    // it asks the user to sign in (401) rather than 400 "no active interaction".
     const res = await fetch(`${h.baseUrl}/kyc/start`, { redirect: 'manual' });
-    expect(res.status).toBe(400);
+    expect(res.status).toBe(401);
     const body = (await res.json()) as { reason: string };
-    expect(body.reason).toBe('no active interaction');
+    expect(body.reason).toMatch(/sign in first/);
   });
 
   it('rejects with 401 when the interaction has no accountId (not signed in)', async () => {

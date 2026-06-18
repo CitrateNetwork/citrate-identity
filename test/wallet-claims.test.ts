@@ -154,6 +154,19 @@ describe('findAccount claims — UUID-keyed users (the seam fix)', () => {
     expect(claims.kyc_status).toBe('none');
   });
 
+  it('emits email + email_verified for an email-keyed account (dataroom C.1)', async () => {
+    const store = new InMemoryUserStore();
+    setUserStore(store);
+    const user = await store.createWithEmailPassword({
+      email: 'investor@example.com',
+      passwordHash: 'x',
+    });
+    const account = await findAccount(undefined as never, user.id);
+    const claims = await account!.claims('id_token', 'openid profile', {} as never, [] as never);
+    expect(claims.email).toBe('investor@example.com');
+    expect(claims.email_verified).toBe(false);
+  });
+
   it('surfaces a LIVE kyc_status keyed on the UUID accountId (COMP-S1 seam)', async () => {
     // The store is keyed on the OIDC accountId — exactly the externalUserId
     // /kyc/start hands the vendor and /kyc/_set writes back under. A UUID-keyed

@@ -24,6 +24,7 @@ import { timingSafeEqual } from 'node:crypto';
 import type Provider from 'oidc-provider';
 import {
   getKycStore,
+  effectiveVerified,
   type KycClaim,
   type KycStatus,
 } from './kyc.js';
@@ -38,6 +39,34 @@ export interface KycRouteOptions {
    * by an unauthenticated caller.
    */
   webhookSecret?: string;
+}
+
+/** Cookie that carries the post-KYC return URL from /kyc/start to /kyc/return. */
+const KYC_RETURN_COOKIE = 'kyc_return';
+
+/**
+ * Origins a `return_to` may point at (where the user lands after Sumsub). Env
+ * `KYC_RETURN_ALLOWED_ORIGINS` (comma-separated https origins) overrides the
+ * default data-room origins. Validated on the way IN (/kyc/start) AND OUT
+ * (/kyc/return), so a tampered cookie can only ever redirect to an allowed origin.
+ */
+function returnAllowlist(): string[] {
+  const env = process.env.KYC_RETURN_ALLOWED_ORIGINS;
+  if (env && env.trim()) return env.split(',').map((s) => s.trim()).filter(Boolean);
+  return ['https://dataroom.citrate.ai', 'https://citrate-dataroom.vercel.app'];
+}
+
+/** A `return_to` is accepted only if it is an absolute https URL on the allowlist. */
+function validatedReturnTo(v: unknown): string | undefined {
+  if (typeof v !== 'string' || v.length === 0) return undefined;
+  let u: URL;
+  try {
+    u = new URL(v);
+  } catch {
+    return undefined;
+  }
+  if (u.protocol !== 'https:') return undefined;
+  return returnAllowlist().includes(u.origin) ? v : undefined;
 }
 
 /** Options for {@link mountKycStartRoute}. */
@@ -333,6 +362,68 @@ export function mountKycWebhookRoute(
   });
 }
 
+/** Options for {@link mountKycStatusRoute}. */
+export interface KycStatusRouteOptions {
+  /**
+   * Shared secret a service caller (a relying-party owner with no applicant
+   * token) must present to re-check a subject's KYC. Defaults to
+   * `KYC_STATUS_SECRET`, then `KYC_WEBHOOK_SECRET`. Unset → fail closed.
+   */
+  statusSecret?: string;
+}
+
+/** Compute the live, vendor-neutral status string for a stored claim. */
+function liveStatus(claim: KycClaim | undefined): KycStatus | 'none' | 'expired' {
+  if (!claim) return 'none';
+  if (effectiveVerified(claim)) return 'verified';
+  return claim.status === 'verified' ? 'expired' : claim.status;
+}
+
+/**
+ * Mount `GET /kyc/status?sub=<sub>` — a service-guarded, read-only re-check so a
+ * room/RP owner (who holds NO applicant token) can confirm a subject's KYC at
+ * grant time (C.3 of the dataroom hand-off). Shared-secret-gated (constant-time),
+ * fail-closed when unconfigured. Returns ONLY the closed claim shape — no PII.
+ */
+export function mountKycStatusRoute(
+  provider: Provider,
+  options: KycStatusRouteOptions = {},
+): void {
+  const expectedSecret =
+    options.statusSecret ??
+    process.env.KYC_STATUS_SECRET ??
+    process.env.KYC_WEBHOOK_SECRET;
+
+  provider.use(async (ctx, next) => {
+    if (ctx.method !== 'GET' || ctx.path !== '/kyc/status') return next();
+
+    if (!expectedSecret) {
+      sendJson(ctx.res, 503, {
+        error: 'kyc_status_unconfigured',
+        reason: 'KYC_STATUS_SECRET / KYC_WEBHOOK_SECRET unset; endpoint disabled',
+      });
+      return;
+    }
+    const presented = presentedSecret(ctx.req);
+    if (!presented || !secretMatches(presented, expectedSecret)) {
+      sendJson(ctx.res, 401, { error: 'unauthorized', reason: 'missing or invalid secret' });
+      return;
+    }
+    const sub = ctx.query['sub'];
+    if (typeof sub !== 'string' || sub.length === 0) {
+      sendJson(ctx.res, 400, { error: 'invalid_request', reason: 'sub is required' });
+      return;
+    }
+    const claim = await getKycStore().get(sub);
+    sendJson(ctx.res, 200, {
+      sub,
+      kyc_status: liveStatus(claim),
+      kyc_verified_at: claim?.verified_at,
+      kyc_expires_at: claim?.expires_at,
+    });
+  });
+}
+
 /**
  * Map the user-facing tier query (`?level=T3` / `?level=T4`) to the
  * vendor-neutral `levelHint` the {@link KycProvider} interface speaks.
@@ -432,23 +523,25 @@ export function mountKycStartRoute(
 
     // Active interaction is required: this surface lives behind a
     // sign-in flow, exactly like /auth/webauthn/register-options.
-    let interaction: Awaited<
-      ReturnType<typeof provider.interactionDetails>
-    > | null = null;
+    // Resolve the signed-in user from EITHER an active authorize interaction
+    // (called mid-flow) OR the post-login auth.citrate.ai session cookie (a
+    // standalone top-level GET — how the data room invokes it after its own
+    // PKCE login). C.2 of the dataroom hand-off.
+    let accountId: string | undefined;
     try {
-      interaction = await provider.interactionDetails(ctx.req, ctx.res);
+      const interaction = await provider.interactionDetails(ctx.req, ctx.res);
+      accountId = interaction?.session?.accountId;
     } catch {
-      interaction = null;
+      // no active interaction — fall through to the session
     }
-    if (!interaction) {
-      sendJson(ctx.res, 400, {
-        error: 'invalid_request',
-        reason: 'no active interaction',
-      });
-      return;
+    if (!accountId) {
+      try {
+        const session = await provider.Session.get(ctx);
+        accountId = session?.accountId;
+      } catch {
+        accountId = undefined;
+      }
     }
-
-    const accountId = interaction.session?.accountId;
     if (!accountId) {
       sendJson(ctx.res, 401, {
         error: 'unauthorized',
@@ -464,6 +557,19 @@ export function mountKycStartRoute(
         reason: 'level must be T3 (individual KYC) or T4 (entity KYB)',
       });
       return;
+    }
+
+    // Optional return_to (C.2): where to send the user after Sumsub. Validated
+    // to an allowlisted https origin, stashed in a short-lived cookie that
+    // /kyc/return consumes (point Sumsub's completion redirect at /kyc/return).
+    const returnTo = validatedReturnTo(ctx.query['return_to']);
+    if (returnTo) {
+      ctx.cookies.set(KYC_RETURN_COOKIE, returnTo, {
+        httpOnly: true,
+        sameSite: 'lax',
+        maxAge: 30 * 60 * 1000,
+        overwrite: true,
+      });
     }
 
     const kycProvider = getKycProvider();
@@ -533,5 +639,24 @@ export function mountKycStartRoute(
       });
       return;
     }
+  });
+}
+
+/**
+ * Mount `GET /kyc/return` — the post-KYC landing (C.2). Reads the short-lived
+ * `kyc_return` cookie set by /kyc/start, re-validates it against the origin
+ * allowlist, clears it, and 303s the user back to the data room (falling back to
+ * the primary allowlisted origin if the cookie is absent/invalid). Point Sumsub's
+ * completion redirect here so a verified user lands back where they started.
+ */
+export function mountKycReturnRoute(provider: Provider): void {
+  provider.use(async (ctx, next) => {
+    if (ctx.method !== 'GET' || ctx.path !== '/kyc/return') return next();
+    const raw = ctx.cookies.get(KYC_RETURN_COOKIE);
+    // Clear the cookie regardless of validity.
+    ctx.cookies.set(KYC_RETURN_COOKIE, null);
+    const dest = validatedReturnTo(raw) ?? returnAllowlist()[0];
+    ctx.res.writeHead(303, { location: dest, 'cache-control': 'no-store' });
+    ctx.res.end();
   });
 }
