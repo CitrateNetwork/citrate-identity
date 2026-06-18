@@ -142,3 +142,71 @@ export function kycStartUrl(issuer: string, returnTo?: string, level: 'T3' | 'T4
   if (returnTo) u.searchParams.set('return_to', returnTo);
   return u.toString();
 }
+
+/** Live KYC as re-fetched from the authority (AUTHSPINE S4-WP2). */
+export interface LiveKyc {
+  kycStatus: KycStatus;
+  kycVerifiedAt?: string;
+  kycExpiresAt?: string;
+}
+
+/**
+ * Live KYC re-check for HIGH-VALUE gates — the revocation cascade (AUTHSPINE
+ * S4-WP2). The id_token's `kyc_status` is a SNAPSHOT: a KYC revoked or expired
+ * AFTER the token was issued still reads "verified" until the token refreshes.
+ * Before a money/irreversible action (sell, withdraw, bulk-buy, signer enroll),
+ * an RP's SERVER re-checks against the authority's service-guarded
+ * `GET /kyc/status?sub=` (Authorization: Bearer `statusSecret`, the RP owner's
+ * KYC_STATUS_SECRET).
+ *
+ * SERVER-ONLY: never call from the browser — `statusSecret` must never reach the
+ * client. FAIL-CLOSED: any network error, non-200, or unparseable body ⇒
+ * `kycStatus: 'none'`, so a gate built on {@link isKycVerified} denies on doubt
+ * rather than honoring a possibly-stale "verified".
+ */
+export async function recheckKyc(
+  issuer: string,
+  sub: string,
+  statusSecret: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<LiveKyc> {
+  try {
+    const u = new URL(issuer.replace(/\/+$/, '') + '/kyc/status');
+    u.searchParams.set('sub', sub);
+    const res = await fetchImpl(u.toString(), {
+      headers: { authorization: `Bearer ${statusSecret}`, accept: 'application/json' },
+    });
+    if (!res.ok) return { kycStatus: 'none' };
+    const j = (await res.json()) as Record<string, unknown>;
+    const k = j.kyc_status;
+    const kycStatus: KycStatus =
+      k === 'verified' || k === 'pending' || k === 'revoked' || k === 'expired' ? k : 'none';
+    return {
+      kycStatus,
+      kycVerifiedAt: typeof j.kyc_verified_at === 'string' ? j.kyc_verified_at : undefined,
+      kycExpiresAt: typeof j.kyc_expires_at === 'string' ? j.kyc_expires_at : undefined,
+    };
+  } catch {
+    return { kycStatus: 'none' };
+  }
+}
+
+/**
+ * Convenience for a high-value gate: live-recheck KYC and return whether it is
+ * effectively verified right now (verified AND not past expiry). Fail-closed
+ * (false on any error). Use this as the server-side guard for irreversible
+ * actions instead of trusting the id_token snapshot.
+ */
+export async function recheckKycVerified(
+  issuer: string,
+  sub: string,
+  statusSecret: string,
+  fetchImpl: typeof fetch = fetch,
+  now: number = Date.now(),
+): Promise<boolean> {
+  const live = await recheckKyc(issuer, sub, statusSecret, fetchImpl);
+  return isKycVerified(
+    { kycStatus: live.kycStatus, kycExpiresAt: live.kycExpiresAt, entitlement: null },
+    now,
+  );
+}
