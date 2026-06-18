@@ -13,6 +13,7 @@ import { getAddress, isAddress } from 'viem';
 import type { Account, Configuration, FindAccount } from 'oidc-provider';
 import { getKycStore, effectiveVerified, type KycStatus } from './kyc.js';
 import { getUserStore } from './auth/stores.js';
+import { resolveEntitlementClaim, ENTITLEMENT_CLAIM } from './entitlements.js';
 import { predictedWalletForAccount } from './aa/wallet-claims.js';
 import { getWalletRegistry } from './identity-registry.js';
 import { createRedisAdapterFactory } from './redis-adapter.js';
@@ -602,6 +603,14 @@ export const findAccount: FindAccount = (_ctx, sub): Account => {
         // the smart wallet exists counterfactually from signup, so a UUID-keyed
         // user is as KYC-able as a SIWE one (COMP-S1 seam, post-EW-S1).
         const kyc = await kycClaimFields(accountId);
+        // Centralized access tier (DGX_AUTHSPINE §3): mint the entitlement claim
+        // from the entitlements roster (KYC-gated). Absent → RP resolves Public.
+        const ent = await resolveEntitlementClaim(
+          accountId,
+          wallet ?? null,
+          rec?.email ?? null,
+          kyc.kyc_status,
+        );
         return {
           sub: accountId,
           ...(wallet ? { wallet_address: wallet } : {}),
@@ -610,17 +619,25 @@ export const findAccount: FindAccount = (_ctx, sub): Account => {
             ? { signing_method: rec.lastSigningMethod }
             : {}),
           ...kyc,
+          ...(ent ? { [ENTITLEMENT_CLAIM]: ent } : {}),
         };
       }
       // Wallet-bound path (SIWE). Same live KYC read as the UUID path, keyed
       // on the accountId (here the EIP-55 address).
       const kyc = await kycClaimFields(accountId);
+      const ent = await resolveEntitlementClaim(
+        accountId,
+        accountId,
+        null,
+        kyc.kyc_status,
+      );
       return {
         sub: accountId,
         wallet_address: accountId,
         wallets: await linkedWalletsFor(accountId, accountId),
         signing_method: 'siwe',
         ...kyc,
+        ...(ent ? { [ENTITLEMENT_CLAIM]: ent } : {}),
       };
     },
   };
@@ -822,7 +839,11 @@ export async function buildConfiguration(
     // provider rejects a client that declares grant_types: ['…','refresh_token'].
     scopes: ['openid', 'profile', 'wallet', 'kyc', 'offline_access'],
     claims: {
-      openid: ['sub'],
+      // `https://citrate.ai/entitlement` rides under `openid` (always granted) so
+      // every RP gets the centralized access tier in the id_token without having
+      // to request an extra scope. Minted only when the principal is on the
+      // entitlements roster; absent otherwise (RP falls back to Public).
+      openid: ['sub', ENTITLEMENT_CLAIM],
       profile: ['name', 'email'],
       // Citrate extension: canonical wallet + linked wallets + the most
       // recent signing method, surfaced under the `wallet` scope (EW-S1
