@@ -31,6 +31,15 @@ services:
       STUDIO_ORIGIN: ${STUDIO_ORIGIN:-}
       WALLETCONNECT_PROJECT_ID: ${WALLETCONNECT_PROJECT_ID:-}
       KYC_WEBHOOK_SECRET: ${KYC_WEBHOOK_SECRET}
+      # COMP-S1 KYC provider (Sumsub). When KYC_PROVIDER=sumsub, /kyc/start and the
+      # real /kyc/webhook go live; all four SUMSUB_* are required or the app
+      # fail-closes on boot. Unset → those routes return 503 (rest unaffected).
+      KYC_PROVIDER: ${KYC_PROVIDER:-}
+      SUMSUB_APP_TOKEN: ${SUMSUB_APP_TOKEN:-}
+      SUMSUB_SECRET_KEY: ${SUMSUB_SECRET_KEY:-}
+      SUMSUB_WEBHOOK_SECRET: ${SUMSUB_WEBHOOK_SECRET:-}
+      SUMSUB_LEVEL_NAME: ${SUMSUB_LEVEL_NAME:-}
+      SUMSUB_BASE_URL: ${SUMSUB_BASE_URL:-}
       CITRATE_RPC_URL: ${CITRATE_RPC_URL:-}
       # EW-S1 AA stack. When CITRATE_AA_FACTORY is set, `server.ts`
       # mounts `/aa/*` routes (predict address, enroll validator, list
