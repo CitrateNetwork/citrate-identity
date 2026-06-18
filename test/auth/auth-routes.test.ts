@@ -242,7 +242,7 @@ describe('POST /auth/password/*', () => {
     expect(body.redirectTo).toMatch(/\/auth\/?/);
   });
 
-  it('login fails with a generic 401 on a wrong password (no enumeration)', async () => {
+  it('login with a WRONG password on an existing account fails 401', async () => {
     const jar = await startInteraction(h.baseUrl);
     await fetch(`${h.baseUrl}/auth/password/register`, {
       method: 'POST',
@@ -251,7 +251,6 @@ describe('POST /auth/password/*', () => {
       redirect: 'manual',
     });
 
-    // Wrong password.
     const jar2 = await startInteraction(h.baseUrl);
     const wrong = await fetch(`${h.baseUrl}/auth/password/login`, {
       method: 'POST',
@@ -260,19 +259,37 @@ describe('POST /auth/password/*', () => {
       redirect: 'manual',
     });
     expect(wrong.status).toBe(401);
-    const wrongBody = (await wrong.json()) as { reason: string };
+  });
 
-    // Unknown email — must produce the same status + same shape.
-    const jar3 = await startInteraction(h.baseUrl);
-    const unknown = await fetch(`${h.baseUrl}/auth/password/login`, {
+  it('login with an UNKNOWN email auto-creates the account (S1-WP1) → 200 created', async () => {
+    // The accidental-"Sign in" case: a user who meant to sign up is auto-created
+    // and lands on the address modal, not a confusing 401.
+    const jar = await startInteraction(h.baseUrl);
+    const res = await fetch(`${h.baseUrl}/auth/password/login`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', cookie: jar3.header() },
-      body: JSON.stringify({ email: 'never@example.com', password: 'any-password' }),
+      headers: { 'content-type': 'application/json', cookie: jar.header() },
+      body: JSON.stringify({ email: 'newcomer@example.com', password: 'correct-horse' }),
       redirect: 'manual',
     });
-    expect(unknown.status).toBe(401);
-    const unknownBody = (await unknown.json()) as { reason: string };
-    expect(wrongBody.reason).toBe(unknownBody.reason);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { created?: boolean; userId: string; redirectTo: string };
+    expect(body.created).toBe(true);
+    expect(body.userId).toBeTruthy();
+    expect(body.redirectTo).toBeTruthy();
+
+    // ...and signing in AGAIN with the same creds now verifies the existing
+    // account (not a second create).
+    const jar2 = await startInteraction(h.baseUrl);
+    const again = await fetch(`${h.baseUrl}/auth/password/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', cookie: jar2.header() },
+      body: JSON.stringify({ email: 'newcomer@example.com', password: 'correct-horse' }),
+      redirect: 'manual',
+    });
+    expect(again.status).toBe(200);
+    const againBody = (await again.json()) as { created?: boolean; userId: string };
+    expect(againBody.created).toBeUndefined();
+    expect(againBody.userId).toBe(body.userId);
   });
 
   it('rejects requests without an active interaction cookie', async () => {
