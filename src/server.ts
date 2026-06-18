@@ -9,7 +9,11 @@ import {
   WALLETCONNECT_PROJECT_ID,
 } from './config.js';
 import { mountSiweRoutes } from './siwe-routes.js';
-import { mountKycRoutes, mountKycStartRoute } from './kyc-routes.js';
+import {
+  mountKycRoutes,
+  mountKycStartRoute,
+  mountKycWebhookRoute,
+} from './kyc-routes.js';
 import { initKycProviderFromEnv } from './kyc-providers/index.js';
 import { mountLogoutRoutes } from './logout-routes.js';
 import { mountHttpExtras } from './http-extras.js';
@@ -325,6 +329,12 @@ export async function createProvider(
   // unset (the env init left the singleton undefined). The route reads the
   // active vendor name from KYC_PROVIDER to choose the SDK URL pattern.
   mountKycStartRoute(provider);
+
+  // COMP-S1: the REAL vendor webhook (Sumsub HMAC over the raw body), distinct
+  // from the /kyc/_set bearer stand-in. Verifies via the active KycProvider,
+  // then writes the live claim keyed on externalUserId (= the OIDC accountId).
+  // Fails closed (503) when KYC_PROVIDER is unset.
+  mountKycWebhookRoute(provider);
 
   // IDP-S2 / TD-5 (authority side): POST /logout revokes the presented token,
   // ends its session, and publishes a `logout` on the session bus; GET
