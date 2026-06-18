@@ -348,7 +348,15 @@ export function mountKycWebhookRoute(
         // baseline tier (no-op if the user already has an entitlement). Best-effort:
         // never fail the webhook on a grant hiccup — the claim is already persisted.
         try {
-          const rec = await getUserStore().findById(key);
+          // Resolve email/wallet for the no-shadow guard, but NEVER let the user
+          // lookup block the grant: findById throws on a non-UUID sub (e.g. a SIWE
+          // EIP-55 address), and those principals must still get the baseline.
+          let rec;
+          try {
+            rec = await getUserStore().findById(key);
+          } catch {
+            rec = undefined;
+          }
           const wallet = rec?.primaryWallet ?? predictedWalletForAccount(key) ?? null;
           const granted = await grantKycBaseline(key, wallet, rec?.email ?? null);
           if (granted) {
