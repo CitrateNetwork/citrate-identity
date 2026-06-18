@@ -643,6 +643,12 @@ export const findAccount: FindAccount = (_ctx, sub): Account => {
         );
         return {
           sub: accountId,
+          // `email`/`email_verified` (OIDC standard, under the `profile` map) —
+          // emitted for UUID accounts that have an email (email-pw / Google).
+          // RPs (e.g. the data room) read these; absent for passkey-only or SIWE.
+          ...(rec?.email
+            ? { email: rec.email, email_verified: rec.emailVerified }
+            : {}),
           ...(wallet ? { wallet_address: wallet } : {}),
           ...(linked.length > 0 ? { wallets: linked } : {}),
           ...(rec?.lastSigningMethod
@@ -904,7 +910,7 @@ export async function buildConfiguration(
       // to request an extra scope. Minted only when the principal is on the
       // entitlements roster; absent otherwise (RP falls back to Public).
       openid: ['sub', ENTITLEMENT_CLAIM],
-      profile: ['name', 'email'],
+      profile: ['name', 'email', 'email_verified'],
       // Citrate extension: canonical wallet + linked wallets + the most
       // recent signing method, surfaced under the `wallet` scope (EW-S1
       // WP-6 seam — explorer/dashboard RPs + Lane B's PIN-S4 consume this

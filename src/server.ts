@@ -13,6 +13,8 @@ import {
   mountKycRoutes,
   mountKycStartRoute,
   mountKycWebhookRoute,
+  mountKycStatusRoute,
+  mountKycReturnRoute,
 } from './kyc-routes.js';
 import { initKycProviderFromEnv } from './kyc-providers/index.js';
 import { mountLogoutRoutes } from './logout-routes.js';
@@ -335,6 +337,11 @@ export async function createProvider(
   // then writes the live claim keyed on externalUserId (= the OIDC accountId).
   // Fails closed (503) when KYC_PROVIDER is unset.
   mountKycWebhookRoute(provider);
+
+  // Dataroom hand-off C.2/C.3: /kyc/return (post-KYC landing back at the RP) and
+  // /kyc/status?sub= (service-guarded owner re-check; fail-closed without a secret).
+  mountKycReturnRoute(provider);
+  mountKycStatusRoute(provider);
 
   // IDP-S2 / TD-5 (authority side): POST /logout revokes the presented token,
   // ends its session, and publishes a `logout` on the session bus; GET
