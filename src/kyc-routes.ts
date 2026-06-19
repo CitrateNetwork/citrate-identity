@@ -339,7 +339,14 @@ export function mountKycWebhookRoute(
       return;
     }
 
-    const occurred = event.occurredAt ?? Date.now();
+    // Defense-in-depth: `occurred` MUST be a finite epoch-ms number, or
+    // `occurred + verifiedTtlMs` below becomes a string concat that collapses the
+    // verified TTL to 0 (the Sumsub `createdAtMs`-is-a-string bug). Providers
+    // should already coerce, but never trust it here.
+    const occurred =
+      typeof event.occurredAt === 'number' && Number.isFinite(event.occurredAt)
+        ? event.occurredAt
+        : Date.now();
     const iso = (ms: number) => new Date(ms).toISOString();
     switch (event.kind) {
       case 'verified':
