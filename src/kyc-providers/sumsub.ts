@@ -98,6 +98,27 @@ export function mapSumsubKind(
   }
 }
 
+/**
+ * Coerce Sumsub's `createdAtMs` into an epoch-ms NUMBER. Sumsub sends it as a
+ * datetime STRING ("2026-06-19 01:32:25.123"), occasionally as a numeric epoch.
+ * Returning a guaranteed number is what keeps the webhook handler's
+ * `occurred + verifiedTtlMs` a numeric ADD (not a string concat that collapsed
+ * the verified TTL to 0). Unparseable / absent → now.
+ */
+export function toEpochMs(v: number | string | undefined | null): number {
+  if (typeof v === 'number' && Number.isFinite(v)) return v;
+  if (typeof v === 'string' && v.trim() !== '') {
+    const t = v.trim();
+    if (/^\d+$/.test(t)) {
+      const n = Number(t);
+      if (Number.isFinite(n)) return n; // numeric epoch-ms string
+    }
+    const parsed = Date.parse(t); // V8 parses "YYYY-MM-DD HH:mm:ss.SSS"
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return Date.now();
+}
+
 /** Default expires-at horizon for verified claims (1 year). Adjustable later via env. */
 const VERIFIED_TTL_MS = 365 * 24 * 60 * 60 * 1000;
 
@@ -221,7 +242,12 @@ export class SumsubKycProvider implements KycProvider {
       type: string;
       reviewStatus?: string;
       reviewResult?: { reviewAnswer?: string; reviewRejectType?: string };
-      createdAtMs?: number;
+      // Sumsub sends this as a DATETIME STRING ("2026-06-19 01:32:25.123"), not
+      // epoch ms despite the name — so it is typed string|number and ALWAYS run
+      // through toEpochMs (see below). Treating it as a number made the webhook
+      // handler compute `occurred + ttl` by STRING CONCATENATION, which Date
+      // re-parsed to the same instant → a 0-day verified TTL on every applicant.
+      createdAtMs?: number | string;
     };
     const kind = mapSumsubKind(
       decoded.type,
@@ -232,7 +258,7 @@ export class SumsubKycProvider implements KycProvider {
       externalUserId: decoded.externalUserId,
       applicantId: decoded.applicantId,
       kind,
-      occurredAt: decoded.createdAtMs ?? Date.now(),
+      occurredAt: toEpochMs(decoded.createdAtMs),
       // raw is intentionally the full body so audit can inspect it.
       // Callers MUST NOT persist this verbatim — anything outside the
       // closed KycClaim shape gets dropped at the store boundary.

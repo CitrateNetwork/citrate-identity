@@ -83,6 +83,31 @@ describe('POST /kyc/webhook (real Sumsub HMAC path)', () => {
     expect(effectiveVerified(claim)).toBe(true);
   });
 
+  it('writes a real ~1y TTL when createdAtMs is a Sumsub DATETIME STRING (regression: 0-TTL bug)', async () => {
+    const STR_ACCT = 'acct-string-createdat';
+    const body = JSON.stringify({
+      applicantId: 'app_str',
+      externalUserId: STR_ACCT,
+      type: 'applicantReviewed',
+      reviewStatus: 'completed',
+      reviewResult: { reviewAnswer: 'GREEN' },
+      // Sumsub's real shape: a datetime STRING, not epoch ms. Adding the TTL to
+      // this used to string-concat and collapse expires_at == verified_at.
+      createdAtMs: '2026-06-19 01:32:25.123',
+    });
+    const res = await postWebhook(body, {
+      'x-payload-digest': sign(body),
+      'x-payload-digest-alg': 'HMAC_SHA256_HEX',
+    });
+    expect(res.status).toBe(200);
+    const claim = await getKycStore().get(STR_ACCT);
+    expect(claim?.status).toBe('verified');
+    expect(effectiveVerified(claim)).toBe(true);
+    const ttl = Date.parse(claim!.expires_at!) - Date.parse(claim!.verified_at!);
+    // ~365 days, NOT 0. Allow a small parse/clock delta.
+    expect(ttl).toBeGreaterThan(360 * 24 * 60 * 60 * 1000);
+  });
+
   it('rejects a forged signature with 401 and does not touch the store', async () => {
     const body = JSON.stringify({
       applicantId: 'app_evil',
