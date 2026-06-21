@@ -309,6 +309,10 @@ export async function createProvider(
       // so the operator just registers `<ISSUER_URL>/auth/google/callback`
       // with Google and we mirror that here.
       redirectUri: `${issuer}/auth/google/callback`,
+      // HA (FWA-C6-02): share the OAuth state/nonce/verifier across instances
+      // via the same Redis client backing nonces/sessions. Omitted in dev →
+      // in-process state store (single-instance, same single-use + TTL).
+      ...(options.redis ? { redis: options.redis } : {}),
     });
   } else if (googleEnabled && !googleClientSecret) {
     // eslint-disable-next-line no-console

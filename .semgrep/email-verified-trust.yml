@@ -1,0 +1,40 @@
+# FWA-C6-01 tripwire — Class-A "trust-what-is-signed" for federated email.
+#
+# A signed id_token proves the IdP ISSUED it, not that the subject owns the
+# `email` it carries. Any route that reads `email` off a verified token payload
+# and uses it to link/create a local account MUST first check `email_verified`.
+#
+# This rule flags reading `<payload>.email` from a JWT/OIDC payload in a file
+# that does NOT also reference `email_verified`. The remediated google-routes.ts
+# references `email_verified` (in trustedEmailFromIdToken), so it passes; a
+# future federation route that forgets the check is flagged.
+#
+# Run: semgrep --config .semgrep/email-verified-trust.yml src/
+rules:
+  - id: federated-email-without-email-verified
+    languages: [typescript]
+    severity: ERROR
+    message: >
+      Reads `email` from a token payload without checking `email_verified` in
+      this file (Class-A trust-what-is-signed → account takeover, FWA-C6-01).
+      A signed id_token does not prove email ownership. Gate any link/create on
+      `email_verified === true` (accept the legacy string "true") before using
+      the email, e.g. via trustedEmailFromIdToken().
+    patterns:
+      - pattern-either:
+          - pattern: $PAYLOAD.email
+          - pattern: $PAYLOAD["email"]
+      # Only fire inside files that look like a federation/id_token consumer.
+      - pattern-inside: |
+          $X = $JV(...)
+          ...
+      - metavariable-regex:
+          metavariable: $JV
+          regex: (jwtVerify|jwtDecrypt)
+      # ...and only when this file never references email_verified at all.
+    paths:
+      include:
+        - "src/**/*.ts"
+      exclude:
+        - "*.test.ts"
+        - "test/**"
