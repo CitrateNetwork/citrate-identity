@@ -1,13 +1,25 @@
-# FWA-C6-01 tripwire — Class-A "trust-what-is-signed" for federated email.
+# FWA-C6-01 / FWA-BV-ID-04 tripwire — Class-A "trust-what-is-signed" for federated email.
 #
 # A signed id_token proves the IdP ISSUED it, not that the subject owns the
 # `email` it carries. Any route that reads `email` off a verified token payload
 # and uses it to link/create a local account MUST first check `email_verified`.
 #
-# This rule flags reading `<payload>.email` from a JWT/OIDC payload in a file
-# that does NOT also reference `email_verified`. The remediated google-routes.ts
-# references `email_verified` (in trustedEmailFromIdToken), so it passes; a
-# future federation route that forgets the check is flagged.
+# This rule flags reading `<payload>.email` (or `<payload>["email"]`) that
+# co-occurs, in the same enclosing scope, with a token verification
+# (`jwtVerify` / `jwtDecrypt`), UNLESS that scope also gates on
+# `email_verified` being `true` (the legacy JSON string "true" is also accepted)
+# via an `=== true` / `=== "true"` comparison. It matches the real idioms the
+# code uses — the previous `$X = $JV(...)` pattern matched only the synchronous
+# `const x = jwtVerify(...)` and MISSED the actual code:
+#
+#     const verified = await jwtVerify(...);    payload = verified.payload; payload.email
+#     const { payload } = await jwtVerify(...); payload.email
+#     const x = jwtVerify(...);                 x.email      (sync form)
+#
+# The remediated google-routes.ts gates link/create on trustedEmailFromIdToken,
+# which compares `payload.email_verified === true || === 'true'` before returning
+# the email, so it passes. A future federation route that reads the bare email
+# claim off a verified token without that gate is flagged.
 #
 # Run: semgrep --config .semgrep/email-verified-trust.yml src/
 rules:
@@ -15,26 +27,67 @@ rules:
     languages: [typescript]
     severity: ERROR
     message: >
-      Reads `email` from a token payload without checking `email_verified` in
-      this file (Class-A trust-what-is-signed → account takeover, FWA-C6-01).
-      A signed id_token does not prove email ownership. Gate any link/create on
-      `email_verified === true` (accept the legacy string "true") before using
-      the email, e.g. via trustedEmailFromIdToken().
+      Reads `email` from a verified token payload without gating on
+      `email_verified === true` in scope (Class-A trust-what-is-signed →
+      account takeover, FWA-C6-01 / FWA-BV-ID-04). A signed id_token does not
+      prove email ownership. Gate any link/create on `email_verified === true`
+      (accept the legacy string "true") before using the email, e.g. via
+      trustedEmailFromIdToken().
     patterns:
+      # (1) The vulnerable read: `<payload>.email` or `<payload>["email"]`.
+      #     Anchored to the exact `email` claim — not `.email_verified` /
+      #     `.emailVerified` (those are the guard, not the claim read).
       - pattern-either:
-          - pattern: $PAYLOAD.email
-          - pattern: $PAYLOAD["email"]
-      # Only fire inside files that look like a federation/id_token consumer.
-      - pattern-inside: |
-          $X = $JV(...)
-          ...
+          - patterns:
+              - pattern: $PAYLOAD.email
+          - patterns:
+              - pattern: $PAYLOAD["email"]
+          - patterns:
+              - pattern: $PAYLOAD['email']
+      # (2) Only where a token is VERIFIED in the same scope — match every
+      #     idiom: sync `jwtVerify(...)`, `await jwtVerify(...)`, and the
+      #     destructuring `const { payload } = await jwtVerify(...)` (whose
+      #     RHS is `await jwtVerify(...)`), plus the jwtDecrypt variants.
+      - pattern-either:
+          - pattern-inside: |
+              ...
+              $JV(...);
+              ...
+          - pattern-inside: |
+              ...
+              await $JV(...);
+              ...
+          - pattern-inside: |
+              ...
+              $LHS = $JV(...);
+              ...
+          - pattern-inside: |
+              ...
+              $LHS = await $JV(...);
+              ...
       - metavariable-regex:
           metavariable: $JV
-          regex: (jwtVerify|jwtDecrypt)
-      # ...and only when this file never references email_verified at all.
+          regex: ^(jwtVerify|jwtDecrypt)$
+      # (3) ...and NOT when the same scope guards on `email_verified` being
+      #     `true` / "true" (the remediated shape via trustedEmailFromIdToken).
+      - pattern-not-inside: |
+          ...
+          $V === true
+          ...
+      - pattern-not-inside: |
+          ...
+          $V === "true"
+          ...
+      - pattern-not-inside: |
+          ...
+          $V === 'true'
+          ...
     paths:
+      # Both globs so the rule fires whether semgrep is pointed at the repo
+      # root (paths like `src/auth/x.ts`) or `src/` is its own scan root.
       include:
         - "src/**/*.ts"
+        - "**/src/**/*.ts"
       exclude:
-        - "*.test.ts"
-        - "test/**"
+        - "**/*.test.ts"
+        - "**/test/**"
