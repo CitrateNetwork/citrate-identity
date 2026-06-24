@@ -91,6 +91,17 @@ export const DATAROOM_ORIGIN =
   process.env.DATAROOM_ORIGIN ?? 'http://localhost:3000';
 
 /**
+ * The citrate-comms web client's origin (citrate-comms/webapp, the trusted-tier
+ * responsive web version of the agentic team workspace, deployed at
+ * `comms.citrate.ai` / `citrate-comms-web.vercel.app`). Mirrors {@link EXPLORER_ORIGIN}:
+ * it completes login by redirecting the browser to `${COMMS_WEB_ORIGIN}/auth/callback`,
+ * so that path is what must be registered as a redirect_uri (and echoed for CORS).
+ * Defaults to local dev on :3004; production sets COMMS_WEB_ORIGIN=https://comms.citrate.ai.
+ */
+export const COMMS_WEB_ORIGIN =
+  process.env.COMMS_WEB_ORIGIN ?? 'http://localhost:3004';
+
+/**
  * Web origin of the citrate-studio relying party, when it runs as a hosted web
  * surface (the native shell uses loopback PKCE and needs no CORS). Optional —
  * only added to the CORS allow-list when set. No dev default: studio is native
@@ -138,6 +149,7 @@ export const ALLOWED_CORS_ORIGINS: ReadonlySet<string> = new Set(
     ATLAS_ORIGIN,
     DATAROOM_ORIGIN,
     BUYER_WEBAPP_ORIGIN,
+    COMMS_WEB_ORIGIN,
   ].filter(
     (o): o is string => typeof o === 'string' && o.trim() !== '',
   ),
@@ -189,6 +201,12 @@ export const TRUSTED_FIRST_PARTY_CLIENT_IDS: ReadonlySet<string> = new Set([
   // client (Authorization Code + PKCE); identity on the spine, Privy kept only as the
   // wallet/signer. First-party, Citrate-owned end-to-end → consent auto-granted.
   'citrate-buyer-webapp',
+  // citrate-comms-web — the trusted-tier web version of the agentic team workspace
+  // (citrate-comms/webapp). PUBLIC web client (Authorization Code + PKCE).
+  // First-party, Citrate-owned end-to-end, so consent is auto-granted like the
+  // other web RPs. The web tier independently re-verifies the id_token (iss + aud
+  // + exp, RS256) and enforces email_verified before trusting the email claim.
+  'citrate-comms-web',
 ]);
 
 /** True iff `clientId` is a Citrate-owned trusted first-party RP (TD-8). */
@@ -357,6 +375,9 @@ export interface ConfigEnv {
   /** Hosted investor data-room web origin (dataroom.citrate.ai). Widens CORS + is
    * the data-room RP redirect origin; validated for a local host like the others. */
   DATAROOM_ORIGIN?: string;
+  /** Hosted citrate-comms web origin (comms.citrate.ai). Widens CORS + is the
+   * comms-web RP redirect origin; validated for a local host like the others. */
+  COMMS_WEB_ORIGIN?: string;
   /**
    * Optional hosted citrate-studio web origin. Only used to widen the CORS
    * allow-list; never required (studio is native-first). Validated for a local
@@ -494,6 +515,11 @@ export function assertProductionConfig(env: ConfigEnv): { warnings: string[] } {
   if (isLocalUrl(env.DATAROOM_ORIGIN)) {
     problems.push(
       `DATAROOM_ORIGIN points at a local host: ${env.DATAROOM_ORIGIN}`,
+    );
+  }
+  if (isLocalUrl(env.COMMS_WEB_ORIGIN)) {
+    problems.push(
+      `COMMS_WEB_ORIGIN points at a local host: ${env.COMMS_WEB_ORIGIN}`,
     );
   }
   // STUDIO_ORIGIN is optional (studio is native-first). Only validate it when
@@ -821,6 +847,38 @@ export async function buildConfiguration(
           `${MEMRIZZ_ORIGIN}/`,
           'https://memrizz.citrate.ai',
           'https://memrizz.citrate.ai/',
+        ],
+        scope: 'openid profile wallet kyc offline_access',
+      },
+      {
+        // citrate-comms-web — the trusted-tier web version of the agentic team
+        // workspace (citrate-comms/webapp), hosted at comms.citrate.ai (+
+        // citrate-comms-web.vercel.app). Hosted web RP, same posture as
+        // explorer/dashboard/memrizz: PUBLIC client (no secret), Authorization Code
+        // + PKCE (S256, enforced globally below), rotating refresh tokens via
+        // offline_access. The Vercel BFF re-verifies the id_token (iss + aud =
+        // client_id `citrate-comms-web`, exp, RS256) on every request AND enforces
+        // email_verified before trusting the email claim (FWA-C6-01) — so this
+        // client_id and the web app's OIDC_AUDIENCE must stay in lockstep.
+        client_id: 'citrate-comms-web',
+        token_endpoint_auth_method: 'none',
+        application_type: 'web',
+        grant_types: ['authorization_code', 'refresh_token'],
+        response_types: ['code'],
+        redirect_uris: [
+          // Web callback for the configured (local/dev) comms-web origin.
+          `${COMMS_WEB_ORIGIN}${CALLBACK_PATH}`,
+          // Hosted production comms-web.
+          `https://comms.citrate.ai${CALLBACK_PATH}`,
+          `https://citrate-comms-web.vercel.app${CALLBACK_PATH}`,
+          // Loopback for native/CLI flows (RFC 8252).
+          LOOPBACK_REDIRECT,
+        ],
+        post_logout_redirect_uris: [
+          COMMS_WEB_ORIGIN,
+          `${COMMS_WEB_ORIGIN}/`,
+          'https://comms.citrate.ai',
+          'https://comms.citrate.ai/',
         ],
         scope: 'openid profile wallet kyc offline_access',
       },

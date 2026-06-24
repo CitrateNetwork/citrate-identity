@@ -125,7 +125,11 @@ export class InMemoryUserStore implements UserStore {
     const rec: UserRecord = {
       id,
       ...(email !== undefined ? { email } : {}),
-      // Google has verified the email by signing the id_token.
+      // FWA-C6-01: an email reaches createWithGoogle ONLY after the caller has
+      // confirmed `email_verified === true` on the id_token (see
+      // resolveGoogleUser / trustedEmailFromIdToken). A signed id_token alone
+      // does NOT prove email ownership, so the presence of an email here is the
+      // *verified* signal — an account created with no email is unverified.
       emailVerified: email !== undefined,
       googleSub: args.googleSub,
       createdAt: now,
