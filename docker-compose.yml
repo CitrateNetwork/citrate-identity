@@ -31,9 +31,18 @@ services:
       # citrate-atlas RP (docs app, docs.citrate.ai). Echoed for CORS + the Atlas
       # redirect origin; assertProductionConfig fails closed on a localhost value.
       ATLAS_ORIGIN: ${ATLAS_ORIGIN}
+      # citrate-comms-web RP (agentic team workspace, communications.citrate.ai —
+      # the relay keeps comms.citrate.ai). Echoed for CORS + the comms-web redirect
+      # origin; assertProductionConfig fails closed on a localhost value. Unset →
+      # CORS for the prod domain is off (the vercel.app redirect still works as it
+      # is hardcoded in the client's redirect_uris).
+      COMMS_WEB_ORIGIN: ${COMMS_WEB_ORIGIN:-}
       STUDIO_ORIGIN: ${STUDIO_ORIGIN:-}
       WALLETCONNECT_PROJECT_ID: ${WALLETCONNECT_PROJECT_ID:-}
       KYC_WEBHOOK_SECRET: ${KYC_WEBHOOK_SECRET}
+      # Optional dedicated secret for the server-side /kyc/status re-check; falls
+      # back to KYC_WEBHOOK_SECRET when unset (endpoint disabled if both unset).
+      KYC_STATUS_SECRET: ${KYC_STATUS_SECRET:-}
       # COMP-S1 KYC provider (Sumsub). When KYC_PROVIDER=sumsub, /kyc/start and the
       # real /kyc/webhook go live; all four SUMSUB_* are required or the app
       # fail-closes on boot. Unset → those routes return 503 (rest unaffected).
