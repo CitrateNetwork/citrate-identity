@@ -416,6 +416,11 @@ export interface ConfigEnv {
    * authority refuses to boot — see {@link assertProductionConfig}.
    */
   DATABASE_URL?: string;
+  /** VERI in-house KYC provider selection + secrets (ADR-2026-07-01-kyc-inhouse-provider). */
+  KYC_PROVIDER?: string;
+  KYC_MASTER_KEY?: string;
+  KYC_SESSION_SECRET?: string;
+  KYC_INHOUSE_WEBHOOK_SECRET?: string;
   /**
    * Redis connection string backing the HA / restart-safe authority state: the
    * panva persistent adapter (sessions/grants/tokens/interactions), the
@@ -578,6 +583,26 @@ export function assertProductionConfig(env: ConfigEnv): { warnings: string[] } {
         'adapter and nonces/logout-bus would be in-process — state lost on ' +
         'restart, not multi-instance / HA)',
     );
+  }
+
+  // --- In-house KYC provider (VERI) ---
+  // When KYC_PROVIDER=inhouse, Citrate is the data controller and seals PII with
+  // KYC_MASTER_KEY. Fail closed if the provider is selected without the secrets it
+  // needs to be server-blind, or booting the store would throw at request time.
+  // See ADR-2026-07-01-kyc-inhouse-provider / -kyc-data-controller-reversal.
+  if (env.KYC_PROVIDER?.trim() === 'inhouse') {
+    if (!env.KYC_MASTER_KEY || env.KYC_MASTER_KEY.trim() === '') {
+      problems.push(
+        'KYC_PROVIDER=inhouse but KYC_MASTER_KEY is unset (the in-house KYC store ' +
+          'cannot seal PII without the 32-byte master key; `openssl rand -base64 32`)',
+      );
+    }
+    if (!env.KYC_SESSION_SECRET || env.KYC_SESSION_SECRET.trim() === '') {
+      problems.push('KYC_PROVIDER=inhouse but KYC_SESSION_SECRET is unset (capture tokens cannot be signed)');
+    }
+    if (!env.KYC_INHOUSE_WEBHOOK_SECRET || env.KYC_INHOUSE_WEBHOOK_SECRET.trim() === '') {
+      problems.push('KYC_PROVIDER=inhouse but KYC_INHOUSE_WEBHOOK_SECRET is unset (decision webhook cannot be verified)');
+    }
   }
 
   if (isProd && problems.length > 0) {
