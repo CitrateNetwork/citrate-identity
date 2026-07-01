@@ -2,7 +2,7 @@ import { describe, expect, it, beforeEach } from 'vitest';
 import { newDb, type IMemoryDb } from 'pg-mem';
 import { randomBytes } from 'node:crypto';
 import { KycCaseStore } from '../src/kyc-cases-pg.js';
-import { newDek, sealBytes, sealField, wrapDek } from '../src/kyc-crypto.js';
+import { newDek, sealBytes, sealField, unwrapDek, wrapDek } from '../src/kyc-crypto.js';
 import { loadSanctionsList, type SanctionsEntry } from '../src/kyc-screening.js';
 import {
   VerificationEngine,
@@ -50,7 +50,7 @@ describe('VerificationEngine (VERI-S3)', () => {
   function engine(opts: { liveness?: LivenessAnalyzer; document?: DocumentAnalyzer }) {
     return new VerificationEngine({
       store,
-      masterKey: master,
+      getDek: async (id: string) => { const c = await store.getCase(id); return c ? unwrapDek(c.wrappedDek, master) : null; },
       screener: loadSanctionsList(SANCTIONS, '2026-07-01'),
       webhookSecret: WEBHOOK_SECRET,
       liveness: opts.liveness,

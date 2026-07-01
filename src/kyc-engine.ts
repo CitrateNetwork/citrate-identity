@@ -22,7 +22,7 @@
 import { createHmac } from 'node:crypto';
 
 import type { KycCaseStore } from './kyc-cases-pg.js';
-import { openBytes, openField, unwrapDek } from './kyc-crypto.js';
+import { openBytes, openField } from './kyc-crypto.js';
 import type { SanctionsScreener, ScreeningResult } from './kyc-screening.js';
 
 export interface LivenessResult {
@@ -64,7 +64,8 @@ export interface EngineResult {
 
 export interface VerificationEngineDeps {
   store: KycCaseStore;
-  masterKey: Buffer;
+  /** Per-case DEK provider (the in-house provider's `getCaseDek`) — least privilege. */
+  getDek: (caseId: string) => Promise<Buffer | null>;
   screener: SanctionsScreener;
   /** HMAC secret matching the in-house provider's decision webhook. */
   webhookSecret: string;
@@ -83,11 +84,12 @@ export class VerificationEngine {
 
   /** Run the decision pipeline for a captured case. Returns null for an unknown case. */
   async runCase(caseId: string, now: number = Date.now()): Promise<EngineResult | null> {
-    const { store, masterKey, screener } = this.deps;
+    const { store, screener } = this.deps;
     const c = await store.getCase(caseId);
     if (!c) return null;
 
-    const dek = unwrapDek(c.wrappedDek, masterKey);
+    const dek = await this.deps.getDek(caseId);
+    if (!dek) return null;
     const identity = c.identityCt
       ? (JSON.parse(openField(c.identityCt, dek)) as { name?: string; dob?: string; nationality?: string })
       : {};
