@@ -60,7 +60,14 @@ function returnAllowlist(): string[] {
   const env = process.env.KYC_RETURN_ALLOWED_ORIGINS;
   const base = env && env.trim()
     ? env.split(',').map((s) => s.trim()).filter(Boolean)
-    : ['https://dataroom.citrate.ai', 'https://citrate-dataroom.vercel.app'];
+    : [
+        'https://dataroom.citrate.ai',
+        'https://citrate-dataroom.vercel.app',
+        // American Learning Federation applicant flow on the landing site.
+        'https://www.citrate.ai',
+        'https://citrate.ai',
+        'https://citrate-landing.vercel.app',
+      ];
   return base.includes(self) ? base : [...base, self];
 }
 

@@ -20,6 +20,7 @@ import { initKycProviderFromEnv } from './kyc-providers/index.js';
 import { mountLogoutRoutes } from './logout-routes.js';
 import { mountAccountRoute } from './account-routes.js';
 import { mountAdminEntitlementsRoute } from './admin-routes.js';
+import { mountAlfEnrollRoute } from './alf-routes.js';
 import { mountHttpExtras } from './http-extras.js';
 import { mountAaRoutes } from './aa/aa-routes.js';
 import { mountGuardianRoutes } from './aa/guardian-routes.js';
@@ -356,6 +357,11 @@ export async function createProvider(
   // AUTHSPINE S1-WP4: admin entitlement grant API (service-guarded; fail-closed
   // when ENTITLEMENTS_ADMIN_SECRET is unset). Grants/raises higher tiers + roles.
   mountAdminEntitlementsRoute(provider);
+
+  // American Learning Federation enroll API (service-guarded; fail-closed when
+  // ALF_ENROLL_SECRET is unset). Least-privilege: grants ONLY academic/orgId:alf,
+  // and ONLY to a live-KYC-verified principal.
+  mountAlfEnrollRoute(provider);
 
   // IDP-S2 / TD-5 (authority side): POST /logout revokes the presented token,
   // ends its session, and publishes a `logout` on the session bus; GET

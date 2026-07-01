@@ -91,6 +91,17 @@ export const DATAROOM_ORIGIN =
   process.env.DATAROOM_ORIGIN ?? 'http://localhost:3000';
 
 /**
+ * The American Learning Federation applicant flow's web origin. This lives on the
+ * citrate-landing marketing site (`www.citrate.ai`), which drives the survey +
+ * OIDC login and completes it by redirecting the browser to
+ * `${FEDERATION_ORIGIN}/alf/callback` — a custom path, like the data room's
+ * `/access/callback`. Defaults to local dev on :3000; production sets
+ * FEDERATION_ORIGIN=https://www.citrate.ai.
+ */
+export const FEDERATION_ORIGIN =
+  process.env.FEDERATION_ORIGIN ?? 'http://localhost:3000';
+
+/**
  * The citrate-comms web client's origin (citrate-comms/webapp, the trusted-tier
  * responsive web version of the agentic team workspace, deployed at
  * `comms.citrate.ai` / `citrate-comms-web.vercel.app`). Mirrors {@link EXPLORER_ORIGIN}:
@@ -148,6 +159,7 @@ export const ALLOWED_CORS_ORIGINS: ReadonlySet<string> = new Set(
     MEMRIZZ_ORIGIN,
     ATLAS_ORIGIN,
     DATAROOM_ORIGIN,
+    FEDERATION_ORIGIN,
     BUYER_WEBAPP_ORIGIN,
     COMMS_WEB_ORIGIN,
   ].filter(
@@ -207,6 +219,11 @@ export const TRUSTED_FIRST_PARTY_CLIENT_IDS: ReadonlySet<string> = new Set([
   // other web RPs. The web tier independently re-verifies the id_token (iss + aud
   // + exp, RS256) and enforces email_verified before trusting the email claim.
   'citrate-comms-web',
+  // american-learning-federation — the public cooperative applicant flow on the
+  // citrate-landing marketing site (www.citrate.ai). PUBLIC web client
+  // (Authorization Code + PKCE). First-party, Citrate-owned end-to-end, so the
+  // applicant is not shown a consent screen for our own flow.
+  'american-learning-federation',
 ]);
 
 /** True iff `clientId` is a Citrate-owned trusted first-party RP (TD-8). */
@@ -375,6 +392,9 @@ export interface ConfigEnv {
   /** Hosted investor data-room web origin (dataroom.citrate.ai). Widens CORS + is
    * the data-room RP redirect origin; validated for a local host like the others. */
   DATAROOM_ORIGIN?: string;
+  /** Hosted American Learning Federation applicant origin (www.citrate.ai). Widens
+   * CORS + is the federation RP redirect origin; validated for a local host. */
+  FEDERATION_ORIGIN?: string;
   /** Hosted citrate-comms web origin (comms.citrate.ai). Widens CORS + is the
    * comms-web RP redirect origin; validated for a local host like the others. */
   COMMS_WEB_ORIGIN?: string;
@@ -515,6 +535,11 @@ export function assertProductionConfig(env: ConfigEnv): { warnings: string[] } {
   if (isLocalUrl(env.DATAROOM_ORIGIN)) {
     problems.push(
       `DATAROOM_ORIGIN points at a local host: ${env.DATAROOM_ORIGIN}`,
+    );
+  }
+  if (isLocalUrl(env.FEDERATION_ORIGIN)) {
+    problems.push(
+      `FEDERATION_ORIGIN points at a local host: ${env.FEDERATION_ORIGIN}`,
     );
   }
   if (isLocalUrl(env.COMMS_WEB_ORIGIN)) {
@@ -938,6 +963,41 @@ export async function buildConfiguration(
           'https://dataroom.citrate.ai/',
           'https://citrate-dataroom.vercel.app',
           'https://citrate-dataroom.vercel.app/',
+        ],
+        scope: 'openid profile wallet kyc offline_access',
+      },
+      {
+        // american-learning-federation — the public cooperative applicant flow on
+        // the citrate-landing marketing site, hosted at www.citrate.ai (+ the
+        // citrate.ai apex and the citrate-landing.vercel.app alias, kept for
+        // pre-DNS / preview testing). Hosted web RP, PUBLIC client (no secret),
+        // Authorization Code + PKCE (S256), rotating refresh tokens via
+        // offline_access. NOTE the callback is the custom path `/alf/callback` —
+        // NOT `/auth/callback` (the other web RPs), `/api/auth/callback` (atlas),
+        // or `/access/callback` (dataroom). Its `aud` is the client_id
+        // `american-learning-federation`, which the landing app re-verifies.
+        client_id: 'american-learning-federation',
+        token_endpoint_auth_method: 'none',
+        application_type: 'web',
+        grant_types: ['authorization_code', 'refresh_token'],
+        response_types: ['code'],
+        redirect_uris: [
+          // Configured (local/dev) federation origin.
+          `${FEDERATION_ORIGIN}/alf/callback`,
+          // Hosted production landing — www, apex, and the Vercel alias.
+          'https://www.citrate.ai/alf/callback',
+          'https://citrate.ai/alf/callback',
+          'https://citrate-landing.vercel.app/alf/callback',
+        ],
+        post_logout_redirect_uris: [
+          FEDERATION_ORIGIN,
+          `${FEDERATION_ORIGIN}/`,
+          'https://www.citrate.ai',
+          'https://www.citrate.ai/',
+          'https://citrate.ai',
+          'https://citrate.ai/',
+          'https://citrate-landing.vercel.app',
+          'https://citrate-landing.vercel.app/',
         ],
         scope: 'openid profile wallet kyc offline_access',
       },
