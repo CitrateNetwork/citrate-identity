@@ -50,15 +50,19 @@ services:
       # 503 when unset). Both must be passed through here — there is no env_file.
       FEDERATION_ORIGIN: ${FEDERATION_ORIGIN:-}
       ALF_ENROLL_SECRET: ${ALF_ENROLL_SECRET:-}
-      # COMP-S1 KYC provider (Sumsub). When KYC_PROVIDER=sumsub, /kyc/start and the
-      # real /kyc/webhook go live; all four SUMSUB_* are required or the app
-      # fail-closes on boot. Unset → those routes return 503 (rest unaffected).
+      # VERI in-house KYC provider. KYC_PROVIDER=inhouse turns on the server-blind
+      # capture flow (/verify) + engine; requires KYC_MASTER_KEY + the two secrets
+      # or assertProductionConfig fail-closes on boot. KYC_INFERENCE_URL points at
+      # the self-hosted model service; when unset the engine fails closed to
+      # needs-review (nothing auto-verifies). Sumsub removed (VERI-S5).
       KYC_PROVIDER: ${KYC_PROVIDER:-}
-      SUMSUB_APP_TOKEN: ${SUMSUB_APP_TOKEN:-}
-      SUMSUB_SECRET_KEY: ${SUMSUB_SECRET_KEY:-}
-      SUMSUB_WEBHOOK_SECRET: ${SUMSUB_WEBHOOK_SECRET:-}
-      SUMSUB_LEVEL_NAME: ${SUMSUB_LEVEL_NAME:-}
-      SUMSUB_BASE_URL: ${SUMSUB_BASE_URL:-}
+      KYC_MASTER_KEY: ${KYC_MASTER_KEY:-}
+      KYC_SESSION_SECRET: ${KYC_SESSION_SECRET:-}
+      KYC_INHOUSE_WEBHOOK_SECRET: ${KYC_INHOUSE_WEBHOOK_SECRET:-}
+      KYC_CAPTURE_BASE_URL: ${KYC_CAPTURE_BASE_URL:-}
+      KYC_INFERENCE_URL: ${KYC_INFERENCE_URL:-}
+      KYC_INFERENCE_TOKEN: ${KYC_INFERENCE_TOKEN:-}
+      KYC_ADMIN_SUBS: ${KYC_ADMIN_SUBS:-}
       CITRATE_RPC_URL: ${CITRATE_RPC_URL:-}
       # EW-S1 AA stack. When CITRATE_AA_FACTORY is set, `server.ts`
       # mounts `/aa/*` routes (predict address, enroll validator, list
