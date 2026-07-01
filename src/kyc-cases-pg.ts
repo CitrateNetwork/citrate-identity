@@ -307,6 +307,20 @@ export class KycCaseStore {
   }
 
   /**
+   * IMMEDIATE biometric destruction for one case (VERI-S3, BIPA D3.2): wipe the
+   * ciphertext of every not-yet-destroyed Tier-2 evidence row for the case, right
+   * after the 1:1 match decision — regardless of `destroy_after`. Returns the count.
+   */
+  async destroyBiometricsForCase(caseId: string, now: number = Date.now()): Promise<number> {
+    const res = await this.pool.query(
+      `UPDATE kyc_evidence SET ciphertext = NULL, destroyed_at = $2
+       WHERE case_id = $1 AND tier = 2 AND ciphertext IS NOT NULL`,
+      [caseId, now],
+    );
+    return res.rowCount ?? 0;
+  }
+
+  /**
    * Delete a user's case (planset D3). No AML retention duty (not an MSB), so:
    *   - legal_hold set → **tombstone** (lock the record, wipe evidence ciphertext,
    *     keep the row for the hold);

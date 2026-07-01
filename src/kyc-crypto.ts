@@ -137,6 +137,39 @@ export function openField(ciphertext: string, dek: Buffer): string {
 }
 
 /**
+ * Byte-oriented seal/open for BINARY artifacts (ID images, face frames). Same
+ * envelope format as {@link sealField}; the browser's WebCrypto sealer emits this
+ * exact layout, so `openBytes` recovers the original image bytes. Use these (not
+ * the string variants) for anything that is not valid UTF-8 text.
+ */
+export function sealBytes(plaintext: Buffer, dek: Buffer): string {
+  assertKey(dek, 'DEK');
+  if (plaintext.length === 0) return '';
+  const iv = randomBytes(IV_LEN);
+  const cipher = createCipheriv(ALG, dek, iv);
+  const enc = Buffer.concat([cipher.update(plaintext), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return Buffer.concat([Buffer.from([VERSION]), iv, tag, enc]).toString('base64');
+}
+
+export function openBytes(ciphertext: string, dek: Buffer): Buffer {
+  assertKey(dek, 'DEK');
+  if (ciphertext === '') return Buffer.alloc(0);
+  const buf = Buffer.from(ciphertext, 'base64');
+  if (buf.length < 1 + IV_LEN + TAG_LEN) throw new KycCryptoError('ciphertext too short / malformed');
+  const iv = buf.subarray(1, 1 + IV_LEN);
+  const tag = buf.subarray(1 + IV_LEN, 1 + IV_LEN + TAG_LEN);
+  const enc = buf.subarray(1 + IV_LEN + TAG_LEN);
+  const decipher = createDecipheriv(ALG, dek, iv);
+  decipher.setAuthTag(tag);
+  try {
+    return Buffer.concat([decipher.update(enc), decipher.final()]);
+  } catch {
+    throw new KycCryptoError('decryption failed (wrong key or tampered ciphertext)');
+  }
+}
+
+/**
  * Deterministic keyed lookup index (HMAC-SHA256 under the master key) so we can
  * find a case by e.g. a document-number hash WITHOUT storing the value. Not a
  * password hash; do not use for auth. Trim+lowercase-normalized like landing's.
