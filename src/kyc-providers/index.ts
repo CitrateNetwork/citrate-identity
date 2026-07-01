@@ -17,17 +17,22 @@
  */
 
 import { ClearKycProvider, type ClearKycProviderConfig } from './clear.js';
+import { InhouseKycProvider, type InhouseKycProviderConfig } from './inhouse.js';
 import { MockKycProvider, type MockKycProviderConfig } from './mock.js';
 import { SumsubKycProvider, type SumsubKycProviderConfig } from './sumsub.js';
 import type { KycProvider } from './types.js';
+import { masterKeyFromEnv } from '../kyc-crypto.js';
+import { KycCaseStore } from '../kyc-cases-pg.js';
+import { startRetentionScheduler } from '../kyc-retention.js';
 
 export * from './types.js';
 export { KYC_LEVELS, type KycLevel, isKycLevel } from './level-hints.js';
 export { SumsubKycProvider } from './sumsub.js';
 export { ClearKycProvider, ClearAdapterNotImplementedError } from './clear.js';
 export { MockKycProvider } from './mock.js';
+export { InhouseKycProvider } from './inhouse.js';
 
-export type KycProviderName = 'sumsub' | 'clear' | 'mock';
+export type KycProviderName = 'sumsub' | 'clear' | 'mock' | 'inhouse';
 
 /**
  * Per-provider config bag the factory accepts. Production callers populate
@@ -39,6 +44,7 @@ export interface KycProviderFactoryEnv {
   sumsub?: SumsubKycProviderConfig;
   clear?: ClearKycProviderConfig;
   mock?: MockKycProviderConfig;
+  inhouse?: InhouseKycProviderConfig;
 }
 
 /**
@@ -126,6 +132,35 @@ export async function initKycProviderFromEnv(
     factoryEnv.mock = { mode: 'sandbox' };
   } else if (name === 'clear') {
     factoryEnv.clear = { mode: isProduction ? 'prod' : 'sandbox' };
+  } else if (name === 'inhouse') {
+    const databaseUrl = env.DATABASE_URL;
+    const sessionSecret = env.KYC_SESSION_SECRET;
+    const webhookSecret = env.KYC_INHOUSE_WEBHOOK_SECRET;
+    if (!databaseUrl || !sessionSecret || !webhookSecret) {
+      throw new Error(
+        'KYC_PROVIDER=inhouse requires DATABASE_URL, KYC_SESSION_SECRET, and ' +
+          'KYC_INHOUSE_WEBHOOK_SECRET (plus KYC_MASTER_KEY). See VERI-S1 / ' +
+          'ADR-2026-07-01-kyc-inhouse-provider.',
+      );
+    }
+    // Master key is validated here (fail-closed if unset/wrong length).
+    const masterKey = masterKeyFromEnv(env);
+    const store = await KycCaseStore.connect(databaseUrl);
+    // Boot the retention/destruction sweep (VERI-S1-WP4). Unref'd timer — never
+    // keeps the process alive on its own; sweeps tier-2 biometrics + tier-1 expiry.
+    startRetentionScheduler(store);
+    const captureBaseUrl =
+      env.KYC_CAPTURE_BASE_URL ??
+      `${(env.ISSUER_URL ?? 'http://localhost:3000').replace(/\/+$/, '')}/verify`;
+    factoryEnv.inhouse = {
+      mode: isProduction ? 'prod' : 'sandbox',
+      store,
+      masterKey,
+      sessionSecret,
+      webhookSecret,
+      captureBaseUrl,
+      ...(env.KYC_RETENTION_DAYS ? { retentionDays: Number(env.KYC_RETENTION_DAYS) } : {}),
+    };
   }
 
   const provider = selectKycProvider(factoryEnv);
@@ -175,6 +210,13 @@ export function selectKycProvider(env: KycProviderFactoryEnv): KycProvider {
         );
       }
       return new MockKycProvider(env.mock);
+    }
+
+    case 'inhouse': {
+      if (!env.inhouse) {
+        throw new Error('KYC_PROVIDER=inhouse but in-house config is missing');
+      }
+      return new InhouseKycProvider(env.inhouse);
     }
 
     default:
