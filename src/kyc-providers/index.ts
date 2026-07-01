@@ -128,9 +128,12 @@ export async function initKycProviderFromEnv(
     startRetentionScheduler(store);
     // Boot the immutable audit log (VERI-S4) that the admin routes write to.
     setKycAuditLog(await KycAuditLog.connect(databaseUrl));
+    // Use `||` (not `??`): compose passes `${VAR:-}` as an EMPTY STRING, not
+    // undefined, so `??` would keep the empty value → a relative redirect that
+    // bounces back to /kyc/start. Trim + `||` falls through empties to the default.
     const captureBaseUrl =
-      env.KYC_CAPTURE_BASE_URL ??
-      `${(env.ISSUER_URL ?? 'http://localhost:3000').replace(/\/+$/, '')}/verify`;
+      env.KYC_CAPTURE_BASE_URL?.trim() ||
+      `${(env.ISSUER_URL?.trim() || 'http://localhost:3000').replace(/\/+$/, '')}/verify`;
     factoryEnv.inhouse = {
       mode: isProduction ? 'prod' : 'sandbox',
       store,
