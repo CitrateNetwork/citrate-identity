@@ -76,7 +76,9 @@ export async function adjudicateCase(
       ? { verifiedAt: now, expiresAt: now + 365 * 864e5, retentionUntil: now + 365 * 864e5 }
       : { retentionUntil: now + 365 * 864e5 }),
   });
-  await audit.record({ actor: opts.actor, action: 'case.adjudicate', caseId: opts.caseId, detail: { decision: opts.decision, reason: opts.reason } });
+  // BIPA: destroy the biometric once a decision is recorded (D3.2).
+  const biometricsDestroyed = await store.destroyBiometricsForCase(opts.caseId, now);
+  await audit.record({ actor: opts.actor, action: 'case.adjudicate', caseId: opts.caseId, detail: { decision: opts.decision, reason: opts.reason, biometricsDestroyed } });
   const body = Buffer.from(
     JSON.stringify({ caseId: opts.caseId, externalUserId: c.externalUserId, kind: opts.decision, occurredAt: now, screeningResult: c.screeningResult }),
     'utf8',

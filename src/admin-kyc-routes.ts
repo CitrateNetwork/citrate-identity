@@ -59,6 +59,21 @@ async function readJson(req: IncomingMessage): Promise<Record<string, unknown> |
 }
 const str = (v: unknown): string | undefined => (typeof v === 'string' && v.length > 0 ? v : undefined);
 
+/** POST a signed decision to the local /kyc/webhook — the unchanged entitlement path. */
+async function deliverDecision(signed: { body: Buffer; headers: Record<string, string> }): Promise<boolean> {
+  const issuer = (process.env.ISSUER_URL ?? 'http://localhost:3000').replace(/\/+$/, '');
+  try {
+    const r = await fetch(`${issuer}/kyc/webhook`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...signed.headers },
+      body: signed.body,
+    });
+    return r.ok;
+  } catch {
+    return false;
+  }
+}
+
 export function mountAdminKycRoutes(provider: Provider): void {
   provider.use(async (ctx, next) => {
     if (!ctx.path.startsWith('/admin/kyc')) return next();
@@ -125,7 +140,13 @@ export function mountAdminKycRoutes(provider: Provider): void {
           return sendJson(ctx.res, 400, { error: 'caseId + decision(verified|rejected) required' });
         }
         const r = await adjudicateCase(store, audit, { actor, caseId, decision, reason, webhookSecret });
-        return sendJson(ctx.res, r.ok ? 200 : 400, r.ok ? { ok: true } : r);
+        if (r.ok) {
+          // Deliver the decision to the unchanged /kyc/webhook entitlement path (D1)
+          // so a `verified` adjudication mints the baseline entitlement claim.
+          const granted = await deliverDecision(r.signedWebhook);
+          return sendJson(ctx.res, 200, { ok: true, decision, entitlementDelivered: granted });
+        }
+        return sendJson(ctx.res, 400, r);
       }
       if (ctx.path === '/admin/kyc/unlock/request') {
         const caseId = str(body['caseId']);
