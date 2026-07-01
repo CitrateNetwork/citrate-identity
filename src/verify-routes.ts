@@ -24,6 +24,7 @@
 
 import type Provider from 'oidc-provider';
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import QRCode from 'qrcode';
 
 import { getKycProvider } from './kyc-providers/index.js';
 import { InhouseKycProvider, type CaptureTokenClaims } from './kyc-providers/inhouse.js';
@@ -179,12 +180,15 @@ export function mountVerifyRoutes(provider: Provider): void {
     if (ctx.path === '/verify/handoff') {
       const { token, expiresAt } = ih.mintCaptureToken(claims.caseId, claims.sub, HANDOFF_TTL_SEC);
       const origin = originOf(ctx);
-      return sendJson(ctx.res, 200, {
-        ok: true,
-        token,
-        expiresAt,
-        mobileUrl: `${origin}/verify?session=${encodeURIComponent(token)}`,
+      const mobileUrl = `${origin}/verify?session=${encodeURIComponent(token)}`;
+      // Render the QR ourselves (self-hosted, no third-party service → the capability
+      // token never leaves our origin). Brand paper/ink palette.
+      const qrSvg = await QRCode.toString(mobileUrl, {
+        type: 'svg',
+        margin: 1,
+        color: { dark: '#1b1a17', light: '#f1eee6' },
       });
+      return sendJson(ctx.res, 200, { ok: true, token, expiresAt, mobileUrl, qrSvg });
     }
 
     return next();
