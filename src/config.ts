@@ -421,6 +421,8 @@ export interface ConfigEnv {
   KYC_MASTER_KEY?: string;
   KYC_SESSION_SECRET?: string;
   KYC_INHOUSE_WEBHOOK_SECRET?: string;
+  /** Self-hosted ONNX inference service (PAD/face-match/OCR). Unset → engine fails closed. */
+  KYC_INFERENCE_URL?: string;
   /**
    * Redis connection string backing the HA / restart-safe authority state: the
    * panva persistent adapter (sessions/grants/tokens/interactions), the
@@ -602,6 +604,12 @@ export function assertProductionConfig(env: ConfigEnv): { warnings: string[] } {
     }
     if (!env.KYC_INHOUSE_WEBHOOK_SECRET || env.KYC_INHOUSE_WEBHOOK_SECRET.trim() === '') {
       problems.push('KYC_PROVIDER=inhouse but KYC_INHOUSE_WEBHOOK_SECRET is unset (decision webhook cannot be verified)');
+    }
+    // The inference service (if configured) must be a real, non-local https origin —
+    // it processes decrypted ID + face images and must live on US infra (D5), not a
+    // dev host. Unset is allowed: the engine then fails closed to needs-review.
+    if (env.KYC_INFERENCE_URL && isLocalUrl(env.KYC_INFERENCE_URL)) {
+      problems.push(`KYC_INFERENCE_URL points at a local host: ${env.KYC_INFERENCE_URL}`);
     }
   }
 

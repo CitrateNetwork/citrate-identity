@@ -114,7 +114,7 @@ function renderHub(args: {
     kyc === 'verified'
       ? `<p class="note">Identity verified${args.expiresAt ? ` — valid until ${escapeHtml(args.expiresAt.slice(0, 10))}` : ''}. This unlocks your baseline access across Citrate apps.</p>`
       : `<a class="btn" href="${escapeHtml(startUrl)}">${kyc === 'expired' || kyc === 'revoked' ? 'Re-verify identity' : 'Start identity verification'}</a>
-         <p class="note">Optional — verifying with our provider (Sumsub) upgrades your account and unlocks verified-member access ecosystem-wide. No documents are stored by Citrate.</p>`;
+         <p class="note">Optional — verifying your identity upgrades your account and unlocks verified-member access ecosystem-wide. Your ID and face are encrypted on your device before upload; your face is deleted right after the identity match.</p>`;
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
 <title>Your Citrate account</title><style>${PAGE_CSS}</style></head><body><div class="wrap">

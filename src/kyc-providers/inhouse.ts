@@ -30,7 +30,7 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 
 import { KycCaseStore } from '../kyc-cases-pg.js';
-import { newDek, wrapDek } from '../kyc-crypto.js';
+import { newDek, unwrapDek, wrapDek } from '../kyc-crypto.js';
 import type {
   KycEvent,
   KycEventKind,
@@ -227,6 +227,35 @@ export class InhouseKycProvider implements KycProvider {
     const payload = b64url(Buffer.from(JSON.stringify(claims), 'utf8'));
     const sig = createHmac('sha256', this.sessionSecret).update(payload).digest('base64url');
     return `${payload}.${sig}`;
+  }
+
+  /**
+   * Mint a fresh short-TTL capture token for an existing case — used by the
+   * desktop→mobile hand-off (VERI-S2-WP4) to issue a phone-scoped token bound to
+   * the same case, without re-running createApplicant.
+   */
+  mintCaptureToken(caseId: string, sub: string, ttlSec: number): { token: string; expiresAt: number } {
+    const exp = Math.floor(Date.now() / 1000) + Math.max(1, ttlSec);
+    return { token: this.signCaptureToken({ caseId, sub, exp }), expiresAt: exp };
+  }
+
+  /**
+   * Unwrap the case DEK (server-blind: the DB holds only the master-wrapped DEK).
+   * The capture UI fetches this over TLS to seal artifacts client-side before
+   * upload; the S3 engine uses it to process, then re-seal/destroy. Returns null
+   * for an unknown case. NOTE (server-blind hardening, tracked): the stronger model
+   * is client-generated DEKs wrapped under an asymmetric KMS public key so the
+   * server never holds the DEK in the clear — a crypto-hardening follow-up (O7).
+   */
+  async getCaseDek(caseId: string): Promise<Buffer | null> {
+    const c = await this.store.getCase(caseId);
+    if (!c) return null;
+    return unwrapDek(c.wrappedDek, this.masterKey);
+  }
+
+  /** The encrypted case store behind this provider (capture routes persist to it). */
+  get caseStore(): KycCaseStore {
+    return this.store;
   }
 
   /**

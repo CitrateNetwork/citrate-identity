@@ -487,10 +487,10 @@ function tierToKycLevel(tier: string | undefined): KycLevel | undefined {
 
 /**
  * Build the URL the user-agent gets 303'd to after `mintClientSession`.
- * The provider may return its own hosted URL (CLEAR style); when it
- * doesn't (Sumsub, Mock), we construct one from the token. URL
- * construction is the route's responsibility so the provider interface
- * stays focused on credentials.
+ * The provider returns its own hosted URL (the in-house `/verify` capture flow and
+ * CLEAR both do); this fallback only constructs one from the token for providers
+ * that don't (e.g. the test mock). URL construction is the route's responsibility
+ * so the provider interface stays focused on credentials.
  */
 function buildKycRedirectUrl(args: {
   vendor: string;
@@ -500,8 +500,6 @@ function buildKycRedirectUrl(args: {
 }): string {
   if (args.hostedRedirectUrl) return args.hostedRedirectUrl;
   switch (args.vendor) {
-    case 'sumsub':
-      return `https://api.sumsub.com/idensic/l/#/?accessToken=${encodeURIComponent(args.token)}`;
     case 'mock':
       return (
         `https://kyc-mock.invalid/sdk?token=${encodeURIComponent(args.token)}` +
