@@ -43,6 +43,13 @@ services:
       # Optional dedicated secret for the server-side /kyc/status re-check; falls
       # back to KYC_WEBHOOK_SECRET when unset (endpoint disabled if both unset).
       KYC_STATUS_SECRET: ${KYC_STATUS_SECRET:-}
+      # American Learning Federation applicant flow. FEDERATION_ORIGIN is the
+      # landing origin the alf OIDC client's /alf/callback + KYC return use — it
+      # MUST be set to a non-local https origin in prod or assertProductionConfig
+      # fail-closes on boot. ALF_ENROLL_SECRET guards POST /alf/enroll (fail-closed
+      # 503 when unset). Both must be passed through here — there is no env_file.
+      FEDERATION_ORIGIN: ${FEDERATION_ORIGIN:-}
+      ALF_ENROLL_SECRET: ${ALF_ENROLL_SECRET:-}
       # COMP-S1 KYC provider (Sumsub). When KYC_PROVIDER=sumsub, /kyc/start and the
       # real /kyc/webhook go live; all four SUMSUB_* are required or the app
       # fail-closes on boot. Unset → those routes return 503 (rest unaffected).
