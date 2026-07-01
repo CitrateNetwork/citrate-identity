@@ -24,6 +24,7 @@ import type { KycProvider } from './types.js';
 import { masterKeyFromEnv } from '../kyc-crypto.js';
 import { KycCaseStore } from '../kyc-cases-pg.js';
 import { startRetentionScheduler } from '../kyc-retention.js';
+import { KycAuditLog, setKycAuditLog } from '../kyc-audit-pg.js';
 
 export * from './types.js';
 export { KYC_LEVELS, type KycLevel, isKycLevel } from './level-hints.js';
@@ -149,6 +150,8 @@ export async function initKycProviderFromEnv(
     // Boot the retention/destruction sweep (VERI-S1-WP4). Unref'd timer — never
     // keeps the process alive on its own; sweeps tier-2 biometrics + tier-1 expiry.
     startRetentionScheduler(store);
+    // Boot the immutable audit log (VERI-S4) that the admin routes write to.
+    setKycAuditLog(await KycAuditLog.connect(databaseUrl));
     const captureBaseUrl =
       env.KYC_CAPTURE_BASE_URL ??
       `${(env.ISSUER_URL ?? 'http://localhost:3000').replace(/\/+$/, '')}/verify`;

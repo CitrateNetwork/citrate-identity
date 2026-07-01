@@ -97,8 +97,30 @@ CREATE TABLE IF NOT EXISTS kyc_evidence (
   created_at    bigint NOT NULL
 )`;
 
+const CREATE_UNLOCK_SQL = `
+CREATE TABLE IF NOT EXISTS kyc_unlock_requests (
+  unlock_id    text   PRIMARY KEY,
+  case_id      text   NOT NULL,
+  requested_by text   NOT NULL,
+  reason       text   NOT NULL,
+  approved_by  text,
+  created_at   bigint NOT NULL,
+  consumed_at  bigint
+)`;
+
 const CASES_EXISTS_SQL = `SELECT 1 FROM information_schema.tables WHERE table_name = 'kyc_cases' LIMIT 1`;
 const EVIDENCE_EXISTS_SQL = `SELECT 1 FROM information_schema.tables WHERE table_name = 'kyc_evidence' LIMIT 1`;
+const UNLOCK_EXISTS_SQL = `SELECT 1 FROM information_schema.tables WHERE table_name = 'kyc_unlock_requests' LIMIT 1`;
+
+export interface UnlockRequest {
+  unlockId: string;
+  caseId: string;
+  requestedBy: string;
+  reason: string;
+  approvedBy?: string;
+  createdAt: number;
+  consumedAt?: number;
+}
 
 function num(v: unknown): number | undefined {
   if (v === null || v === undefined) return undefined;
@@ -163,6 +185,43 @@ export class KycCaseStore {
     if ((await this.pool.query(EVIDENCE_EXISTS_SQL)).rows.length === 0) {
       await this.pool.query(CREATE_EVIDENCE_SQL);
     }
+    if ((await this.pool.query(UNLOCK_EXISTS_SQL)).rows.length === 0) {
+      await this.pool.query(CREATE_UNLOCK_SQL);
+    }
+  }
+
+  // --- dual-control subpoena unlock (VERI-S4-WP3) ---
+  async createUnlockRequest(caseId: string, requestedBy: string, reason: string): Promise<UnlockRequest> {
+    const now = Date.now();
+    const unlockId = `unl_${randomUUID()}`;
+    await this.pool.query(
+      `INSERT INTO kyc_unlock_requests (unlock_id, case_id, requested_by, reason, created_at) VALUES ($1,$2,$3,$4,$5)`,
+      [unlockId, caseId, requestedBy, reason, now],
+    );
+    return { unlockId, caseId, requestedBy, reason, createdAt: now };
+  }
+
+  async getUnlockRequest(unlockId: string): Promise<UnlockRequest | undefined> {
+    const res = await this.pool.query(`SELECT * FROM kyc_unlock_requests WHERE unlock_id = $1`, [unlockId]);
+    const r = res.rows[0] as Record<string, unknown> | undefined;
+    if (!r) return undefined;
+    return {
+      unlockId: String(r.unlock_id),
+      caseId: String(r.case_id),
+      requestedBy: String(r.requested_by),
+      reason: String(r.reason),
+      approvedBy: r.approved_by ? String(r.approved_by) : undefined,
+      createdAt: num(r.created_at) ?? 0,
+      consumedAt: num(r.consumed_at),
+    };
+  }
+
+  /** Mark an unlock approved + consumed (single-use). */
+  async consumeUnlockRequest(unlockId: string, approvedBy: string, now: number = Date.now()): Promise<void> {
+    await this.pool.query(
+      `UPDATE kyc_unlock_requests SET approved_by = $2, consumed_at = $3 WHERE unlock_id = $1`,
+      [unlockId, approvedBy, now],
+    );
   }
 
   /** Create a new case. `wrappedDek` is the case DEK wrapped by the master key. */

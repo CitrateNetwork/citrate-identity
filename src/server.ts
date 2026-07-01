@@ -18,6 +18,7 @@ import {
 } from './kyc-routes.js';
 import { initKycProviderFromEnv } from './kyc-providers/index.js';
 import { mountVerifyRoutes } from './verify-routes.js';
+import { mountAdminKycRoutes } from './admin-kyc-routes.js';
 import { mountLogoutRoutes } from './logout-routes.js';
 import { mountAccountRoute } from './account-routes.js';
 import { mountAdminEntitlementsRoute } from './admin-routes.js';
@@ -355,6 +356,11 @@ export async function createProvider(
   // when KYC_PROVIDER=inhouse; otherwise a passthrough. Serves the capture UI and
   // accepts client-encrypted artifacts into the S1 encrypted case store.
   mountVerifyRoutes(provider);
+
+  // VERI-S4: admin/compliance dashboard routes (/admin/kyc/*), gated by the
+  // KYC_ADMIN_SUBS session-subject allowlist. Case review, dual-control subpoena
+  // unlock, delete-user, DSAR, and the immutable audit log. Inhouse-only.
+  mountAdminKycRoutes(provider);
 
   // AUTHSPINE S1-WP3: the Account Hub (/account) — the universal authenticated
   // surface every RP links to (identity, wallet, KYC status + CTA, access tier).
