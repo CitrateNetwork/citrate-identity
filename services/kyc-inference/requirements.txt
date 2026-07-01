@@ -1,0 +1,9 @@
+# VERI KYC inference service. Pin exact versions at deploy (this is the reference set).
+fastapi>=0.111
+uvicorn[standard]>=0.30
+onnxruntime>=1.18
+insightface>=0.7.3
+opencv-python-headless>=4.9
+passporteye>=2.2
+Pillow>=10.3
+numpy>=1.26
