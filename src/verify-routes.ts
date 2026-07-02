@@ -29,6 +29,22 @@ import QRCode from 'qrcode';
 import { getKycProvider } from './kyc-providers/index.js';
 import { InhouseKycProvider, type CaptureTokenClaims } from './kyc-providers/inhouse.js';
 import { renderCaptureUI } from './verify-ui.js';
+import { buildVerificationEngine } from './kyc-inference-client.js';
+import { loadSanctionsList } from './kyc-screening.js';
+
+/** POST a signed engine decision to the local /kyc/webhook — the entitlement path. */
+async function deliverDecision(signed: { body: Buffer; headers: Record<string, string> }): Promise<void> {
+  const issuer = (process.env.ISSUER_URL ?? 'http://localhost:3000').replace(/\/+$/, '');
+  try {
+    await fetch(`${issuer}/kyc/webhook`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...signed.headers },
+      body: signed.body,
+    });
+  } catch {
+    /* fail-closed: case stays pending → manual review in the admin dashboard */
+  }
+}
 
 /** Max encrypted-artifact upload (a base64 ID/selfie image + envelope overhead). */
 const MAX_BODY_BYTES = 12 * 1024 * 1024;
@@ -173,7 +189,24 @@ export function mountVerifyRoutes(provider: Provider): void {
     if (ctx.path === '/verify/complete') {
       await store.setStatus(claims.caseId, 'pending');
       await store.addEvidence({ caseId: claims.caseId, kind: 'other', tier: 3, ciphertext: 'capture-complete' });
-      return sendJson(ctx.res, 200, { ok: true, status: 'pending', note: 'capture complete; verification decision pending (VERI-S3)' });
+      // Auto-verify: when the inference service is configured, run the engine (which
+      // calls it), then deliver the decision to the entitlement path. Fire-and-forget so
+      // the request returns fast; the /verify finalize poll picks up the decision. On any
+      // failure the case stays pending → manual review (fail-closed). When KYC_INFERENCE_URL
+      // is unset (dev/test) the engine never runs here — the capture stays pending.
+      if (process.env.KYC_INFERENCE_URL) {
+        const engine = buildVerificationEngine({
+          provider: ih,
+          screener: loadSanctionsList([], 'runtime'),
+          webhookSecret: process.env.KYC_INHOUSE_WEBHOOK_SECRET ?? '',
+          env: process.env,
+        });
+        void engine
+          .runCase(claims.caseId)
+          .then((r) => (r ? deliverDecision(r.signedWebhook) : undefined))
+          .catch(() => undefined);
+      }
+      return sendJson(ctx.res, 200, { ok: true, status: 'pending' });
     }
 
     // POST /verify/handoff — mint a fresh phone-scoped token → QR-able mobile URL.
