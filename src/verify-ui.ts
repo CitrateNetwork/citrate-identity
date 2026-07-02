@@ -21,6 +21,7 @@
  */
 
 import { COUNTRIES, US_STATES, renderOptions } from './verify-geo.js';
+import { citrateLoaderSvg, CITRATE_LOADER_SCRIPT } from './verify-loader.js';
 
 export function renderCaptureUI(): string {
   return `<!doctype html>
@@ -87,6 +88,17 @@ video,canvas,img.preview { width:100%; border-radius:var(--r-1); background:#000
 .qr { display:flex; gap:1rem; align-items:center; margin-top:.75rem; }
 .qr .code { width:150px; height:150px; flex:0 0 auto; background:var(--surface-2); border:1px solid var(--border); border-radius:var(--r-1); padding:8px; }
 .qr .code svg { width:100%; height:100%; display:block; }
+/* finalize / processing */
+.finalize { text-align:center; padding:1.5rem 1.25rem; }
+.citrate-loader { width:110px; height:110px; display:block; margin:0 auto .25rem; overflow:visible; }
+.citrate-loader .pc { fill:var(--accent); }
+.finalize h2 { margin:.6rem 0 .35rem; }
+.bar { height:7px; width:100%; max-width:280px; margin:1rem auto .25rem; background:var(--surface-sunk); border-radius:999px; overflow:hidden; }
+.bar > i { display:block; height:100%; width:0%; background:var(--accent); border-radius:999px; transition:width .5s ease; }
+.checks { list-style:none; padding:0; margin:1rem auto 0; max-width:300px; text-align:left; }
+.checks li { display:flex; align-items:center; gap:.5rem; padding:.35rem 0; font-size:14px; color:var(--text-2); opacity:.4; transition:opacity .3s; }
+.checks li.on { opacity:1; color:var(--text-1); }
+.checks li .tick { display:inline-flex; width:20px; height:20px; flex:0 0 auto; align-items:center; justify-content:center; border-radius:999px; background:var(--accent-tint); color:var(--success); font-size:12px; font-weight:700; }
 ::selection { background:var(--accent); color:#0e0f0c; }
 </style></head>
 <body>
@@ -133,9 +145,16 @@ video,canvas,img.preview { width:100%; border-radius:var(--r-1); background:#000
   <p style="margin-top:.75rem"><button id="btn-capture" class="secondary">Capture</button> <button id="btn-liveness" disabled>Finish verification</button></p>
 </div>
 
-<div id="step-done" class="card hidden">
-  <h2 class="ok">✓ Submitted</h2>
-  <p>Your verification is being reviewed. You can close this window.</p>
+<div id="step-done" class="card finalize hidden">
+  ${citrateLoaderSvg('kyc-loader')}
+  <h2 id="fin-title">Finalizing verification…</h2>
+  <p class="muted" id="fin-sub">Encrypting and submitting your proof — this only takes a moment.</p>
+  <div class="bar"><i id="fin-bar"></i></div>
+  <ul class="checks hidden" id="fin-checks">
+    <li id="chk-life"><span class="tick">✓</span> Proof of life confirmed</li>
+    <li id="chk-id"><span class="tick">✓</span> Identity &amp; citizenship verified</li>
+  </ul>
+  <p id="fin-actions" class="hidden" style="margin-top:1rem"><button id="fin-continue">Continue →</button></p>
 </div>
 
 <div class="card">
@@ -155,6 +174,7 @@ video,canvas,img.preview { width:100%; border-radius:var(--r-1); background:#000
 </div>
 
 <script>
+${CITRATE_LOADER_SCRIPT}
 (() => {
   const qs = (id) => document.getElementById(id);
   const session = new URLSearchParams(location.search).get('session');
@@ -251,7 +271,7 @@ video,canvas,img.preview { width:100%; border-radius:var(--r-1); background:#000
       await api('/verify/evidence', { kind:'liveness', ciphertext: await sealBytes(new Uint8Array(await blob.arrayBuffer())) });
       await api('/verify/complete', {});
       const v = qs('cam'); if (v.srcObject) v.srcObject.getTracks().forEach((t) => t.stop());
-      setStatus(''); step('done');
+      setStatus(''); finalize();
     } catch (e) { setStatus(String(e.message || e), 'err'); }
   };
 
@@ -264,11 +284,50 @@ video,canvas,img.preview { width:100%; border-radius:var(--r-1); background:#000
       const a = qs('handoff-url'); a.href = mobileUrl; a.textContent = mobileUrl;
       const poll = setInterval(async () => {
         try { const r = await fetch('/verify/status?session=' + encodeURIComponent(session)); const j = await r.json();
-          if (j.captureComplete) { clearInterval(poll); qs('handoff-poll').textContent = '✓ Completed on your phone.'; step('done'); }
+          if (j.captureComplete) { clearInterval(poll); qs('handoff-poll').textContent = '✓ Completed on your phone.'; finalize(); }
         } catch {}
       }, 3000);
     } catch (e) { setStatus(String(e.message || e), 'err'); }
   };
+
+  // Finalize — federated-mark loader + progress while we poll for the decision, then
+  // an HONEST outcome: verified → confirm proof-of-life + citizenship and auto-advance;
+  // rejected → say so; still pending → "submitted for review" (never a fabricated pass).
+  function finalize() {
+    step('done');
+    const bar = qs('fin-bar');
+    if (window.startCitrateLoader) { try { window.startCitrateLoader(qs('kyc-loader')); } catch {} }
+    let pct = 8; bar.style.width = pct + '%';
+    const tick = setInterval(() => { pct = Math.min(pct + 6, 90); bar.style.width = pct + '%'; }, 700);
+    let polls = 0;
+    const stop = () => { clearInterval(tick); clearInterval(poll); };
+    const poll = setInterval(async () => {
+      polls++;
+      try {
+        const r = await fetch('/verify/status?session=' + encodeURIComponent(session));
+        const j = await r.json();
+        if (j.status === 'verified') {
+          stop(); bar.style.width = '100%';
+          qs('fin-title').textContent = "You're verified"; qs('fin-title').className = 'ok';
+          qs('fin-sub').textContent = 'Redirecting you back…';
+          qs('fin-checks').classList.remove('hidden');
+          setTimeout(() => qs('chk-life').classList.add('on'), 150);
+          setTimeout(() => qs('chk-id').classList.add('on'), 650);
+          setTimeout(() => { location.href = '/kyc/return'; }, 2400);
+        } else if (j.status === 'rejected') {
+          stop(); bar.style.width = '100%';
+          qs('fin-title').textContent = "We couldn't verify this"; qs('fin-title').className = 'err';
+          qs('fin-sub').textContent = 'Your submission did not pass verification. Contact support if you believe this is an error.';
+        } else if (polls >= 6) {
+          stop(); bar.style.width = '100%';
+          qs('fin-title').textContent = 'Submitted for review'; qs('fin-title').className = '';
+          qs('fin-sub').textContent = 'Your identity was captured and encrypted. A reviewer will finalize it shortly — you can safely close this window, or continue.';
+          qs('fin-actions').classList.remove('hidden');
+        }
+      } catch {}
+    }, 2500);
+    qs('fin-continue').onclick = () => { location.href = '/kyc/return'; };
+  }
 })();
 </script>
 </body></html>`;
