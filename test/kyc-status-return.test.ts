@@ -71,11 +71,30 @@ describe('GET /kyc/status?sub= (owner re-check, C.3)', () => {
 });
 
 describe('GET /kyc/return (post-KYC landing, C.2)', () => {
-  it('303s to the fallback dataroom origin when no return cookie is present', async () => {
+  it('303s to the default home (citrate.ai) when no return cookie is present', async () => {
     const res = await fetch(`${baseUrl}/kyc/return`, { redirect: 'manual' });
     expect(res.status).toBe(303);
     const loc = res.headers.get('location');
-    // Default allowlist's primary origin.
-    expect(loc).toBe('https://dataroom.citrate.ai');
+    // Generic home when we can't tell where the user came from (KYC_DEFAULT_RETURN).
+    expect(loc).toBe('https://citrate.ai');
+  });
+
+  it('303s back to ANY citrate.ai subdomain carried in the return cookie (docs, comms, …)', async () => {
+    const dest = 'https://docs.citrate.ai/guide';
+    const res = await fetch(`${baseUrl}/kyc/return`, {
+      headers: { cookie: `kyc_return=${dest}` },
+      redirect: 'manual',
+    });
+    expect(res.status).toBe(303);
+    expect(res.headers.get('location')).toBe(dest);
+  });
+
+  it('refuses a return cookie pointing off citrate.ai → default home', async () => {
+    const res = await fetch(`${baseUrl}/kyc/return`, {
+      headers: { cookie: `kyc_return=https://evil.example.com/x` },
+      redirect: 'manual',
+    });
+    expect(res.status).toBe(303);
+    expect(res.headers.get('location')).toBe('https://citrate.ai');
   });
 });

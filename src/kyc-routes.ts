@@ -48,9 +48,11 @@ export interface KycRouteOptions {
 const KYC_RETURN_COOKIE = 'kyc_return';
 
 /**
- * Origins a `return_to` may point at (where the user lands after Sumsub). Env
- * `KYC_RETURN_ALLOWED_ORIGINS` (comma-separated https origins) overrides the
- * default data-room origins. Validated on the way IN (/kyc/start) AND OUT
+ * Explicit extra origins allowed to receive the user after KYC — for NON-`citrate.ai`
+ * hosts (Vercel previews, local dev). Any https `citrate.ai` subdomain (and the apex)
+ * is allowed automatically by {@link isAllowedReturnOrigin}, so new subdomains work
+ * without a code change. Env `KYC_RETURN_ALLOWED_ORIGINS` (comma-separated https
+ * origins) overrides this list. Validated on the way IN (/kyc/start) AND OUT
  * (/kyc/return), so a tampered cookie can only ever redirect to an allowed origin.
  */
 function returnAllowlist(): string[] {
@@ -61,17 +63,29 @@ function returnAllowlist(): string[] {
   const base = env && env.trim()
     ? env.split(',').map((s) => s.trim()).filter(Boolean)
     : [
-        'https://dataroom.citrate.ai',
         'https://citrate-dataroom.vercel.app',
-        // American Learning Federation applicant flow on the landing site.
-        'https://www.citrate.ai',
-        'https://citrate.ai',
         'https://citrate-landing.vercel.app',
       ];
   return base.includes(self) ? base : [...base, self];
 }
 
-/** A `return_to` is accepted only if it is an absolute https URL on the allowlist. */
+/**
+ * True if `origin` may receive the user after KYC: any https `citrate.ai` subdomain
+ * (or the apex) — all first-party Citrate properties — plus the explicit allowlist
+ * (env override / Vercel previews / the authority's own origin).
+ */
+function isAllowedReturnOrigin(origin: string): boolean {
+  if (returnAllowlist().includes(origin)) return true;
+  try {
+    const u = new URL(origin);
+    if (u.protocol !== 'https:') return false;
+    return u.hostname === 'citrate.ai' || u.hostname.endsWith('.citrate.ai');
+  } catch {
+    return false;
+  }
+}
+
+/** A `return_to` is accepted only if it is an absolute https URL on an allowed origin. */
 function validatedReturnTo(v: unknown): string | undefined {
   if (typeof v !== 'string' || v.length === 0) return undefined;
   let u: URL;
@@ -81,7 +95,28 @@ function validatedReturnTo(v: unknown): string | undefined {
     return undefined;
   }
   if (u.protocol !== 'https:') return undefined;
-  return returnAllowlist().includes(u.origin) ? v : undefined;
+  return isAllowedReturnOrigin(u.origin) ? v : undefined;
+}
+
+/**
+ * Fall back to the referring site's origin when a caller didn't pass `return_to`, so
+ * the user still lands back on the subdomain they came from (e.g. docs.citrate.ai).
+ * Only honored if the Referer origin is an allowed origin.
+ */
+function refererReturn(req: IncomingMessage): string | undefined {
+  const ref = req.headers['referer'];
+  if (typeof ref !== 'string' || !ref) return undefined;
+  try {
+    const origin = new URL(ref).origin;
+    return isAllowedReturnOrigin(origin) ? origin : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Generic home when we can't tell where the user came from. */
+function defaultReturn(): string {
+  return process.env.KYC_DEFAULT_RETURN || 'https://citrate.ai';
 }
 
 /** Options for {@link mountKycStartRoute}. */
@@ -602,10 +637,12 @@ export function mountKycStartRoute(
       return;
     }
 
-    // Optional return_to (C.2): where to send the user after Sumsub. Validated
-    // to an allowlisted https origin, stashed in a short-lived cookie that
-    // /kyc/return consumes (point Sumsub's completion redirect at /kyc/return).
-    const returnTo = validatedReturnTo(ctx.query['return_to']);
+    // Where to send the user after KYC. Prefer the explicit `return_to`; if the caller
+    // didn't pass one, fall back to the referring site's origin so a user still lands
+    // back on the subdomain they came from (docs/dataroom/comms/citrate.ai, …). Both are
+    // validated to an allowed origin, stashed in a short-lived cookie that /kyc/return
+    // consumes — so a tampered cookie can only ever redirect to an allowed origin.
+    const returnTo = validatedReturnTo(ctx.query['return_to']) ?? refererReturn(ctx.req);
     if (returnTo) {
       ctx.cookies.set(KYC_RETURN_COOKIE, returnTo, {
         httpOnly: true,
@@ -701,7 +738,7 @@ export function mountKycReturnRoute(provider: Provider): void {
     const raw = ctx.cookies.get(KYC_RETURN_COOKIE);
     // Clear the cookie regardless of validity.
     ctx.cookies.set(KYC_RETURN_COOKIE, null);
-    const dest = validatedReturnTo(raw) ?? returnAllowlist()[0];
+    const dest = validatedReturnTo(raw) ?? defaultReturn();
     ctx.res.writeHead(303, { location: dest, 'cache-control': 'no-store' });
     ctx.res.end();
   });
