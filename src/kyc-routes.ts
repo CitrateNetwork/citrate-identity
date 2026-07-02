@@ -31,6 +31,7 @@ import {
 import { getKycProvider } from './kyc-providers/index.js';
 import { KYC_LEVELS, type KycLevel } from './kyc-providers/level-hints.js';
 import { grantKycBaseline } from './entitlements.js';
+import { sendKycApprovedEmail } from './kyc-mailer.js';
 import { getUserStore } from './auth/stores.js';
 import { predictedWalletForAccount } from './aa/wallet-claims.js';
 
@@ -417,6 +418,9 @@ export function mountKycWebhookRoute(
             // eslint-disable-next-line no-console
             console.log(`[kyc] baseline entitlement auto-granted on verify: ${key}`);
           }
+          // Confirmation email — the "we'll email you once confirmed" promise from the
+          // capture flow. Best-effort + async; a no-op if SMTP isn't configured.
+          if (rec?.email) void sendKycApprovedEmail(rec.email);
         } catch (e) {
           // eslint-disable-next-line no-console
           console.warn(`[kyc] baseline auto-grant skipped (${(e as Error).message}) for ${key}`);

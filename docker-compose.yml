@@ -63,6 +63,14 @@ services:
       KYC_INFERENCE_URL: ${KYC_INFERENCE_URL:-}
       KYC_INFERENCE_TOKEN: ${KYC_INFERENCE_TOKEN:-}
       KYC_ADMIN_SUBS: ${KYC_ADMIN_SUBS:-}
+      # KYC confirmation email (same SMTP the landing/dataroom use). Unset → the
+      # "you're verified" email is a logged no-op; verification itself still works.
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-}
+      SMTP_SECURE: ${SMTP_SECURE:-}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      MAIL_FROM: ${MAIL_FROM:-}
       CITRATE_RPC_URL: ${CITRATE_RPC_URL:-}
       # EW-S1 AA stack. When CITRATE_AA_FACTORY is set, `server.ts`
       # mounts `/aa/*` routes (predict address, enroll validator, list

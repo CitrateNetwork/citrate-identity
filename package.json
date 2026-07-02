@@ -20,6 +20,7 @@
     "@simplewebauthn/server": "^13.3.1",
     "ioredis": "^5.11.1",
     "jose": "^5.9.6",
+    "nodemailer": "^9.0.3",
     "oidc-provider": "^8.5.3",
     "pg": "^8.21.0",
     "qrcode": "^1.5.4",
@@ -28,6 +29,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
+    "@types/nodemailer": "^8.0.1",
     "@types/oidc-provider": "^8.5.2",
     "@types/pg": "^8.20.0",
     "@types/qrcode": "^1.5.6",
