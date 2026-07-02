@@ -88,6 +88,20 @@ video,canvas,img.preview { width:100%; border-radius:var(--r-1); background:#000
 .qr { display:flex; gap:1rem; align-items:center; margin-top:.75rem; }
 .qr .code { width:150px; height:150px; flex:0 0 auto; background:var(--surface-2); border:1px solid var(--border); border-radius:var(--r-1); padding:8px; }
 .qr .code svg { width:100%; height:100%; display:block; }
+/* ID scan (auto-capture) */
+.scan { position:relative; width:100%; aspect-ratio:1.585; border-radius:var(--r-1); overflow:hidden; background:#0b1f13; }
+.scan video { width:100%; height:100%; object-fit:cover; display:block; }
+.id-guide { position:absolute; inset:8% 6%; border:3px solid rgba(255,255,255,.55); border-radius:10px; box-shadow:0 0 0 100vmax rgba(11,31,19,.45); transition:border-color .2s, box-shadow .2s; display:flex; align-items:flex-end; justify-content:center; pointer-events:none; }
+.id-guide.ready { border-color:var(--accent); box-shadow:0 0 0 100vmax rgba(11,31,19,.25), 0 0 22px rgba(142,204,9,.5) inset; }
+.id-guide span { font-family:var(--font-mono); font-size:10px; letter-spacing:var(--tr); text-transform:uppercase; color:#f1eee6; background:rgba(15,42,26,.75); padding:.2rem .5rem; border-radius:999px; margin-bottom:8px; }
+.id-guide.ready span { background:var(--accent); color:var(--accent-fg); }
+/* liveness ring */
+.live-wrap { position:relative; width:230px; height:230px; margin:.5rem auto; }
+.live-wrap video { position:absolute; inset:8px; width:calc(100% - 16px); height:calc(100% - 16px); object-fit:cover; border-radius:50%; transform:scaleX(-1); background:#0b1f13; }
+.live-ring { position:absolute; inset:0; width:100%; height:100%; transform:rotate(-90deg); }
+.live-ring #ring-bg { fill:none; stroke:var(--surface-sunk); stroke-width:4; }
+.live-ring #ring-fg { fill:none; stroke:var(--accent); stroke-width:4; stroke-linecap:round; stroke-dasharray:289; stroke-dashoffset:289; transition:stroke-dashoffset .4s; }
+.live-prompt { position:absolute; left:0; right:0; bottom:-1.6rem; text-align:center; font-family:var(--font-mono); font-size:11px; letter-spacing:.05em; text-transform:uppercase; color:var(--text-2); }
 /* finalize / processing */
 .finalize { text-align:center; padding:1.5rem 1.25rem; }
 .citrate-loader { width:110px; height:110px; display:block; margin:0 auto .25rem; overflow:visible; }
@@ -138,26 +152,30 @@ video,canvas,img.preview { width:100%; border-radius:var(--r-1); background:#000
 </div>
 
 <div id="step-document" class="card hidden">
-  <h2>Step 2 — Photo of your ID</h2>
-  <p class="muted" id="doc-hint">Take or upload a clear, well-lit photo of your ID — fill the frame and avoid glare.</p>
-  <label>Front of ID</label>
-  <input type="file" id="doc-file" accept="image/*" capture="environment">
+  <h2>Step 2 — Scan your ID</h2>
+  <p class="muted" id="doc-hint">Hold your ID inside the frame — we capture it automatically once it's sharp.</p>
+  <div class="scan" id="id-scan"><video id="id-cam" autoplay playsinline muted></video><div class="id-guide" id="id-guide"><span id="id-guide-label">Front of ID</span></div></div>
+  <canvas id="id-canvas" class="hidden"></canvas>
   <img id="doc-preview" class="preview hidden" alt="">
-  <div id="back-wrap" class="hidden">
-    <label>Back of ID</label>
-    <p class="muted" style="margin:.15rem 0 .4rem">Driver's licenses and state IDs have the machine-readable barcode on the back — we need it to confirm your ID.</p>
-    <input type="file" id="doc-back-file" accept="image/*" capture="environment">
-    <img id="doc-back-preview" class="preview hidden" alt="">
+  <img id="doc-back-preview" class="preview hidden" alt="">
+  <p style="margin-top:.75rem"><button id="btn-id-capture" class="secondary">Capture now</button> <button id="btn-document" disabled>Continue &rarr;</button></p>
+  <p class="muted"><a href="#" id="id-upload-toggle">Trouble scanning? Upload photos instead</a></p>
+  <div id="id-upload" class="hidden">
+    <label>Front of ID</label><input type="file" id="doc-file" accept="image/*" capture="environment">
+    <div id="back-wrap" class="hidden"><label>Back of ID</label><input type="file" id="doc-back-file" accept="image/*" capture="environment"></div>
   </div>
-  <p style="margin-top:1rem"><button id="btn-document" disabled>Upload &amp; continue</button></p>
 </div>
 
 <div id="step-liveness" class="card hidden">
-  <h2>Step 3 — Liveness selfie</h2>
-  <p class="muted">Center your face and capture. This image is deleted right after the check.</p>
-  <video id="cam" autoplay playsinline muted></video>
+  <h2>Step 3 — Liveness check</h2>
+  <p class="muted">Fit your face in the circle and follow the prompts — we take a few frames as you go. These are deleted right after the check.</p>
+  <div class="live-wrap">
+    <video id="cam" autoplay playsinline muted></video>
+    <svg class="live-ring" viewBox="0 0 100 100"><circle id="ring-bg" cx="50" cy="50" r="46"></circle><circle id="ring-fg" cx="50" cy="50" r="46"></circle></svg>
+    <div class="live-prompt" id="live-prompt">Center your face</div>
+  </div>
   <canvas id="shot" class="hidden"></canvas>
-  <p style="margin-top:.75rem"><button id="btn-capture" class="secondary">Capture</button> <button id="btn-liveness" disabled>Finish verification</button></p>
+  <p style="margin-top:1.6rem;text-align:center"><button id="btn-liveness" disabled>Finish verification</button></p>
 </div>
 
 <div id="step-done" class="card finalize hidden">
@@ -258,62 +276,123 @@ ${CITRATE_LOADER_SCRIPT}
       // Driver's licenses + state/national ID cards carry the machine-readable data on
       // the BACK — require it. Passports have everything on the front page.
       needsBack = idType === 'dl' || idType === 'state_id' || idType === 'national_id';
-      qs('back-wrap').classList.toggle('hidden', !needsBack);
       qs('doc-hint').textContent = needsBack
-        ? "Take a clear, well-lit photo of the FRONT and BACK of your ID — fill the frame, avoid glare."
-        : "Take a clear, well-lit photo of your passport photo page — fill the frame, avoid glare.";
+        ? "Hold the FRONT of your ID inside the frame — we capture it automatically, then you'll flip to the back."
+        : "Hold your passport photo page inside the frame — we capture it automatically once it's sharp.";
       step('document');
+      startIdScan();
     } catch (e) { setStatus(String(e.message || e), 'err'); }
   };
 
-  // Step 2 — front (always) + back (driver's license / state / national ID)
+  // ---- Step 2: live ID scan with green-box auto-capture (+ upload fallback) ----
+  let frontBlob = null, backBlob = null;
+  let idStream = null, idRAF = 0, idSide = 'front', sharpStreak = 0;
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const blobToSealed = async (b) => sealBytes(new Uint8Array(await b.arrayBuffer()));
+
+  function frameSharpness(video) {
+    const c = qs('id-canvas'), w = 168, h = 106; c.width = w; c.height = h;
+    const ctx = c.getContext('2d');
+    const vw = video.videoWidth, vh = video.videoHeight;
+    ctx.drawImage(video, vw * 0.06, vh * 0.08, vw * 0.88, vh * 0.84, 0, 0, w, h);
+    const d = ctx.getImageData(0, 0, w, h).data;
+    const g = (i) => 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+    let sum = 0, sum2 = 0, n = 0;
+    for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
+      const i = (y * w + x) * 4;
+      const lap = 4 * g(i) - g(i - 4) - g(i + 4) - g(i - w * 4) - g(i + w * 4);
+      sum += lap; sum2 += lap * lap; n++;
+    }
+    return sum2 / n - (sum / n) * (sum / n); // Laplacian variance ≈ focus/edge energy
+  }
+  function scanLoop() {
+    const v = qs('id-cam');
+    if (v && v.videoWidth) {
+      const ready = frameSharpness(v) > 90; // sharp + textured ID fills the guide
+      qs('id-guide').classList.toggle('ready', ready);
+      sharpStreak = ready ? sharpStreak + 1 : 0;
+      if (sharpStreak >= 8) { captureIdSide(); return; }
+    }
+    idRAF = requestAnimationFrame(scanLoop);
+  }
+  function stopIdScan() { if (idRAF) cancelAnimationFrame(idRAF); idRAF = 0; if (idStream) idStream.getTracks().forEach((t) => t.stop()); idStream = null; }
+  function revealUpload() {
+    stopIdScan(); qs('id-scan').classList.add('hidden'); qs('btn-id-capture').classList.add('hidden');
+    qs('id-upload').classList.remove('hidden'); if (needsBack) qs('back-wrap').classList.remove('hidden');
+  }
+  async function startIdScan() {
+    if (needsBack) qs('back-wrap').classList.remove('hidden');
+    try {
+      idStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment', width: { ideal: 1920 } } });
+      qs('id-cam').srcObject = idStream; idSide = 'front'; sharpStreak = 0;
+      qs('id-guide-label').textContent = 'Front of ID'; scanLoop();
+    } catch { revealUpload(); }
+  }
+  function captureIdSide() {
+    const v = qs('id-cam'), c = qs('id-canvas'); c.width = v.videoWidth; c.height = v.videoHeight;
+    c.getContext('2d').drawImage(v, 0, 0);
+    c.toBlob((blob) => {
+      if (idSide === 'front') {
+        frontBlob = blob; const img = qs('doc-preview'); img.src = URL.createObjectURL(blob); img.classList.remove('hidden');
+        if (needsBack) { idSide = 'back'; sharpStreak = 0; qs('id-guide').classList.remove('ready'); qs('id-guide-label').textContent = 'Now the BACK'; setStatus('Front captured ✓ — now flip your ID', 'ok'); scanLoop(); }
+        else finishIdScan();
+      } else {
+        backBlob = blob; const img = qs('doc-back-preview'); img.src = URL.createObjectURL(blob); img.classList.remove('hidden'); finishIdScan();
+      }
+    }, 'image/jpeg', 0.92);
+  }
+  function finishIdScan() {
+    stopIdScan(); qs('id-scan').classList.add('hidden'); qs('btn-id-capture').classList.add('hidden');
+    qs('btn-document').disabled = false; setStatus('ID captured ✓', 'ok');
+  }
+  qs('btn-id-capture').onclick = () => { if (idStream && qs('id-cam').videoWidth) captureIdSide(); };
+  qs('id-upload-toggle').onclick = (e) => { e.preventDefault(); revealUpload(); };
   const docFile = qs('doc-file'), backFile = qs('doc-back-file');
-  const docReady = () => {
-    const front = docFile.files && docFile.files[0];
-    const back = backFile.files && backFile.files[0];
-    qs('btn-document').disabled = !(front && (!needsBack || back));
-  };
-  docFile.onchange = () => {
-    const f = docFile.files && docFile.files[0]; if (!f) return;
-    const img = qs('doc-preview'); img.src = URL.createObjectURL(f); img.classList.remove('hidden');
-    docReady();
-  };
-  backFile.onchange = () => {
-    const f = backFile.files && backFile.files[0]; if (!f) return;
-    const img = qs('doc-back-preview'); img.src = URL.createObjectURL(f); img.classList.remove('hidden');
-    docReady();
-  };
+  const uploadReady = () => { qs('btn-document').disabled = !(frontBlob && (!needsBack || backBlob)); };
+  docFile.onchange = () => { const f = docFile.files && docFile.files[0]; if (!f) return; frontBlob = f; const im = qs('doc-preview'); im.src = URL.createObjectURL(f); im.classList.remove('hidden'); uploadReady(); };
+  backFile.onchange = () => { const f = backFile.files && backFile.files[0]; if (!f) return; backBlob = f; const im = qs('doc-back-preview'); im.src = URL.createObjectURL(f); im.classList.remove('hidden'); uploadReady(); };
+
   qs('btn-document').onclick = async () => {
-    const f = docFile.files && docFile.files[0]; if (!f) return;
+    if (!frontBlob) return;
     try {
       setStatus('Encrypting document…');
-      await api('/verify/evidence', { kind:'document', ciphertext: await fileToSealed(f) });
-      const b = backFile.files && backFile.files[0];
-      if (needsBack && b) await api('/verify/evidence', { kind:'document-back', ciphertext: await fileToSealed(b) });
-      setStatus(''); step('liveness'); startCam();
+      await api('/verify/evidence', { kind: 'document', ciphertext: await blobToSealed(frontBlob) });
+      if (needsBack && backBlob) await api('/verify/evidence', { kind: 'document-back', ciphertext: await blobToSealed(backBlob) });
+      setStatus(''); step('liveness'); startLiveness();
     } catch (e) { setStatus(String(e.message || e), 'err'); }
   };
 
-  // Step 3
-  let shot = null;
-  async function startCam() {
-    try { const s = await navigator.mediaDevices.getUserMedia({ video:{ facingMode:'user' } }); qs('cam').srcObject = s; }
-    catch { setStatus('Camera unavailable — you can continue on your phone.', 'err'); }
-  }
-  qs('btn-capture').onclick = () => {
-    const v = qs('cam'), c = qs('shot');
-    c.width = v.videoWidth || 480; c.height = v.videoHeight || 640;
-    c.getContext('2d').drawImage(v, 0, 0, c.width, c.height);
-    shot = c; c.classList.remove('hidden'); v.classList.add('hidden'); qs('btn-liveness').disabled = false;
-  };
-  qs('btn-liveness').onclick = async () => {
-    if (!shot) return;
+  // ---- Step 3: multi-angle active liveness (circle guide + prompts, frames as it goes) ----
+  let liveStream = null, liveCenterBlob = null;
+  const LIVE_PROMPTS = ['Center your face', 'Slowly turn left', 'Now turn right', 'Look up a little', 'Face forward'];
+  async function startLiveness() {
     try {
-      setStatus('Encrypting selfie…');
-      const blob = await new Promise((res) => shot.toBlob(res, 'image/jpeg', 0.9));
-      await api('/verify/evidence', { kind:'liveness', ciphertext: await sealBytes(new Uint8Array(await blob.arrayBuffer())) });
+      liveStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' } });
+      qs('cam').srcObject = liveStream; runLiveSequence();
+    } catch { setStatus('Camera unavailable — you can continue on your phone.', 'err'); }
+  }
+  function grabFrame() {
+    return new Promise((res) => { const v = qs('cam'), c = qs('shot'); c.width = v.videoWidth || 480; c.height = v.videoHeight || 640; c.getContext('2d').drawImage(v, 0, 0, c.width, c.height); c.toBlob(res, 'image/jpeg', 0.9); });
+  }
+  async function runLiveSequence() {
+    const fg = qs('ring-fg'), C = 289, total = LIVE_PROMPTS.length;
+    for (let i = 0; i < total; i++) {
+      qs('live-prompt').textContent = LIVE_PROMPTS[i];
+      await sleep(1300);
+      const blob = await grabFrame();
+      if (i === 0) liveCenterBlob = blob; // the frontal frame is the 1:1 match image
+      fg.style.strokeDashoffset = String(C - C * ((i + 1) / total));
+    }
+    qs('live-prompt').textContent = 'Looks good ✓';
+    qs('btn-liveness').disabled = false;
+  }
+  qs('btn-liveness').onclick = async () => {
+    if (!liveCenterBlob) return;
+    try {
+      setStatus('Encrypting…');
+      await api('/verify/evidence', { kind: 'liveness', ciphertext: await blobToSealed(liveCenterBlob) });
       await api('/verify/complete', {});
-      const v = qs('cam'); if (v.srcObject) v.srcObject.getTracks().forEach((t) => t.stop());
+      if (liveStream) liveStream.getTracks().forEach((t) => t.stop());
       setStatus(''); finalize();
     } catch (e) { setStatus(String(e.message || e), 'err'); }
   };
