@@ -71,6 +71,10 @@ services:
       SMTP_USER: ${SMTP_USER:-}
       SMTP_PASSWORD: ${SMTP_PASSWORD:-}
       MAIL_FROM: ${MAIL_FROM:-}
+      # HTTPS email relay (works from the droplet, where SMTP egress is blocked): identity
+      # POSTs the approval email to the landing site, which sends via the shared Office 365.
+      KYC_EMAIL_RELAY_URL: ${KYC_EMAIL_RELAY_URL:-}
+      KYC_EMAIL_RELAY_SECRET: ${KYC_EMAIL_RELAY_SECRET:-}
       CITRATE_RPC_URL: ${CITRATE_RPC_URL:-}
       # EW-S1 AA stack. When CITRATE_AA_FACTORY is set, `server.ts`
       # mounts `/aa/*` routes (predict address, enroll validator, list

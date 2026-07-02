@@ -36,9 +36,10 @@ function smtpConfig(): SmtpConfig | null {
   };
 }
 
-/** True when SMTP is configured (so callers can log a clear "not sent" reason). */
+/** True when a delivery path (HTTPS relay or SMTP) is configured. */
 export function isMailerConfigured(): boolean {
-  return smtpConfig() !== null;
+  const relay = Boolean(process.env.KYC_EMAIL_RELAY_URL?.trim() && process.env.KYC_EMAIL_RELAY_SECRET?.trim());
+  return relay || smtpConfig() !== null;
 }
 
 async function transporter(): Promise<Transporter | null> {
@@ -75,10 +76,37 @@ function approvedHtml(): string {
 }
 
 /**
- * Send the "identity verified" confirmation. Returns true if it was handed to SMTP,
- * false if skipped (SMTP unconfigured) or errored — never throws.
+ * Send the "identity verified" confirmation. Returns true if it was accepted for
+ * delivery, false if skipped/errored — never throws.
+ *
+ * PATH 1 — HTTPS relay (preferred, and the ONLY path that works on the DO droplet,
+ * where all outbound SMTP ports are blocked): POST `{ to }` to `KYC_EMAIL_RELAY_URL`
+ * (a small authed endpoint on the landing site, which runs on Vercel and CAN reach
+ * Office 365) with `Authorization: Bearer KYC_EMAIL_RELAY_SECRET`. Reuses the existing
+ * email system without giving the droplet SMTP egress.
+ *
+ * PATH 2 — direct SMTP fallback (for hosts that allow SMTP egress; not the droplet).
  */
 export async function sendKycApprovedEmail(to: string): Promise<boolean> {
+  const relayUrl = process.env.KYC_EMAIL_RELAY_URL?.trim();
+  const relaySecret = process.env.KYC_EMAIL_RELAY_SECRET?.trim();
+  if (relayUrl && relaySecret) {
+    try {
+      const r = await fetch(relayUrl, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${relaySecret}` },
+        body: JSON.stringify({ to }),
+      });
+      if (r.ok) return true;
+      // eslint-disable-next-line no-console
+      console.error(`[citrate-identity] KYC email relay returned ${r.status}`);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error('[citrate-identity] KYC email relay error:', (err as Error).message);
+    }
+    return false;
+  }
+
   const cfg = smtpConfig();
   const t = await transporter();
   if (!cfg || !t) {
