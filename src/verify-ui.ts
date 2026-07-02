@@ -112,6 +112,14 @@ video,canvas,img.preview { width:100%; border-radius:var(--r-1); background:#000
   <h2>Step 1 — Consent &amp; details</h2>
   <label>Full name</label><input type="text" id="name" autocomplete="name">
   <label>Date of birth</label><input type="date" id="dob">
+  <label>ID you'll use to verify</label>
+  <select id="idtype">
+    <option value="" selected disabled>Select…</option>
+    <option value="passport">Passport</option>
+    <option value="dl">Driver's license</option>
+    <option value="state_id">State ID card</option>
+    <option value="national_id">National ID card</option>
+  </select>
   <label>Street address</label><input type="text" id="street" autocomplete="street-address">
   <div class="grid2">
     <div><label>City</label><input type="text" id="city" autocomplete="address-level2"></div>
@@ -131,9 +139,16 @@ video,canvas,img.preview { width:100%; border-radius:var(--r-1); background:#000
 
 <div id="step-document" class="card hidden">
   <h2>Step 2 — Photo of your ID</h2>
-  <p class="muted">Take or upload a clear photo of your government ID.</p>
+  <p class="muted" id="doc-hint">Take or upload a clear, well-lit photo of your ID — fill the frame and avoid glare.</p>
+  <label>Front of ID</label>
   <input type="file" id="doc-file" accept="image/*" capture="environment">
   <img id="doc-preview" class="preview hidden" alt="">
+  <div id="back-wrap" class="hidden">
+    <label>Back of ID</label>
+    <p class="muted" style="margin:.15rem 0 .4rem">Driver's licenses and state IDs have the machine-readable barcode on the back — we need it to confirm your ID.</p>
+    <input type="file" id="doc-back-file" accept="image/*" capture="environment">
+    <img id="doc-back-preview" class="preview hidden" alt="">
+  </div>
   <p style="margin-top:1rem"><button id="btn-document" disabled>Upload &amp; continue</button></p>
 </div>
 
@@ -191,6 +206,7 @@ ${CITRATE_LOADER_SCRIPT}
   if (!session) { setStatus('Missing or invalid session link.', 'err'); return; }
 
   let dek = null;
+  let needsBack = false;
   async function importKey(raw) { return crypto.subtle.importKey('raw', raw, 'AES-GCM', false, ['encrypt']); }
   async function sealBytes(bytes) {
     const iv = crypto.getRandomValues(new Uint8Array(12));
@@ -224,32 +240,56 @@ ${CITRATE_LOADER_SCRIPT}
   qs('btn-consent').onclick = async () => {
     if (!qs('c-bipa').checked || !qs('c-terms').checked) return setStatus('Please accept both consents.', 'err');
     const val = (id) => (qs(id).value || '').trim();
+    const idType = qs('idtype').value;
     const identity = {
-      name: val('name'), dob: qs('dob').value,
+      name: val('name'), dob: qs('dob').value, idType,
       address: { street: val('street'), city: val('city'), state: qs('state').value, zip: val('zip'), country: qs('country').value },
       nationality: qs('nationality').value,
     };
     if (!identity.name || !identity.dob) return setStatus('Name and date of birth are required.', 'err');
+    if (!idType) return setStatus("Please choose the ID you'll use to verify.", 'err');
     if (!identity.address.street || !identity.address.city || !identity.address.country) return setStatus('Street, city and country are required.', 'err');
     if (identity.address.country === 'US' && !identity.address.state) return setStatus('Please select your state.', 'err');
     if (!identity.nationality) return setStatus('Please select your nationality.', 'err');
     try {
       setStatus('Encrypting…');
       await api('/verify/consent', { consent:{ bipa:true, terms:true }, identityCt: await sealText(JSON.stringify(identity)) });
-      setStatus(''); step('document');
+      setStatus('');
+      // Driver's licenses + state/national ID cards carry the machine-readable data on
+      // the BACK — require it. Passports have everything on the front page.
+      needsBack = idType === 'dl' || idType === 'state_id' || idType === 'national_id';
+      qs('back-wrap').classList.toggle('hidden', !needsBack);
+      qs('doc-hint').textContent = needsBack
+        ? "Take a clear, well-lit photo of the FRONT and BACK of your ID — fill the frame, avoid glare."
+        : "Take a clear, well-lit photo of your passport photo page — fill the frame, avoid glare.";
+      step('document');
     } catch (e) { setStatus(String(e.message || e), 'err'); }
   };
 
-  // Step 2
-  const docFile = qs('doc-file');
+  // Step 2 — front (always) + back (driver's license / state / national ID)
+  const docFile = qs('doc-file'), backFile = qs('doc-back-file');
+  const docReady = () => {
+    const front = docFile.files && docFile.files[0];
+    const back = backFile.files && backFile.files[0];
+    qs('btn-document').disabled = !(front && (!needsBack || back));
+  };
   docFile.onchange = () => {
     const f = docFile.files && docFile.files[0]; if (!f) return;
     const img = qs('doc-preview'); img.src = URL.createObjectURL(f); img.classList.remove('hidden');
-    qs('btn-document').disabled = false;
+    docReady();
+  };
+  backFile.onchange = () => {
+    const f = backFile.files && backFile.files[0]; if (!f) return;
+    const img = qs('doc-back-preview'); img.src = URL.createObjectURL(f); img.classList.remove('hidden');
+    docReady();
   };
   qs('btn-document').onclick = async () => {
     const f = docFile.files && docFile.files[0]; if (!f) return;
-    try { setStatus('Encrypting document…'); await api('/verify/evidence', { kind:'document', ciphertext: await fileToSealed(f) });
+    try {
+      setStatus('Encrypting document…');
+      await api('/verify/evidence', { kind:'document', ciphertext: await fileToSealed(f) });
+      const b = backFile.files && backFile.files[0];
+      if (needsBack && b) await api('/verify/evidence', { kind:'document-back', ciphertext: await fileToSealed(b) });
       setStatus(''); step('liveness'); startCam();
     } catch (e) { setStatus(String(e.message || e), 'err'); }
   };

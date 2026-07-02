@@ -169,7 +169,7 @@ export function mountVerifyRoutes(provider: Provider): void {
       const kind = str(body['kind']);
       const ciphertext = str(body['ciphertext']);
       if (!kind || !ciphertext) return sendJson(ctx.res, 400, { error: 'kind_and_ciphertext_required' });
-      if (kind !== 'document' && kind !== 'liveness' && kind !== 'selfie') {
+      if (kind !== 'document' && kind !== 'document-back' && kind !== 'liveness' && kind !== 'selfie') {
         return sendJson(ctx.res, 400, { error: 'unsupported_kind' });
       }
       // Liveness/selfie = Tier-2 biometric → destroy right after the match (BIPA); the
@@ -203,8 +203,21 @@ export function mountVerifyRoutes(provider: Provider): void {
         });
         void engine
           .runCase(claims.caseId)
-          .then((r) => (r ? deliverDecision(r.signedWebhook) : undefined))
-          .catch(() => undefined);
+          .then((r) => {
+            if (!r) {
+              // eslint-disable-next-line no-console
+              console.warn(`[kyc] engine returned null (no case/DEK) for ${claims.caseId}`);
+              return undefined;
+            }
+            // eslint-disable-next-line no-console
+            console.log(`[kyc] engine decision for ${claims.caseId}: ${r.decision}` + (r.reasons.length ? ` — ${r.reasons.join('; ')}` : ''));
+            return deliverDecision(r.signedWebhook);
+          })
+          .catch((e) => {
+            // Do NOT swallow: a silent engine error looks identical to needs-review.
+            // eslint-disable-next-line no-console
+            console.error(`[kyc] engine run FAILED for ${claims.caseId} (case stays pending → review):`, (e as Error).message);
+          });
       }
       return sendJson(ctx.res, 200, { ok: true, status: 'pending' });
     }

@@ -33,7 +33,7 @@ export interface PgLike {
 
 export type CaseStatus = 'created' | 'pending' | 'verified' | 'rejected';
 export type CaseDecision = 'verified' | 'rejected' | 'needs-review';
-export type EvidenceKind = 'document' | 'liveness' | 'selfie' | 'other';
+export type EvidenceKind = 'document' | 'document-back' | 'liveness' | 'selfie' | 'other';
 
 export interface KycCase {
   caseId: string;

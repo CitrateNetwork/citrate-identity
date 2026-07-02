@@ -53,7 +53,7 @@ interface DocumentResponse {
 
 async function postJson<T>(cfg: InferenceConfig, path: string, body: unknown): Promise<T> {
   const ctrl = new AbortController();
-  const t = setTimeout(() => ctrl.abort(), cfg.timeoutMs ?? 8000);
+  const t = setTimeout(() => ctrl.abort(), cfg.timeoutMs ?? 20000);
   try {
     const r = await fetch(`${cfg.baseUrl.replace(/\/+$/, '')}${path}`, {
       method: 'POST',
