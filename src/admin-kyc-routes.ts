@@ -22,6 +22,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 
 import { getKycProvider } from './kyc-providers/index.js';
 import { InhouseKycProvider } from './kyc-providers/inhouse.js';
+import { renderAdminKycUI } from './admin-kyc-ui.js';
 import { getKycAuditLog } from './kyc-audit-pg.js';
 import { parseAdminSubs } from './aa/bundler-keys.js';
 import type { CaseStatus } from './kyc-cases-pg.js';
@@ -100,6 +101,11 @@ export function mountAdminKycRoutes(provider: Provider): void {
     const webhookSecret = process.env.KYC_INHOUSE_WEBHOOK_SECRET ?? '';
 
     // --- GET routes ---
+    if (ctx.method === 'GET' && (ctx.path === '/admin/kyc' || ctx.path === '/admin/kyc/')) {
+      ctx.res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+      ctx.res.end(renderAdminKycUI());
+      return;
+    }
     if (ctx.method === 'GET' && ctx.path === '/admin/kyc/cases') {
       const status = str(ctx.query['status']) as CaseStatus | undefined;
       return sendJson(ctx.res, 200, { cases: await listCases(store, status) });

@@ -319,10 +319,13 @@ ${CITRATE_LOADER_SCRIPT}
           qs('fin-title').textContent = "We couldn't verify this"; qs('fin-title').className = 'err';
           qs('fin-sub').textContent = 'Your submission did not pass verification. Contact support if you believe this is an error.';
         } else if (polls >= 6) {
+          // Submission is committed; the decision may take a moment (review). Don't park
+          // the user here — confirm receipt, then route them back to where they started.
           stop(); bar.style.width = '100%';
-          qs('fin-title').textContent = 'Submitted for review'; qs('fin-title').className = '';
-          qs('fin-sub').textContent = 'Your identity was captured and encrypted. A reviewer will finalize it shortly — you can safely close this window, or continue.';
+          qs('fin-title').textContent = '✓ Submitted'; qs('fin-title').className = 'ok';
+          qs('fin-sub').textContent = 'Your identity was captured and encrypted. We\\'ll finalize the review shortly — taking you back now…';
           qs('fin-actions').classList.remove('hidden');
+          setTimeout(() => { location.href = '/kyc/return'; }, 3500);
         }
       } catch {}
     }, 2500);
