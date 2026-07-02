@@ -87,10 +87,12 @@ describe('VerificationEngine (VERI-S3)', () => {
     expect(res.biometricsDestroyed).toBe(1); // still destroyed
   });
 
-  it('REJECTED: a failed liveness / presentation attack', async () => {
+  it('REVIEW (not reject): a failed liveness / presentation attack goes to a human, never auto-rejected', async () => {
     const { caseId } = await capturedCase('Ada Lovelace');
     const res = (await engine({ liveness: failLiveness, document: okDoc }).runCase(caseId))!;
-    expect(res.decision).toBe('rejected');
+    // Lenient posture: the engine never auto-rejects — a failed match / suspected spoof
+    // is routed to compliance review (+ email fallback), not hard-blocked.
+    expect(res.decision).toBe('needs-review');
   });
 
   it('FAIL-CLOSED: no model backend → needs-review, never a fabricated verified (Rule 1)', async () => {

@@ -154,7 +154,10 @@ video,canvas,img.preview { width:100%; border-radius:var(--r-1); background:#000
     <li id="chk-life"><span class="tick">✓</span> Proof of life confirmed</li>
     <li id="chk-id"><span class="tick">✓</span> Identity &amp; citizenship verified</li>
   </ul>
-  <p id="fin-actions" class="hidden" style="margin-top:1rem"><button id="fin-continue">Continue →</button></p>
+  <p id="fin-actions" class="hidden" style="margin-top:1.1rem">
+    <button id="fin-retry" class="secondary">Try again</button>
+    <button id="fin-continue">Continue →</button>
+  </p>
 </div>
 
 <div class="card">
@@ -315,20 +318,22 @@ ${CITRATE_LOADER_SCRIPT}
           setTimeout(() => qs('chk-id').classList.add('on'), 650);
           setTimeout(() => { location.href = '/kyc/return'; }, 2400);
         } else if (j.status === 'rejected') {
+          // Rare — a manual compliance decision. Keep it gentle + retryable.
           stop(); bar.style.width = '100%';
-          qs('fin-title').textContent = "We couldn't verify this"; qs('fin-title').className = 'err';
-          qs('fin-sub').textContent = 'Your submission did not pass verification. Contact support if you believe this is an error.';
-        } else if (polls >= 6) {
-          // Submission is committed; the decision may take a moment (review). Don't park
-          // the user here — confirm receipt, then route them back to where they started.
-          stop(); bar.style.width = '100%';
-          qs('fin-title').textContent = '✓ Submitted'; qs('fin-title').className = 'ok';
-          qs('fin-sub').textContent = 'Your identity was captured and encrypted. We\\'ll finalize the review shortly — taking you back now…';
+          qs('fin-title').textContent = "Let's try that again"; qs('fin-title').className = '';
+          qs('fin-sub').textContent = 'We weren\\'t able to confirm your identity from these photos. Please try again with a clear, well-lit photo of your ID and your face — or contact support if this keeps happening.';
           qs('fin-actions').classList.remove('hidden');
-          setTimeout(() => { location.href = '/kyc/return'; }, 3500);
+        } else if (j.decision === 'needs-review' || polls >= 8) {
+          // Couldn't auto-verify (e.g. a low-res ID photo) — NOT a failure. Confirm receipt
+          // and promise the email once a human confirms it. Offer a retry with clearer photos.
+          stop(); bar.style.width = '100%';
+          qs('fin-title').textContent = '✓ Received — almost there'; qs('fin-title').className = 'ok';
+          qs('fin-sub').innerHTML = 'Thanks! We just need a moment to finish confirming your identity. <strong>We\\'ll email you the second it\\'s approved</strong> — usually shortly. You can retry with clearer photos, or head back and we\\'ll take it from here.';
+          qs('fin-actions').classList.remove('hidden');
         }
       } catch {}
     }, 2500);
+    qs('fin-retry').onclick = () => { location.reload(); };
     qs('fin-continue').onclick = () => { location.href = '/kyc/return'; };
   }
 })();

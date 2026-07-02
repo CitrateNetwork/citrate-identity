@@ -63,13 +63,13 @@ describe('HttpLivenessAnalyzer (VERI)', () => {
     status = 200; liveness = { pass: true, confidence: 0.98 };
     const r = await new HttpLivenessAnalyzer(cfg()).analyze({ faceImage: Buffer.from('f'), idPortrait: Buffer.from('p') });
     expect(r.pass).toBe(true);
-    expect(r.requiresReview).toBeUndefined();
+    expect(r.requiresReview).toBe(false); // a pass is not a review
   });
-  it('passes through a negative verdict (reject)', async () => {
-    status = 200; liveness = { pass: false, confidence: 0.9, reason: 'spoof' };
+  it('a negative verdict routes to REVIEW, never an auto-reject (honest users not blocked)', async () => {
+    status = 200; liveness = { pass: false, confidence: 0.9, reason: 'no match' };
     const r = await new HttpLivenessAnalyzer(cfg()).analyze({ faceImage: Buffer.from('f') });
     expect(r.pass).toBe(false);
-    expect(r.requiresReview).toBeUndefined(); // a real reject, not a review
+    expect(r.requiresReview).toBe(true); // low-res ID / borderline → human review, not a hard fail
   });
   it('FAIL-CLOSED: service 500 → requiresReview, never a pass', async () => {
     status = 500; liveness = {};
@@ -93,18 +93,18 @@ describe('HttpDocumentAnalyzer (VERI)', () => {
     expect(r.extracted?.docNumber).toBe('X1234567');
     expect(r.extracted?.nationality).toBe('GBR');
   });
-  it('REJECT (hard): an expired document', async () => {
+  it('REVIEW: an expired document (soft — never an auto-reject)', async () => {
     const { l1, l2 } = validTD3L2('100101'); // expired 2010
     status = 200; document = { mrz: [l1, l2], portraitPresent: true, tamperScore: 0.05, ocrConfidence: 0.95 };
     const r = await new HttpDocumentAnalyzer(cfg()).analyze({ docImage: Buffer.from('img') });
     expect(r.authentic).toBe(false);
-    expect(r.requiresReview).toBe(false); // expired is a clean reject
+    expect(r.requiresReview).toBe(true); // expired → human review + email fallback, not a hard reject
   });
-  it('REVIEW: unreadable / unparseable MRZ', async () => {
+  it('MRZ is a bonus: no/unreadable MRZ + a portrait → authentic (e.g. a driver\'s license, bound by face match)', async () => {
     status = 200; document = { mrz: ['garbage'], portraitPresent: true, ocrConfidence: 0.4 };
     const r = await new HttpDocumentAnalyzer(cfg()).analyze({ docImage: Buffer.from('img') });
-    expect(r.authentic).toBe(false);
-    expect(r.requiresReview).toBe(true);
+    expect(r.authentic).toBe(true);
+    expect(r.requiresReview).toBe(false);
   });
   it('FAIL-CLOSED: service unreachable → requiresReview', async () => {
     const r = await new HttpDocumentAnalyzer({ baseUrl: 'http://127.0.0.1:1', timeoutMs: 300 }).analyze({ docImage: Buffer.from('img') });

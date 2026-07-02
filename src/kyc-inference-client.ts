@@ -79,9 +79,14 @@ export class HttpLivenessAnalyzer implements LivenessAnalyzer {
         face: input.faceImage.toString('base64'),
         idPortrait: input.idPortrait ? input.idPortrait.toString('base64') : undefined,
       });
+      const pass = res.pass === true;
       return {
-        pass: res.pass === true,
+        pass,
         confidence: typeof res.confidence === 'number' ? res.confidence : 0,
+        // A non-pass (low-res ID photo, lighting, borderline PAD/match) is AMBIGUOUS →
+        // route to human review (email fallback), NEVER an auto-reject. Honest users are
+        // not hard-blocked; a genuine spoof simply fails to auto-verify and a human checks.
+        requiresReview: !pass,
         reason: res.reason,
       };
     } catch (err) {
@@ -100,38 +105,40 @@ export class HttpDocumentAnalyzer implements DocumentAnalyzer {
     } catch (err) {
       return { authentic: false, requiresReview: true, reason: `document backend unavailable: ${(err as Error).message}` };
     }
-    // OCR gave us MRZ text → validate check digits + expiry LOCALLY (deterministic).
-    const mrz = res.mrz && res.mrz.length ? parseMrz(res.mrz) : null;
-    if (!mrz) {
-      return { authentic: false, requiresReview: true, reason: 'MRZ not read / unparseable' };
-    }
     const tamperThreshold = this.cfg.tamperThreshold ?? 0.5;
     const tamperOk = (res.tamperScore ?? 0) < tamperThreshold;
     const portraitOk = res.portraitPresent !== false;
-    const lowOcr = (res.ocrConfidence ?? 1) < 0.6;
 
-    const authentic = mrz.valid && mrz.notExpired && tamperOk && portraitOk;
-    // HARD fail (unambiguous → engine rejects): expired, or a confident tamper score.
-    const hardFail = !mrz.notExpired || !tamperOk;
-    // Otherwise, any failure is ambiguous (OCR misread, missing portrait) → review.
-    const requiresReview = !authentic && !hardFail;
+    // MRZ is a BONUS, not a requirement. Passports / MRZ national-ID cards carry it;
+    // most driver's licenses (e.g. a California DL) do NOT. When present we validate
+    // check digits + expiry locally (deterministic); when absent we accept the document
+    // on a detected portrait + no-tamper, and the 1:1 face-match step binds it to the
+    // holder. This keeps honest DL holders from being blocked. Anything not-authentic
+    // here is a SOFT review (email fallback), never an auto-reject — decide() only
+    // auto-rejects on a sanctions hit.
+    const mrz = res.mrz && res.mrz.length ? parseMrz(res.mrz) : null;
+    const mrzOk = !mrz || (mrz.valid && mrz.notExpired);
+    const authentic = mrzOk && tamperOk && portraitOk;
 
     const reasons: string[] = [];
-    if (!mrz.valid) reasons.push('MRZ check digits failed');
-    if (!mrz.notExpired) reasons.push('document expired');
+    if (mrz && !mrz.valid) reasons.push('MRZ check digits failed');
+    if (mrz && !mrz.notExpired) reasons.push('document expired');
     if (!tamperOk) reasons.push(`tamper score ${res.tamperScore}`);
-    if (!portraitOk) reasons.push('no portrait detected');
+    if (!portraitOk) reasons.push('no portrait detected on the ID');
+    if (!mrz) reasons.push('no MRZ (non-passport ID) — identity bound by face match');
 
     return {
       authentic,
-      requiresReview,
+      requiresReview: !authentic,
       reason: reasons.join('; ') || undefined,
-      extracted: {
-        name: [mrz.givenNames, mrz.surname].filter(Boolean).join(' ').trim() || undefined,
-        dob: mrz.birthDate,
-        docNumber: mrz.documentNumber,
-        nationality: mrz.nationality,
-      },
+      extracted: mrz
+        ? {
+            name: [mrz.givenNames, mrz.surname].filter(Boolean).join(' ').trim() || undefined,
+            dob: mrz.birthDate,
+            docNumber: mrz.documentNumber,
+            nationality: mrz.nationality,
+          }
+        : undefined,
     };
   }
 }

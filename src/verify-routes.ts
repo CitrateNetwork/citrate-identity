@@ -133,7 +133,7 @@ export function mountVerifyRoutes(provider: Provider): void {
       if (!c) return sendJson(ctx.res, 404, { error: 'case_not_found' });
       const evidence = await ih.caseStore.listEvidence(c.caseId);
       const captureComplete = evidence.some((e) => e.kind === 'other' && e.tier === 3 && e.destroyAfter === undefined && e.ciphertext === 'capture-complete');
-      sendJson(ctx.res, 200, { status: c.status, captureComplete, steps: stepFlags(evidence, c.identityCt !== undefined) });
+      sendJson(ctx.res, 200, { status: c.status, decision: c.decision, captureComplete, steps: stepFlags(evidence, c.identityCt !== undefined) });
       return;
     }
 

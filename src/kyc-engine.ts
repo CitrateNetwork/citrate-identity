@@ -167,19 +167,20 @@ export class VerificationEngine {
     hasFace: boolean;
     hasDoc: boolean;
   }): EngineDecision {
-    // Hard rejects: a confident spoof / no-match or a confirmed-fake document.
-    if (x.liveness && x.liveness.pass === false && !x.liveness.requiresReview) return 'rejected';
-    if (x.document && x.document.authentic === false && !x.document.requiresReview) return 'rejected';
-
-    // Anything uncertain or unscreenable → human adjudication (fail-closed).
+    // LENIENT posture (onboarding honest investors/partners): the engine NEVER
+    // auto-rejects. It only AUTO-VERIFIES a confident pass; everything else — a bad
+    // photo, low-res ID, borderline PAD/match, an unreadable/expired doc, or even a
+    // sanctions match — is routed to human review (+ email fallback). So a person is
+    // never hard-blocked by a machine; compliance makes the final call on any flag via
+    // the admin dashboard (which is where a real rejection is issued).
     if (!x.hasFace || !x.hasDoc) return 'needs-review';
     if (!x.liveness || !x.document) return 'needs-review'; // no model backend → review
-    if (x.liveness.requiresReview || x.document.requiresReview) return 'needs-review';
-    if (x.screening.result !== 'clear') return 'needs-review'; // hit/review → adjudicate
+    if (!x.liveness.pass) return 'needs-review'; // weak/failed match or PAD → review, NOT reject
+    if (!x.document.authentic) return 'needs-review'; // unreadable / expired / tampered → review
+    if (x.screening.result !== 'clear') return 'needs-review'; // hit OR review → human confirms
 
-    // All green.
-    if (x.liveness.pass && x.document.authentic) return 'verified';
-    return 'needs-review';
+    // Confident pass: a live human matching a clean ID, clear of sanctions.
+    return 'verified';
   }
 
   private signDecision(evt: {
