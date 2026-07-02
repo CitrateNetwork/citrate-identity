@@ -92,9 +92,10 @@ def _crop_for_pad(img: np.ndarray, bbox) -> np.ndarray:
     crop = img[ny1:ny2, nx1:nx2]
     if crop.size == 0:
         crop = img
+    # Resize in RGB (PIL), then flip back to BGR: MiniFASNet-V2 wants BGR [0,1] NCHW.
     pil = Image.fromarray(crop[:, :, ::-1]).resize((PAD_INPUT, PAD_INPUT))
-    arr = np.asarray(pil).astype(np.float32) / 255.0
-    return np.transpose(arr, (2, 0, 1))[None, ...]  # NCHW
+    arr = np.asarray(pil).astype(np.float32)[:, :, ::-1] / 255.0  # RGB -> BGR
+    return np.transpose(np.ascontiguousarray(arr), (2, 0, 1))[None, ...]  # NCHW
 
 
 def _pad_live_prob(pad_session, img: np.ndarray, bbox) -> float:
@@ -127,15 +128,22 @@ def analyze_liveness(face_b64: str, id_portrait_b64: Optional[str] = None) -> di
 
     live = pad_score >= PAD_THRESHOLD
     matched = match_score is not None and match_score >= MATCH_THRESHOLD
-    passed = bool(live and matched)  # a pass REQUIRES both liveness and a 1:1 match
+    # PAD (anti-spoof) is ADVISORY by default. The lightweight, un-validated model
+    # false-positives on real selfies (lighting/phone camera), and for onboarding honest
+    # investors/partners a false spoof-reject is far worse than the residual risk — the
+    # strong identity signal is the 1:1 face match. Set KYC_PAD_ENFORCE=true to gate on
+    # liveness once the model is validated on a spoof set (S6). padScore is always returned
+    # so a human/admin can still see it and the engine can flag (not block) low scores.
+    pad_enforce = os.environ.get("KYC_PAD_ENFORCE", "false").strip().lower() in ("1", "true", "yes")
+    passed = bool(matched and (live or not pad_enforce))
 
     reason = None
-    if not live:
-        reason = "presentation-attack suspected"
-    elif match_score is None:
+    if match_score is None:
         reason = "no face found in the ID portrait to match against"
     elif not matched:
         reason = "selfie does not match the ID portrait"
+    elif pad_enforce and not live:
+        reason = "presentation-attack suspected"
 
     return {
         "pass": passed,
