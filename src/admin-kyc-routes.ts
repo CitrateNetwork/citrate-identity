@@ -76,6 +76,14 @@ async function deliverDecision(signed: { body: Buffer; headers: Record<string, s
 }
 
 export function mountAdminKycRoutes(provider: Provider): void {
+  // R-2: warn loudly at boot if dual-control can't function (subpoena unlock is disabled).
+  if (parseAdminSubs(process.env.KYC_ADMIN_SUBS).length < 2) {
+    // eslint-disable-next-line no-console
+    console.warn(
+      '[kyc] DUAL-CONTROL DEGRADED — fewer than 2 admins in KYC_ADMIN_SUBS. The subpoena/' +
+        'dispute unlock (two-person rule) is DISABLED until ≥2 distinct admins are provisioned.',
+    );
+  }
   provider.use(async (ctx, next) => {
     if (!ctx.path.startsWith('/admin/kyc')) return next();
     const p = getKycProvider();
@@ -153,6 +161,16 @@ export function mountAdminKycRoutes(provider: Provider): void {
           return sendJson(ctx.res, 200, { ok: true, decision, entitlementDelivered: granted });
         }
         return sendJson(ctx.res, 400, r);
+      }
+      if (ctx.path === '/admin/kyc/unlock/request' || ctx.path === '/admin/kyc/unlock/approve') {
+        // R-2: dual-control requires ≥2 DISTINCT admins provisioned, else approver≠requester
+        // can never be satisfied. Fail CLOSED rather than silently non-functional.
+        if (admins.length < 2) {
+          return sendJson(ctx.res, 409, {
+            error: 'dual_control_unavailable',
+            reason: 'Subpoena/dispute unlock requires ≥2 distinct admins in KYC_ADMIN_SUBS (two-person rule). Provision a second admin first.',
+          });
+        }
       }
       if (ctx.path === '/admin/kyc/unlock/request') {
         const caseId = str(body['caseId']);
