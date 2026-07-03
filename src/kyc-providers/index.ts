@@ -24,6 +24,7 @@ import { masterKeyFromEnv } from '../kyc-crypto.js';
 import { KycCaseStore } from '../kyc-cases-pg.js';
 import { startRetentionScheduler } from '../kyc-retention.js';
 import { KycAuditLog, setKycAuditLog } from '../kyc-audit-pg.js';
+import { initSanctionsFromEnv } from '../kyc-sanctions.js';
 
 export * from './types.js';
 export { KYC_LEVELS, type KycLevel, isKycLevel } from './level-hints.js';
@@ -128,6 +129,10 @@ export async function initKycProviderFromEnv(
     startRetentionScheduler(store);
     // Boot the immutable audit log (VERI-S4) that the admin routes write to.
     setKycAuditLog(await KycAuditLog.connect(databaseUrl));
+    // Boot the sanctions screener (VERI-S3-WP3): load the DB snapshot + daily CSL refresh.
+    // Fire-and-forget so a slow/failed feed fetch never blocks boot (screening degrades to
+    // the last snapshot, or empty on a first-ever boot until the fetch completes).
+    void initSanctionsFromEnv(databaseUrl);
     // Use `||` (not `??`): compose passes `${VAR:-}` as an EMPTY STRING, not
     // undefined, so `??` would keep the empty value → a relative redirect that
     // bounces back to /kyc/start. Trim + `||` falls through empties to the default.

@@ -30,7 +30,7 @@ import { getKycProvider } from './kyc-providers/index.js';
 import { InhouseKycProvider, type CaptureTokenClaims } from './kyc-providers/inhouse.js';
 import { renderCaptureUI } from './verify-ui.js';
 import { buildVerificationEngine } from './kyc-inference-client.js';
-import { loadSanctionsList } from './kyc-screening.js';
+import { getSanctionsScreener } from './kyc-sanctions.js';
 
 /** POST a signed engine decision to the local /kyc/webhook — the entitlement path. */
 async function deliverDecision(signed: { body: Buffer; headers: Record<string, string> }): Promise<void> {
@@ -197,7 +197,7 @@ export function mountVerifyRoutes(provider: Provider): void {
       if (process.env.KYC_INFERENCE_URL) {
         const engine = buildVerificationEngine({
           provider: ih,
-          screener: loadSanctionsList([], 'runtime'),
+          screener: getSanctionsScreener(), // live CSL snapshot (OFAC SDN + BIS + State), daily-refreshed
           webhookSecret: process.env.KYC_INHOUSE_WEBHOOK_SECRET ?? '',
           env: process.env,
         });
