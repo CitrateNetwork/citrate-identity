@@ -184,8 +184,8 @@ video,canvas,img.preview { width:100%; border-radius:var(--r-1); background:#000
   <p class="muted" id="fin-sub">Encrypting and submitting your proof — this only takes a moment.</p>
   <div class="bar"><i id="fin-bar"></i></div>
   <ul class="checks hidden" id="fin-checks">
-    <li id="chk-life"><span class="tick">✓</span> Proof of life confirmed</li>
-    <li id="chk-id"><span class="tick">✓</span> Identity &amp; citizenship verified</li>
+    <li id="chk-life"><span class="tick">✓</span> Face matched to your ID</li>
+    <li id="chk-id"><span class="tick">✓</span> Screening cleared</li>
   </ul>
   <p id="fin-actions" class="hidden" style="margin-top:1.1rem">
     <button id="fin-retry" class="secondary">Try again</button>
