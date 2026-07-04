@@ -16,6 +16,53 @@
  * claim — exactly the current behaviour.
  */
 
+/*
+ * ─────────────────────────────────────────────────────────────────────────────
+ * SECURITY DISPOSITION — column encryption for the `entitlements` table
+ * ENCRYPT-S1 / WP-10 (inventory A16). Status: ASSESSED-AND-ACCEPTED (2026-07-04).
+ * ADR: docs/ADR-2026-07-04-entitlements-plaintext-columns.md
+ * ─────────────────────────────────────────────────────────────────────────────
+ * WHAT IS STORED (see CREATE_TABLE_SQL below):
+ *   - identity lookup keys:  sub (opaque OIDC subject), email, wallet (public addr)
+ *   - authorization facts:   tier, org_id, citrate_role, milestone, expires_at
+ *
+ * WHY THESE COLUMNS ARE NOT ENCRYPTED (queryability):
+ *   Every column here is a query predicate or a filter, not opaque payload.
+ *   LOOKUP_SQL matches on `sub = $1`, `lower(wallet) = lower($2)`,
+ *   `lower(email) = lower($3)` (all index-backed), and `resolveEntitlementClaim`
+ *   branches on `tier` and `citrate_role`. Column-level encryption defeats the
+ *   equality indexes and the authorization filter — you cannot WHERE/ORDER on a
+ *   ciphertext. Making them queryable-while-sealed would require the blind-index +
+ *   client-decrypt scheme KYC uses, for effectively zero confidentiality gain (see
+ *   threat model). So encryption is declined on queryability grounds.
+ *
+ * WHY THIS IS LOW-SENSITIVITY (threat model — DB compromise):
+ *   The authorization facts (tier / org_id / citrate_role / milestone) are NOT PII
+ *   and NOT secrets/credentials — they are role/tier membership. This table is the
+ *   authority-side MIRROR of the `https://citrate.ai/entitlement` claim, which is
+ *   itself derivable from PUBLIC on-chain entitlement claims; a DB exfil therefore
+ *   reveals "principal X holds tier/role Y" — information already public on-chain.
+ *   `wallet` is a public chain-40204 address. `sub` is an opaque OIDC subject.
+ *   `email` is the account identifier that is necessarily stored plaintext across
+ *   the rest of the auth layer (OIDC accounts, sessions) and is case-insensitively
+ *   looked up here; sealing this one mirror copy yields no protection while breaking
+ *   the lookup. No key material and no KYC PII live in this table.
+ *
+ * CONTRAST — where encryption IS warranted:
+ *   Genuine KYC PII (legal name, DOB, ID/selfie images, document numbers) lives in
+ *   `kyc-cases-pg.ts`, sealed SERVER-BLIND via `kyc-crypto.ts` (AES-256-GCM DEK
+ *   envelope wrapped by KYC_MASTER_KEY + HMAC blind index). That bar is met there
+ *   because the data is sensitive AND not public. Entitlements are the inverse:
+ *   non-PII authorization data that is already public and must stay queryable.
+ *
+ * DECISION: accepted risk; no column encryption. Optional future hardening — a
+ * blind index over the email/wallet lookup keys — is noted in the ADR but is not
+ * warranted at current sensitivity. Re-open this disposition if a genuinely
+ * sensitive value (a secret, or PII beyond these identifiers) is ever added to a
+ * column here; then seal just that column with the kyc-crypto envelope.
+ * ─────────────────────────────────────────────────────────────────────────────
+ */
+
 import type { KycStatus } from './kyc.js';
 
 /** The claim body, matching the RP `Entitlement` shape Atlas consumes. */
