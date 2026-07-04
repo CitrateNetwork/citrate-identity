@@ -3,6 +3,7 @@ created: 2026-07-04
 branch: feat/encrypt-s1-wp10
 author: Fable 5 (Claude Code)
 status: accepted
+ratified: 2026-07-04 (owner sign-off)
 sprint: ENCRYPT-S1
 work-package: WP-10
 inventory-row: A16
