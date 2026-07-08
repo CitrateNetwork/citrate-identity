@@ -113,6 +113,17 @@ export const COMMS_WEB_ORIGIN =
   process.env.COMMS_WEB_ORIGIN ?? 'http://localhost:3004';
 
 /**
+ * The ALF member-portal web client's origin (citrate-alf-web, the American
+ * Learning Federation cooperative portal, deployed at `alf.citrate.ai` /
+ * `citrate-alf-web.vercel.app`). Mirrors {@link COMMS_WEB_ORIGIN}: it completes
+ * login by redirecting the browser to `${ALF_PORTAL_ORIGIN}/auth/callback`, so
+ * that path is what must be registered as a redirect_uri (and echoed for CORS).
+ * Defaults to local dev on :3004; production sets ALF_PORTAL_ORIGIN=https://alf.citrate.ai.
+ */
+export const ALF_PORTAL_ORIGIN =
+  process.env.ALF_PORTAL_ORIGIN ?? 'http://localhost:3004';
+
+/**
  * Web origin of the citrate-studio relying party, when it runs as a hosted web
  * surface (the native shell uses loopback PKCE and needs no CORS). Optional —
  * only added to the CORS allow-list when set. No dev default: studio is native
@@ -162,6 +173,7 @@ export const ALLOWED_CORS_ORIGINS: ReadonlySet<string> = new Set(
     FEDERATION_ORIGIN,
     BUYER_WEBAPP_ORIGIN,
     COMMS_WEB_ORIGIN,
+    ALF_PORTAL_ORIGIN,
   ].filter(
     (o): o is string => typeof o === 'string' && o.trim() !== '',
   ),
@@ -224,6 +236,11 @@ export const TRUSTED_FIRST_PARTY_CLIENT_IDS: ReadonlySet<string> = new Set([
   // (Authorization Code + PKCE). First-party, Citrate-owned end-to-end, so the
   // applicant is not shown a consent screen for our own flow.
   'american-learning-federation',
+  // alf-portal-web — the ALF member portal (citrate-alf-web, alf.citrate.ai):
+  // join/KYC, patronage dashboard, governance, transparency. PUBLIC web client
+  // (Authorization Code + PKCE). First-party, Citrate-owned end-to-end, so
+  // consent is auto-granted like the other web RPs.
+  'alf-portal-web',
 ]);
 
 /** True iff `clientId` is a Citrate-owned trusted first-party RP (TD-8). */
@@ -398,6 +415,9 @@ export interface ConfigEnv {
   /** Hosted citrate-comms web origin (comms.citrate.ai). Widens CORS + is the
    * comms-web RP redirect origin; validated for a local host like the others. */
   COMMS_WEB_ORIGIN?: string;
+  /** Hosted ALF member-portal origin (alf.citrate.ai). Widens CORS + is the
+   * alf-portal-web RP redirect origin; validated for a local host like the others. */
+  ALF_PORTAL_ORIGIN?: string;
   /**
    * Optional hosted citrate-studio web origin. Only used to widen the CORS
    * allow-list; never required (studio is native-first). Validated for a local
@@ -552,6 +572,11 @@ export function assertProductionConfig(env: ConfigEnv): { warnings: string[] } {
   if (isLocalUrl(env.COMMS_WEB_ORIGIN)) {
     problems.push(
       `COMMS_WEB_ORIGIN points at a local host: ${env.COMMS_WEB_ORIGIN}`,
+    );
+  }
+  if (isLocalUrl(env.ALF_PORTAL_ORIGIN)) {
+    problems.push(
+      `ALF_PORTAL_ORIGIN points at a local host: ${env.ALF_PORTAL_ORIGIN}`,
     );
   }
   // STUDIO_ORIGIN is optional (studio is native-first). Only validate it when
@@ -1031,6 +1056,37 @@ export async function buildConfiguration(
           'https://citrate.ai/',
           'https://citrate-landing.vercel.app',
           'https://citrate-landing.vercel.app/',
+        ],
+        scope: 'openid profile wallet kyc offline_access',
+      },
+      {
+        // alf-portal-web — the ALF member portal (citrate-alf-web), hosted at
+        // alf.citrate.ai (+ citrate-alf-web.vercel.app for previews). Hosted web
+        // RP, same posture as explorer/dashboard/comms-web: PUBLIC client (no
+        // secret), Authorization Code + PKCE (S256, enforced globally below),
+        // rotating refresh tokens via offline_access. Distinct from the
+        // `american-learning-federation` applicant flow on the landing site —
+        // this is the member portal app itself. Its `aud` is the client_id
+        // `alf-portal-web`, which the portal BFF re-verifies on every request.
+        client_id: 'alf-portal-web',
+        token_endpoint_auth_method: 'none',
+        application_type: 'web',
+        grant_types: ['authorization_code', 'refresh_token'],
+        response_types: ['code'],
+        redirect_uris: [
+          // Configured (local/dev) portal origin.
+          `${ALF_PORTAL_ORIGIN}${CALLBACK_PATH}`,
+          // Hosted production portal + the Vercel preview alias.
+          `https://alf.citrate.ai${CALLBACK_PATH}`,
+          `https://citrate-alf-web.vercel.app${CALLBACK_PATH}`,
+          // Loopback for native/CLI flows (RFC 8252).
+          LOOPBACK_REDIRECT,
+        ],
+        post_logout_redirect_uris: [
+          ALF_PORTAL_ORIGIN,
+          `${ALF_PORTAL_ORIGIN}/`,
+          'https://alf.citrate.ai',
+          'https://alf.citrate.ai/',
         ],
         scope: 'openid profile wallet kyc offline_access',
       },
