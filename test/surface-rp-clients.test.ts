@@ -16,6 +16,7 @@ type ClientShape = {
   application_type?: string;
   redirect_uris?: string[];
   token_endpoint_auth_method?: string;
+  scope?: string;
 };
 
 async function clients(): Promise<ClientShape[]> {
@@ -42,6 +43,21 @@ describe('wallet-surface RP clients', () => {
       (x) => x.client_id === 'citrate-wallet-extension',
     );
     expect(c).toBeUndefined();
+  });
+
+  it('registers citrate-core as a native loopback PKCE client (CORE-S1.1)', async () => {
+    const c = (await clients()).find((x) => x.client_id === 'citrate-core');
+    expect(c).toBeDefined();
+    expect(c?.application_type).toBe('native');
+    expect(c?.token_endpoint_auth_method).toBe('none'); // public client; PKCE carries PoP
+    // RFC 8252 loopback redirects — panva matches any ephemeral port on these
+    // hosts for a 'native' client, which is how the desktop app binds at runtime.
+    expect(c?.redirect_uris?.some((u) => u.startsWith('http://127.0.0.1'))).toBe(true);
+    expect(c?.redirect_uris?.some((u) => u.startsWith('http://localhost'))).toBe(true);
+    // Loopback ONLY — no custom-scheme (citrate-core://) redirect is registered.
+    expect(c?.redirect_uris?.every((u) => u.startsWith('http://'))).toBe(true);
+    // offline_access → rotating refresh tokens, same as the other first-party RPs.
+    expect(c?.scope).toBe('openid profile wallet kyc offline_access');
   });
 
   it('registers citrate-buyer-webapp as a public web PKCE client with an /auth/callback redirect (AUTHSPINE S3-WP1)', async () => {

@@ -209,6 +209,10 @@ describe('trusted first-party client set (TD-8)', () => {
     expect(isTrustedFirstPartyClient('citrate-dashboard')).toBe(true);
   });
 
+  it('isTrustedFirstPartyClient is true for the citrate-core desktop client (CORE-S1.1)', () => {
+    expect(isTrustedFirstPartyClient('citrate-core')).toBe(true);
+  });
+
   it('isTrustedFirstPartyClient is false for an unknown / third-party client', () => {
     expect(isTrustedFirstPartyClient('some-third-party-app')).toBe(false);
     expect(isTrustedFirstPartyClient('')).toBe(false);

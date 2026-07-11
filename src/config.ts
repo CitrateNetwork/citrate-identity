@@ -241,6 +241,11 @@ export const TRUSTED_FIRST_PARTY_CLIENT_IDS: ReadonlySet<string> = new Set([
   // (Authorization Code + PKCE). First-party, Citrate-owned end-to-end, so
   // consent is auto-granted like the other web RPs.
   'alf-portal-web',
+  // citrate-core — the member desktop app (Tauri; CORE-S1.1). PUBLIC native
+  // client using the loopback PKCE flow (RFC 8252), same posture as
+  // citrate-studio. First-party, Citrate-owned end-to-end, so consent is
+  // auto-granted like the web RPs.
+  'citrate-core',
 ]);
 
 /** True iff `clientId` is a Citrate-owned trusted first-party RP (TD-8). */
@@ -1099,6 +1104,31 @@ export async function buildConfiguration(
         // citrate-studio). PUBLIC client (no secret), PKCE S256 enforced
         // globally below, rotating refresh tokens via offline_access.
         client_id: 'citrate-studio',
+        token_endpoint_auth_method: 'none',
+        application_type: 'native',
+        grant_types: ['authorization_code', 'refresh_token'],
+        response_types: ['code'],
+        redirect_uris: [
+          // RFC 8252 loopback — panva matches any ephemeral port for these
+          // 127.0.0.1 / localhost hosts when application_type is 'native'.
+          `http://127.0.0.1${CALLBACK_PATH}`,
+          `http://localhost${CALLBACK_PATH}`,
+          // The fixed-port loopback (shared with the web RPs) as a fallback.
+          LOOPBACK_REDIRECT,
+        ],
+        scope: 'openid profile wallet kyc offline_access',
+      },
+      {
+        // citrate-core — the member desktop app (Tauri; citrate-core CORE-S1.1).
+        // Same RFC 8252 native posture as citrate-studio: PUBLIC client (no
+        // secret), application_type 'native' so panva matches the 127.0.0.1 /
+        // localhost loopback redirects on whatever ephemeral port the app binds
+        // at runtime, PKCE S256 enforced globally below, rotating refresh
+        // tokens via offline_access. Loopback ONLY — no custom-scheme redirect
+        // is registered (no existing native client uses one; the app's
+        // `citrate-core://` deep-link scheme is a shell concern, not an OAuth
+        // redirect).
+        client_id: 'citrate-core',
         token_endpoint_auth_method: 'none',
         application_type: 'native',
         grant_types: ['authorization_code', 'refresh_token'],
