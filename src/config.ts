@@ -132,6 +132,16 @@ export const RADAR_ORIGIN =
   process.env.RADAR_ORIGIN ?? 'http://localhost:3005';
 
 /**
+ * core-membership relying party origin (Phase-D handoff B.1) — the
+ * membership money-path service (Next.js/Vercel). It completes login by
+ * redirecting to `${CORE_MEMBERSHIP_ORIGIN}/auth/callback` (the path the
+ * service's own auth config uses). Defaults to local dev on :3000;
+ * production sets CORE_MEMBERSHIP_ORIGIN to the deployed Vercel origin.
+ */
+export const CORE_MEMBERSHIP_ORIGIN =
+  process.env.CORE_MEMBERSHIP_ORIGIN ?? 'http://localhost:3000';
+
+/**
  * Web origin of the citrate-studio relying party, when it runs as a hosted web
  * surface (the native shell uses loopback PKCE and needs no CORS). Optional —
  * only added to the CORS allow-list when set. No dev default: studio is native
@@ -882,6 +892,32 @@ export async function buildConfiguration(
           LOOPBACK_REDIRECT,
         ],
         scope: 'openid profile wallet offline_access',
+      },
+      {
+        // core-membership — Phase-D membership money-path service (handoff
+        // PHASE_D_DGX_OPERATOR_HANDOFF_2026-07-14 B.1). Same posture as the
+        // explorer/radar: PUBLIC client (no secret), Authorization Code +
+        // PKCE (S256, enforced globally below), rotating refresh tokens.
+        //
+        // Registered to match the SERVICE's own auth config (core-membership
+        // src/lib/auth/config.ts): redirectPath `/auth/callback` and scope
+        // `openid profile wallet kyc offline_access`. NOTE: the handoff prose
+        // asked for `/api/auth/callback` + scope `...kyc entitlement...`, but
+        // (a) the service code uses `/auth/callback`, and (b) the authority
+        // exposes no `entitlement` scope — entitlement ships as an always-on
+        // claim (`https://citrate.ai/entitlement`), so the code's scope is the
+        // correct, working one. Registered against the code, not the prose.
+        client_id: 'core-membership',
+        token_endpoint_auth_method: 'none',
+        application_type: 'web',
+        grant_types: ['authorization_code', 'refresh_token'],
+        response_types: ['code'],
+        redirect_uris: [
+          `${CORE_MEMBERSHIP_ORIGIN}${CALLBACK_PATH}`,
+          `https://core-membership.vercel.app${CALLBACK_PATH}`,
+          LOOPBACK_REDIRECT,
+        ],
+        scope: 'openid profile wallet kyc offline_access',
       },
       {
         // citrate-dashboard — second first-party relying party (IDP-S5b). Same

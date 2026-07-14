@@ -70,4 +70,20 @@ describe('wallet-surface RP clients', () => {
       c?.redirect_uris?.includes('https://citrate-buyer-webapp.vercel.app/auth/callback'),
     ).toBe(true);
   });
+
+  it('registers core-membership as a public web PKCE client matching the service auth config (Phase-D B.1)', async () => {
+    const c = (await clients()).find((x) => x.client_id === 'core-membership');
+    expect(c).toBeDefined();
+    expect(c?.application_type).toBe('web');
+    expect(c?.token_endpoint_auth_method).toBe('none'); // public client; PKCE carries PoP
+    // The service (core-membership src/lib/auth/config.ts) uses redirectPath
+    // `/auth/callback` and scope `openid profile wallet kyc offline_access` —
+    // register against the code, not the handoff prose (`/api/auth/callback`
+    // + a non-existent `entitlement` scope).
+    expect(c?.redirect_uris?.some((u) => u.endsWith('/auth/callback'))).toBe(true);
+    expect(
+      c?.redirect_uris?.includes('https://core-membership.vercel.app/auth/callback'),
+    ).toBe(true);
+    expect(c?.scope).toBe('openid profile wallet kyc offline_access');
+  });
 });
