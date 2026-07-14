@@ -24,6 +24,7 @@ import { createPublicClient, http, type Address, type Hex } from 'viem';
 
 import { type AaConfig } from './config.js';
 import { buildPermit } from './permit.js';
+import { registerWalletIfNeeded, WalletNotDeployedError } from './register-wallet.js';
 import { predictWalletAddress } from './predict.js';
 import { accountIdToAaUserId } from './wallet-claims.js';
 
@@ -156,6 +157,76 @@ export function mountAaRoutes(provider: Provider, options: AaRouteOptions): void
       } catch (err) {
         respondJson(ctx, 500, {
           error: 'permit_sign_failed',
+          reason: (err as Error).message,
+        });
+      }
+      return;
+    }
+
+    // POST /aa/register-wallet ─────────────────────────────────
+    // RADAR handoff T-2: after the factory deploy lands, register
+    // the wallet with CitratePaymaster so sponsorship stops
+    // reverting NotARegisteredCitrateWallet. Auth + userId gate are
+    // identical to /aa/enroll-validator; the wallet address is
+    // DERIVED from the authenticated userId (never taken from the
+    // body), so a caller can only ever register their own wallet.
+    if (ctx.method === 'POST' && ctx.path === '/aa/register-wallet') {
+      const account = await resolveAccount(provider, ctx);
+      if (!account) {
+        respondJson(ctx, 401, { error: 'unauthorized', reason: 'access token required' });
+        return;
+      }
+      const body = await readJsonBody(ctx);
+      const userId = body ? (stringField(body, 'userId') as Hex | null) : null;
+      if (!userId || !userId.startsWith('0x') || userId.length !== 66) {
+        respondJson(ctx, 400, {
+          error: 'invalid_request',
+          reason: 'userId must be a 0x-prefixed 32-byte hex string',
+        });
+        return;
+      }
+      if (account !== userId) {
+        respondJson(ctx, 403, {
+          error: 'forbidden',
+          reason: 'userId in body must match the authenticated subject',
+        });
+        return;
+      }
+      if (!config.paymaster || !config.registrarKey) {
+        respondJson(ctx, 503, {
+          error: 'registrar_unconfigured',
+          reason: 'authority has no paymaster registrar configured',
+        });
+        return;
+      }
+      const wallet = predictWalletAddress(config.factory, config.kernelImpl, userId);
+      try {
+        const result = await registerWalletIfNeeded(
+          {
+            rpcUrl,
+            chainId: config.chainId,
+            paymaster: config.paymaster,
+            registrarKey: config.registrarKey,
+          },
+          wallet,
+        );
+        respondJson(ctx, 200, {
+          userId,
+          wallet,
+          paymaster: config.paymaster,
+          status: result.status,
+          ...(result.status === 'registered' ? { txHash: result.txHash } : {}),
+        });
+      } catch (err) {
+        if (err instanceof WalletNotDeployedError) {
+          respondJson(ctx, 409, {
+            error: 'wallet_not_deployed',
+            reason: err.message,
+          });
+          return;
+        }
+        respondJson(ctx, 502, {
+          error: 'register_failed',
           reason: (err as Error).message,
         });
       }
