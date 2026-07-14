@@ -124,6 +124,14 @@ export const ALF_PORTAL_ORIGIN =
   process.env.ALF_PORTAL_ORIGIN ?? 'http://localhost:3004';
 
 /**
+ * citrate-radar relying party origin (RADAR handoff T-1) — the founder
+ * reference dApp. Defaults to local dev on :3005; production sets
+ * RADAR_ORIGIN to the deployed origin.
+ */
+export const RADAR_ORIGIN =
+  process.env.RADAR_ORIGIN ?? 'http://localhost:3005';
+
+/**
  * Web origin of the citrate-studio relying party, when it runs as a hosted web
  * surface (the native shell uses loopback PKCE and needs no CORS). Optional —
  * only added to the CORS allow-list when set. No dev default: studio is native
@@ -855,6 +863,25 @@ export async function buildConfiguration(
         // with the `refresh_token` grant + rotateRefreshToken below that gives
         // rotating refresh tokens (a security must-have).
         scope: 'openid profile wallet kyc offline_access',
+      },
+      {
+        // citrate-radar — founder reference dApp (RADAR handoff T-1,
+        // handoffs/RADAR_IDENTITY_HANDOFF_2026-07-14.md). Same posture as
+        // the explorer: PUBLIC client (no secret), Authorization Code +
+        // PKCE (S256, enforced globally below), rotating refresh tokens.
+        // Radar uses the token against /aa/enroll-validator and
+        // /aa/register-wallet for the gasless passport mint.
+        client_id: 'citrate-radar',
+        token_endpoint_auth_method: 'none',
+        application_type: 'web',
+        grant_types: ['authorization_code', 'refresh_token'],
+        response_types: ['code'],
+        redirect_uris: [
+          `${RADAR_ORIGIN}${CALLBACK_PATH}`,
+          `https://citrate-radar.vercel.app${CALLBACK_PATH}`,
+          LOOPBACK_REDIRECT,
+        ],
+        scope: 'openid profile wallet offline_access',
       },
       {
         // citrate-dashboard — second first-party relying party (IDP-S5b). Same

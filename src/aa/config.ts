@@ -31,6 +31,15 @@ export interface AaConfigEnv extends ConfigEnv {
    * sanity check at boot — if both are present they must agree.
    */
   CITRATE_AA_IDENTITY_SIGNER_ADDR?: string;
+  /**
+   * OPTIONAL: CitratePaymaster address + registrar private key for
+   * POST /aa/register-wallet (RADAR handoff T-2). When either is
+   * absent the route answers 503 registrar_unconfigured — the rest
+   * of the AA surface is unaffected, so existing deploys keep
+   * booting. Key custody posture: same as the identity-signer key.
+   */
+  CITRATE_AA_PAYMASTER?: string;
+  CITRATE_AA_REGISTRAR_KEY?: string;
 }
 
 /**
@@ -42,6 +51,9 @@ export interface AaConfig {
   chainId: bigint;
   identitySignerKey: Hex;
   identitySignerAddr?: Address;
+  /** Present only when both paymaster env vars are set and well-formed. */
+  paymaster?: Address;
+  registrarKey?: Hex;
 }
 
 /**
@@ -92,12 +104,27 @@ export function loadAaConfig(env: AaConfigEnv): AaConfig {
     // reject inside this if the key is malformed.
   }
 
+  // Optional register-wallet surface: validate only when present.
+  const paymaster = (env.CITRATE_AA_PAYMASTER ?? '').trim();
+  const registrarKey = (env.CITRATE_AA_REGISTRAR_KEY ?? '').trim();
+  const registrarOk = isAddress(paymaster) && isPrivateKey(registrarKey);
+  if ((paymaster || registrarKey) && !registrarOk) {
+    // Misconfigured half-pair: fail closed in prod, warn in dev.
+    const msg = 'CITRATE_AA_PAYMASTER and CITRATE_AA_REGISTRAR_KEY must both be set and well-formed to enable /aa/register-wallet';
+    if (isProd) throw new Error(msg);
+    // eslint-disable-next-line no-console
+    console.warn(`[aa-config] ${msg} — route will answer 503`);
+  }
+
   return {
     factory: factory as Address,
     kernelImpl: kernelImpl as Address,
     chainId,
     identitySignerKey: signerKey as Hex,
     identitySignerAddr: signerAddr ? (signerAddr as Address) : undefined,
+    ...(registrarOk
+      ? { paymaster: paymaster as Address, registrarKey: registrarKey as Hex }
+      : {}),
   };
 }
 
