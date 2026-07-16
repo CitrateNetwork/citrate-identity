@@ -30,17 +30,24 @@ utf8("citrate/treasury-grant-signer/v1"))`, regenerable via
 `CitrateMemberSBT`. On a reroll the reroll runbook re-derives it, re-funds it, and
 redeploys the contracts owned by it — see the reroll master checklist.
 
-## HTTP contract
+## HTTP contract (membership team's Phase-D appendix)
+One endpoint does BOTH `onlyOwner` legs of a membership grant, idempotent by
+`orderId` and by on-chain state; the service hashes the raw `sub` itself and
+clamps `amountWei` to the policy grant. It never fabricates a hash — a skipped
+leg returns `null`.
 ```
-GET  /health                      -> { status, signer, day, spentToday, dailyCap, vault, sbt }
-POST /v1/sign   (Authorization: Bearer <TREASURY_SIGNER_TOKEN>)
-  body: { method, args, idempotencyKey? }
-    method "grant":  args { member, amountWei }                     -> vault.grant(member,amountWei){value:amountWei}
-    method "mint":   args { member, subHash, termStart, termEnd }   -> sbt.mintMember(...)
-    method "release"|"renew"|"lapse": args { grantId }              -> vault.<method>(grantId)
-  -> { txHash, blockNumber, status }
-  idempotencyKey: a key that already succeeded returns the prior receipt (no double-grant).
+GET  /health   -> { status, signer, day, spentToday, dailyCap, grantWei, vault, sbt }
+POST /grant   (Authorization: Bearer <TREASURY_SIGNER_TOKEN>)
+  body: { orderId, sub, member, amountWei, termStart, termEnd, chainId, contracts:{vault,sbt} }
+    leg 1  vault.grant(member, amount){value:amount}   — skipped if attributedShares(member) > 0
+    leg 2  sbt.mintMember(member, keccak256(sub), termStart, termEnd) — skipped if isSubBound(subHash)
+  200 -> { orderId, vaultTxHash|null, sbtTxHash|null, sbtTokenId|null, status:"granted"|"already_granted" }
+  401 bad/absent bearer · 403 daily cap · 409 orderId in-flight · 422 validation/allowlist
+  502 broadcast/revert · (503 reserved for not-ready)
 ```
+Idempotency is layered: a completed `orderId` replays its stored result; an
+in-flight `orderId` gets 409; and even a fresh `orderId` is a no-op per-leg if
+the member is already attributed / the sub already bound (`already_granted`).
 
 ## Env
 | var | meaning |
