@@ -136,7 +136,10 @@ export const RADAR_ORIGIN =
  * membership money-path service (Next.js/Vercel). It completes login by
  * redirecting to `${CORE_MEMBERSHIP_ORIGIN}/auth/callback` (the path the
  * service's own auth config uses). Defaults to local dev on :3000;
- * production sets CORE_MEMBERSHIP_ORIGIN to the deployed Vercel origin.
+ * production sets CORE_MEMBERSHIP_ORIGIN to the CANONICAL origin
+ * `https://membership.citrate.ai` (the DNS CNAME fronting
+ * core-membership.vercel.app). This resolved value is both a redirect_uri
+ * (below) and a CORS-allowed origin (ALLOWED_CORS_ORIGINS).
  */
 export const CORE_MEMBERSHIP_ORIGIN =
   process.env.CORE_MEMBERSHIP_ORIGIN ?? 'http://localhost:3000';
@@ -192,6 +195,11 @@ export const ALLOWED_CORS_ORIGINS: ReadonlySet<string> = new Set(
     BUYER_WEBAPP_ORIGIN,
     COMMS_WEB_ORIGIN,
     ALF_PORTAL_ORIGIN,
+    // core-membership money-path RP: the env-resolved origin plus the canonical
+    // domain literal, so browser calls to /me, /userinfo, /token, /sessions/events
+    // from membership.citrate.ai are echoed for CORS regardless of env wiring.
+    CORE_MEMBERSHIP_ORIGIN,
+    'https://membership.citrate.ai',
   ].filter(
     (o): o is string => typeof o === 'string' && o.trim() !== '',
   ),
@@ -914,6 +922,11 @@ export async function buildConfiguration(
         response_types: ['code'],
         redirect_uris: [
           `${CORE_MEMBERSHIP_ORIGIN}${CALLBACK_PATH}`,
+          // Canonical production domain (DNS CNAME → core-membership.vercel.app).
+          // Hardcoded so login works regardless of how CORE_MEMBERSHIP_ORIGIN is
+          // set on a given authority instance.
+          `https://membership.citrate.ai${CALLBACK_PATH}`,
+          // Direct Vercel origin kept as a fallback (previews / pre-DNS).
           `https://core-membership.vercel.app${CALLBACK_PATH}`,
           LOOPBACK_REDIRECT,
         ],
