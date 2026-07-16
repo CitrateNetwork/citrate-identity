@@ -37,6 +37,8 @@ services:
       # CORS for the prod domain is off (the vercel.app redirect still works as it
       # is hardcoded in the client's redirect_uris).
       COMMS_WEB_ORIGIN: ${COMMS_WEB_ORIGIN:-}
+      # core-membership money-path RP canonical origin (membership.citrate.ai).
+      CORE_MEMBERSHIP_ORIGIN: ${CORE_MEMBERSHIP_ORIGIN:-}
       STUDIO_ORIGIN: ${STUDIO_ORIGIN:-}
       WALLETCONNECT_PROJECT_ID: ${WALLETCONNECT_PROJECT_ID:-}
       KYC_WEBHOOK_SECRET: ${KYC_WEBHOOK_SECRET}
@@ -50,6 +52,9 @@ services:
       # 503 when unset). Both must be passed through here — there is no env_file.
       FEDERATION_ORIGIN: ${FEDERATION_ORIGIN:-}
       ALF_ENROLL_SECRET: ${ALF_ENROLL_SECRET:-}
+      # Entitlements admin API shared secret (POST /admin/entitlements; fail-closed 503 when unset).
+      # Must match core-membership's Vercel value so the grant's entitlement raise authenticates.
+      ENTITLEMENTS_ADMIN_SECRET: ${ENTITLEMENTS_ADMIN_SECRET:-}
       # VERI in-house KYC provider. KYC_PROVIDER=inhouse turns on the server-blind
       # capture flow (/verify) + engine; requires KYC_MASTER_KEY + the two secrets
       # or assertProductionConfig fail-closes on boot. KYC_INFERENCE_URL points at
