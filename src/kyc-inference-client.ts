@@ -174,6 +174,9 @@ export function buildVerificationEngine(args: {
   env?: NodeJS.ProcessEnv;
 }): VerificationEngine {
   const { liveness, document } = inferenceAnalyzersFromEnv(args.env);
+  const env = args.env ?? process.env;
+  // ADR-AV-2 tier-3 auto-reject — default OFF (fail-closed) until AV-S8 shadow mode.
+  const autoRejectEnabled = ['1', 'true', 'yes'].includes((env.KYC_AUTO_REJECT_ENABLE ?? '').trim().toLowerCase());
   return new VerificationEngine({
     store: args.provider.caseStore,
     getDek: (id) => args.provider.getCaseDek(id),
@@ -181,5 +184,6 @@ export function buildVerificationEngine(args: {
     webhookSecret: args.webhookSecret,
     liveness,
     document,
+    autoRejectEnabled,
   });
 }

@@ -5,6 +5,8 @@ import { SanctionsScreener, loadSanctionsList, nameSimilarity, type SanctionsEnt
 const LIST: SanctionsEntry[] = [
   { name: 'Vladimir Ivanov', aliases: ['V. Ivanov'], type: 'individual', programs: ['UKRAINE-EO13662'], source: 'OFAC-SDN' },
   { name: 'Acme Weapons Trading LLC', type: 'entity', programs: ['NPWMD'], source: 'CSL-EL' },
+  // AV-S5: carries a secondary identifier (DOB) for disambiguation.
+  { name: 'Boris Petrov', dob: '1975-03-12', type: 'individual', programs: ['UKRAINE-EO13662'], source: 'OFAC-SDN' },
 ];
 
 describe('nameSimilarity (Dice bigrams)', () => {
@@ -50,5 +52,35 @@ describe('SanctionsScreener (VERI-S3)', () => {
     const r = screener.screen({ name: 'ACME Weapons Trading LLC' });
     expect(r.result).toBe('hit');
     expect(r.hits[0].entry.type).toBe('entity');
+  });
+});
+
+describe('secondary-identifier disambiguation (AV-S5)', () => {
+  const screener = loadSanctionsList(LIST, '2026-07-01');
+
+  it('DOB conflict suppresses a false hit: same name, different DOB → REVIEW, not HIT', () => {
+    // A different Boris Petrov (born 1990, not 1975) must not be auto-treated as the SDN person.
+    const r = screener.screen({ name: 'Boris Petrov', dob: '1990-08-20', nationality: 'Bulgaria' });
+    expect(r.result).toBe('review');
+    expect(r.corroboration).toBe('dob-conflict');
+    expect(r.reviewReason).toMatch(/date of birth|dob/i);
+  });
+
+  it('DOB match corroborates a hit: same name AND same DOB → HIT, dob-match', () => {
+    const r = screener.screen({ name: 'Boris Petrov', dob: '1975-03-12', nationality: 'Russia' });
+    expect(r.result).toBe('hit');
+    expect(r.corroboration).toBe('dob-match');
+  });
+
+  it('name-only hit (no comparable DOB supplied) stays HIT but is marked name-only, not auto-rejectable', () => {
+    const r = screener.screen({ name: 'Boris Petrov', nationality: 'Russia' }); // no DOB provided
+    expect(r.result).toBe('hit');
+    expect(r.corroboration).toBe('name-only');
+  });
+
+  it('DOB does not affect a clean identity', () => {
+    const r = screener.screen({ name: 'Ada Lovelace', dob: '1815-12-10' });
+    expect(r.result).toBe('clear');
+    expect(r.corroboration).toBeUndefined();
   });
 });

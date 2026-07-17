@@ -71,6 +71,12 @@ export interface VerificationEngineDeps {
   webhookSecret: string;
   liveness?: LivenessAnalyzer;
   document?: DocumentAnalyzer;
+  /**
+   * ADR-AV-2 tier-3 auto-reject gate. Default OFF: the engine keeps its lenient posture
+   * (never auto-rejects; a would-be reject falls to needs-review) until AV-S8 shadow mode
+   * validates the auto-reject decisions. Wired from `KYC_AUTO_REJECT_ENABLE`.
+   */
+  autoRejectEnabled?: boolean;
 }
 
 const DECISION_TO_KIND: Record<EngineDecision, 'verified' | 'rejected' | 'pending'> = {
@@ -167,12 +173,26 @@ export class VerificationEngine {
     hasFace: boolean;
     hasDoc: boolean;
   }): EngineDecision {
-    // LENIENT posture (onboarding honest investors/partners): the engine NEVER
-    // auto-rejects. It only AUTO-VERIFIES a confident pass; everything else — a bad
-    // photo, low-res ID, borderline PAD/match, an unreadable/expired doc, or even a
-    // sanctions match — is routed to human review (+ email fallback). So a person is
-    // never hard-blocked by a machine; compliance makes the final call on any flag via
-    // the admin dashboard (which is where a real rejection is issued).
+    // ADR-AV-2 three-tier matrix. Fail-closed default: anything not provably tier-1
+    // (auto-verify) or tier-3 (auto-reject) falls to tier-2 (needs-review).
+
+    // --- Tier 3: auto-reject (bounded, high-confidence, corroborated) ---
+    // Only a sanctions HIT corroborated by a matching secondary identifier (DOB) is
+    // eligible (ADR-AV-2 / AV-S5) — a name-only or DOB-conflicting match is NOT, so a
+    // common name is never auto-rejected. Gated behind autoRejectEnabled (default off)
+    // until AV-S8 shadow mode validates it; when off, this falls through to the tier-1
+    // gates below, where a non-clear screening routes to needs-review (the lenient
+    // default). The enforced-PAD-spoof auto-reject path lands with AV-S3, once a distinct
+    // spoof signal exists and KYC_PAD_ENFORCE is on.
+    if (
+      this.deps.autoRejectEnabled &&
+      x.screening.result === 'hit' &&
+      x.screening.corroboration === 'dob-match'
+    ) {
+      return 'rejected';
+    }
+
+    // --- Tier 1: auto-verify (strict; fail-closed on any gap) ---
     if (!x.hasFace || !x.hasDoc) return 'needs-review';
     if (!x.liveness || !x.document) return 'needs-review'; // no model backend → review
     if (!x.liveness.pass) return 'needs-review'; // weak/failed match or PAD → review, NOT reject
@@ -181,6 +201,8 @@ export class VerificationEngine {
 
     // Confident pass: a live human matching a clean ID, clear of sanctions.
     return 'verified';
+
+    // --- Tier 2: needs-review is every non-tier-1/3 return above (fail-closed default) ---
   }
 
   private signDecision(evt: {
