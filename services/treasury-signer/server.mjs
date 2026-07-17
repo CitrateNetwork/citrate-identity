@@ -32,6 +32,7 @@ import {
   encodeFunctionData, getAddress, isAddress, keccak256, toHex, toEventSelector, hexToBigInt,
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
+import { timingSafeEqual, createHash } from "node:crypto";
 
 const need = (k) => { const v = process.env[k]; if (!v || !v.trim()) throw new Error(`${k} is required`); return v.trim(); };
 
@@ -40,6 +41,23 @@ const CHAIN_ID = Number(process.env.CITRATE_CHAIN_ID ?? "40204");
 const VAULT = getAddress(need("MEMBERSHIP_STAKE_VAULT_ADDRESS"));
 const SBT = getAddress(need("CITRATE_MEMBER_SBT_ADDRESS"));
 const TOKEN = need("TREASURY_SIGNER_TOKEN");
+// Zero-downtime rotation: during a rotation, set TREASURY_SIGNER_TOKEN to the NEW
+// value and TREASURY_SIGNER_TOKEN_PREV to the OLD one; BOTH authorize until every
+// caller (core-membership on Vercel) has redeployed with the new token, then clear
+// _PREV. Optional — unset means only the current token is accepted.
+const TOKEN_PREV = (process.env.TREASURY_SIGNER_TOKEN_PREV ?? "").trim();
+// Pre-hash the accepted `Bearer <token>` header values to a FIXED 32-byte digest.
+// The compare is then constant-time (timingSafeEqual on equal-length buffers, which
+// also avoids the length-mismatch throw that a raw compare would leak) and does not
+// reveal token length or WHICH token matched (all candidates are always checked).
+const sha256 = (s) => createHash("sha256").update(String(s), "utf8").digest();
+const ACCEPTED = [TOKEN, TOKEN_PREV].filter((t) => t.length > 0).map((t) => sha256(`Bearer ${t}`));
+function authorized(header) {
+  const got = sha256(String(header ?? ""));
+  let ok = false;
+  for (const exp of ACCEPTED) { if (timingSafeEqual(got, exp)) ok = true; } // no early break — constant work
+  return ok;
+}
 const GRANT_WEI = BigInt(process.env.TREASURY_GRANT_WEI ?? String(32_000n * 10n ** 18n)); // policy grant / clamp ceiling
 const DAILY_CAP = BigInt(process.env.TREASURY_DAILY_CAP_WEI ?? String(96_000n * 10n ** 18n));
 const PORT = Number(process.env.PORT ?? "8790");
@@ -141,7 +159,7 @@ const server = createServer(async (req, res) => {
       return json(res, 200, { status: "ok", signer: account.address, day: state.day, spentToday: state.spentToday, dailyCap: String(DAILY_CAP), grantWei: String(GRANT_WEI), vault: VAULT, sbt: SBT });
     }
     if (req.method === "POST" && req.url === "/grant") {
-      if ((req.headers["authorization"] || "") !== `Bearer ${TOKEN}`) return json(res, 401, { error: "unauthorized" });
+      if (!authorized(req.headers["authorization"])) return json(res, 401, { error: "unauthorized" });
       let body; try { body = JSON.parse((await readBody(req)) || "{}"); } catch { return json(res, 422, { error: "invalid json" }); }
       const result = await handleGrant(body);
       return json(res, 200, result);

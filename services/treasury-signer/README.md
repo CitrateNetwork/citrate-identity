@@ -53,7 +53,8 @@ the member is already attributed / the sub already bound (`already_granted`).
 | var | meaning |
 |---|---|
 | `TREASURY_SIGNER_KEY` | the deterministic treasury/grant signer private key (owns vault+SBT) |
-| `TREASURY_SIGNER_TOKEN` | bearer token core-membership authenticates with |
+| `TREASURY_SIGNER_TOKEN` | bearer token core-membership authenticates with (constant-time checked) |
+| `TREASURY_SIGNER_TOKEN_PREV` | OPTIONAL — during a rotation, the OLD token; both it and `TREASURY_SIGNER_TOKEN` authorize until every caller has redeployed with the new token, then unset it. Removes the brief 401 window. |
 | `CITRATE_RPC_URL` | `https://rpc.citrate.ai` |
 | `CITRATE_CHAIN_ID` | `40204` |
 | `MEMBERSHIP_STAKE_VAULT_ADDRESS` / `CITRATE_MEMBER_SBT_ADDRESS` | pinned contracts |
