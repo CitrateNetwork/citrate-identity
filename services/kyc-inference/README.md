@@ -26,7 +26,10 @@ accuracy* — which is exactly the validation you offered to run.
 - `inference.py` — the real pipeline: insightface (SCRFD detect + ArcFace embed →
   cosine 1:1 match), Silent-Face MiniFASNet PAD, passporteye MRZ read + a portrait +
   tamper check. The Node side re-validates the MRZ check digits locally.
-- `download_models.sh` — fetch + pin the models.
+- `download_models.sh` — fetch + **SHA256-pin** every model (fail-closed: a missing pin
+  or hash mismatch aborts). Writes `MODELS.lock`.
+- `verify_models.sh` — **boot-time integrity gate** (AV-S1): re-checks every model
+  against `MODELS.lock` before uvicorn serves; a mismatch/missing file refuses startup.
 - `Dockerfile` / `requirements.txt` — containerized, tesseract for OCR.
 - `validate.py` — the **accuracy + adversarial validation harness** (APCER/BPCER,
   FMR/FNMR). This is the S6 gate.
@@ -35,12 +38,14 @@ accuracy* — which is exactly the validation you offered to run.
 ```bash
 # 1. Build
 docker build -t veri-kyc-inference services/kyc-inference
-# 2. Fetch models into a /models volume (pin the anti-spoof URL + hash)
+# 2. Fetch models into a /models volume. ALL hashes are REQUIRED (fail-closed) — the
+#    script refuses to run without a pinned SHA for buffalo_l AND the anti-spoof model.
 docker run --rm -v veri-models:/models \
+  -e KYC_BUFFALO_L_SHA256="<sha256 of buffalo_l.zip>" \
   -e KYC_ANTISPOOF_URL="<your chosen anti-spoof .onnx>" \
   -e KYC_ANTISPOOF_SHA256="<sha256>" \
   veri-kyc-inference bash download_models.sh
-# 3. Run
+# 3. Run — the container verifies MODELS.lock at boot before serving (fail-closed).
 docker run -d -p 8000:8000 -v veri-models:/models \
   -e KYC_INFERENCE_TOKEN="<same token you set on the identity service>" \
   veri-kyc-inference
@@ -51,6 +56,18 @@ docker run -d -p 8000:8000 -v veri-models:/models \
 `curl -s localhost:8000/health` → `{"ok":true}` once models are loaded. Until
 `KYC_INFERENCE_URL` is set on the identity service, the engine **fails closed to
 needs-review** — nothing auto-verifies.
+
+### Pinning `buffalo_l` (do this once, from a trusted fetch)
+`buffalo_l` was previously auto-downloaded by insightface with **no integrity check**.
+It is now fetched + verified like every other artifact. To obtain the hash to pin:
+```bash
+curl -fsSL https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_l.zip \
+  -o /tmp/buffalo_l.zip
+sha256sum /tmp/buffalo_l.zip   # → set KYC_BUFFALO_L_SHA256 to this value, in your secrets
+```
+Record the value in the deploy runbook (`../../.agentile/deploys/`) alongside the
+anti-spoof URL+hash so the build is reproducible and the boot gate has something to
+enforce. If you mirror the zip, set `KYC_BUFFALO_L_URL` to your mirror.
 
 ## Validation you run (the S6 / go-live gate)
 ```bash
