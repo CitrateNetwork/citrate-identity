@@ -152,4 +152,20 @@ describe('buildVerificationEngine — THE WIRING (provider → engine → infere
     const res = (await engine.runCase(caseId))!;
     expect(res.decision).toBe('needs-review');
   });
+
+  it('KYC_AUTO_REJECT_ENABLE wires through: corroborated sanctions hit → rejected only when the env flag is on', async () => {
+    const { l1, l2 } = validTD3L2('301231');
+    status = 200; liveness = { pass: true, confidence: 0.98 }; document = { mrz: [l1, l2], portraitPresent: true, tamperScore: 0.05, ocrConfidence: 0.95 };
+    // Seeded identity is Jane Smith / 1990-01-01 (see provider()); match it on the list.
+    const sdn = loadSanctionsList([{ name: 'Jane Smith', dob: '1990-01-01', type: 'individual', programs: ['TEST'], source: 'OFAC-SDN' }], 'v1');
+
+    const off = await provider();
+    const rOff = (await buildVerificationEngine({ provider: off.p, screener: sdn, webhookSecret: 'wh', env: { KYC_INFERENCE_URL: baseUrl } as NodeJS.ProcessEnv }).runCase(off.caseId))!;
+    expect(rOff.screening.corroboration).toBe('dob-match');
+    expect(rOff.decision).toBe('needs-review'); // flag unset → never auto-rejects
+
+    const on = await provider();
+    const rOn = (await buildVerificationEngine({ provider: on.p, screener: sdn, webhookSecret: 'wh', env: { KYC_INFERENCE_URL: baseUrl, KYC_AUTO_REJECT_ENABLE: 'true' } as NodeJS.ProcessEnv }).runCase(on.caseId))!;
+    expect(rOn.decision).toBe('rejected'); // flag on → the corroborated hit is auto-rejected
+  });
 });

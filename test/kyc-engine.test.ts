@@ -20,7 +20,8 @@ import { InhouseKycProvider } from '../src/kyc-providers/inhouse.js';
  */
 const WEBHOOK_SECRET = 'wh-secret';
 const SANCTIONS: SanctionsEntry[] = [
-  { name: 'Vladimir Ivanov', type: 'individual', programs: ['UKRAINE'], source: 'OFAC-SDN' },
+  { name: 'Vladimir Ivanov', type: 'individual', programs: ['UKRAINE'], source: 'OFAC-SDN' }, // no DOB → name-only
+  { name: 'Sergei Volkov', dob: '1975-03-12', type: 'individual', programs: ['UKRAINE'], source: 'OFAC-SDN' }, // DOB → corroboratable
 ];
 const passLiveness: LivenessAnalyzer = { async analyze() { return { pass: true, confidence: 0.99 }; } };
 const failLiveness: LivenessAnalyzer = { async analyze() { return { pass: false, confidence: 0.95, reason: 'presentation attack' }; } };
@@ -38,16 +39,16 @@ describe('VerificationEngine (VERI-S3)', () => {
   });
 
   /** Seed a captured case (identity + document + liveness), return { caseId, dek }. */
-  async function capturedCase(name: string, nationality = 'United Kingdom') {
+  async function capturedCase(name: string, nationality = 'United Kingdom', dob = '1990-01-01') {
     const dek = newDek();
     const c = await store.createCase('sub-' + name.replace(/\s/g, ''), wrapDek(dek, master));
-    await store.setIdentityCiphertext(c.caseId, sealField(JSON.stringify({ name, dob: '1990-01-01', nationality }), dek));
+    await store.setIdentityCiphertext(c.caseId, sealField(JSON.stringify({ name, dob, nationality }), dek));
     await store.addEvidence({ caseId: c.caseId, kind: 'document', tier: 3, ciphertext: sealBytes(Buffer.from('ID-IMAGE'), dek) });
     await store.addEvidence({ caseId: c.caseId, kind: 'liveness', tier: 2, ciphertext: sealBytes(Buffer.from('FACE-IMAGE'), dek), destroyAfter: Date.now() + 864e5 });
     return { caseId: c.caseId };
   }
 
-  function engine(opts: { liveness?: LivenessAnalyzer; document?: DocumentAnalyzer }) {
+  function engine(opts: { liveness?: LivenessAnalyzer; document?: DocumentAnalyzer; autoRejectEnabled?: boolean }) {
     return new VerificationEngine({
       store,
       getDek: async (id: string) => { const c = await store.getCase(id); return c ? unwrapDek(c.wrappedDek, master) : null; },
@@ -55,6 +56,7 @@ describe('VerificationEngine (VERI-S3)', () => {
       webhookSecret: WEBHOOK_SECRET,
       liveness: opts.liveness,
       document: opts.document,
+      autoRejectEnabled: opts.autoRejectEnabled,
     });
   }
 
@@ -111,5 +113,44 @@ describe('VerificationEngine (VERI-S3)', () => {
 
   it('returns null for an unknown case', async () => {
     expect(await engine({ liveness: passLiveness, document: okDoc }).runCase('case_nope')).toBeNull();
+  });
+
+  // --- AV-S6: three-tier decision matrix (ADR-AV-2) — auto-reject is bounded + gated ---
+  describe('tier-3 auto-reject (ADR-AV-2, gated behind shadow-mode flag)', () => {
+    it('DOB-corroborated sanctions hit + auto-reject ENABLED → rejected', async () => {
+      const { caseId } = await capturedCase('Sergei Volkov', 'Russia', '1975-03-12'); // matches SDN DOB
+      const res = (await engine({ liveness: passLiveness, document: okDoc, autoRejectEnabled: true }).runCase(caseId))!;
+      expect(res.screening.result).toBe('hit');
+      expect(res.screening.corroboration).toBe('dob-match');
+      expect(res.decision).toBe('rejected');
+      expect(res.biometricsDestroyed).toBe(1); // still destroyed
+    });
+
+    it('DOB-corroborated hit but auto-reject DISABLED (default) → needs-review (fail-closed default)', async () => {
+      const { caseId } = await capturedCase('Sergei Volkov', 'Russia', '1975-03-12');
+      const res = (await engine({ liveness: passLiveness, document: okDoc }).runCase(caseId))!; // flag off
+      expect(res.screening.corroboration).toBe('dob-match');
+      expect(res.decision).toBe('needs-review'); // never auto-rejects unless explicitly enabled
+    });
+
+    it('name-only sanctions hit + auto-reject ENABLED → needs-review, NOT rejected (corroboration required)', async () => {
+      const { caseId } = await capturedCase('Vladimir Ivanov', 'Russia'); // SDN entry has no DOB → name-only
+      const res = (await engine({ liveness: passLiveness, document: okDoc, autoRejectEnabled: true }).runCase(caseId))!;
+      expect(res.screening.corroboration).toBe('name-only');
+      expect(res.decision).toBe('needs-review'); // a common name is not auto-rejected
+    });
+
+    it('DOB-conflicting name match + auto-reject ENABLED → needs-review (suppressed hit is not a reject)', async () => {
+      const { caseId } = await capturedCase('Sergei Volkov', 'Russia', '1990-08-20'); // conflicts with SDN 1975
+      const res = (await engine({ liveness: passLiveness, document: okDoc, autoRejectEnabled: true }).runCase(caseId))!;
+      expect(res.screening.result).toBe('review'); // AV-S5 suppressed the false hit
+      expect(res.decision).toBe('needs-review');
+    });
+
+    it('auto-reject never fires on a clean verified path even when ENABLED', async () => {
+      const { caseId } = await capturedCase('Ada Lovelace');
+      const res = (await engine({ liveness: passLiveness, document: okDoc, autoRejectEnabled: true }).runCase(caseId))!;
+      expect(res.decision).toBe('verified');
+    });
   });
 });
