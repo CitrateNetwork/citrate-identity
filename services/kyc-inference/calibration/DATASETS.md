@@ -38,11 +38,29 @@ commercial pipeline), **free/open first + scope paid to harden**, **in-house cap
 **The two hard rules from the research:**
 1. **Only IDNet (CC0) and MIDV-Holo (CC BY-SA 2.5) are commercial-usable.** Everything else
    free is research-only — fine for calibrating (R&D), but the model shipped to production
-   must not be trained/tuned on a research-only set without counsel's blessing.
-2. **SiW-Mv2 carries IARPA/ODIN provenance → ITAR/EAR review with counsel before import.**
+   must not be trained/tuned on a research-only set without a commercial license.
+2. **SiW-Mv2 carries IARPA/ODIN provenance → export-control (ITAR/EAR).**
+
+**Acquisition posture (2026-07-17 — ADR-AV-5, owner executive decision):** research-license
+calibration and SiW-Mv2 use are **blessed to proceed** for internal R&D. **Guardrail on
+SiW-Mv2:** keep it **US-person-access-only, no re-export** (export exposure is foreign-person
+access / re-export, not domestic US-person research use). If any non-US-person will access
+it, stop and get an export-control read first; else default to the non-IARPA sets
+(CelebA-Spoof, OULU-NPU, DF40).
 
 **License-UNRESOLVED (do not use until re-verified):** SIDTD, DeepFakeFace, Deepfake-Eval-2024.
 **Open procurement items:** iBeta/ISO 30107-3 pricing; a commercial genuine-passport corpus.
+
+### Acquisition helpers (2026-07-17)
+- `download_doc_datasets.sh` — fetch + SHA-pin the commercial-safe doc sets (IDNet CC0 +
+  MIDV-Holo CC BY-SA 2.5), fail-closed, writes `DOC_DATASETS.lock`. **Start here** — no
+  license/PII blocker; feeds AV-S4 document authenticity.
+- `VENDOR_OUTREACH_iBeta.md` — draft email to resolve iBeta/ISO 30107-3 pricing + whether
+  they license attack corpora (owner sends).
+- `CALIBRATION_CONSENT_DRAFT.md` — draft retention-consent + intake protocol for the
+  in-house capture (counsel finalizes — packet ask #7). Unblocks the FMR ≤ 1e-4 gap.
+- Research-only PAD sets (SiW-Mv2, CelebA-Spoof, DF40) need their own EULA/DRA + counsel's
+  research-license blessing (ask #8) before download — no auto-fetch script for those.
 
 ## Required sets
 
