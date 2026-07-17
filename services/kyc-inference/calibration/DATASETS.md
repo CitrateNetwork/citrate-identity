@@ -44,6 +44,17 @@ commercial pipeline), **free/open first + scope paid to harden**, **in-house cap
 **License-UNRESOLVED (do not use until re-verified):** SIDTD, DeepFakeFace, Deepfake-Eval-2024.
 **Open procurement items:** iBeta/ISO 30107-3 pricing; a commercial genuine-passport corpus.
 
+### Acquisition helpers (2026-07-17)
+- `download_doc_datasets.sh` — fetch + SHA-pin the commercial-safe doc sets (IDNet CC0 +
+  MIDV-Holo CC BY-SA 2.5), fail-closed, writes `DOC_DATASETS.lock`. **Start here** — no
+  license/PII blocker; feeds AV-S4 document authenticity.
+- `VENDOR_OUTREACH_iBeta.md` — draft email to resolve iBeta/ISO 30107-3 pricing + whether
+  they license attack corpora (owner sends).
+- `CALIBRATION_CONSENT_DRAFT.md` — draft retention-consent + intake protocol for the
+  in-house capture (counsel finalizes — packet ask #7). Unblocks the FMR ≤ 1e-4 gap.
+- Research-only PAD sets (SiW-Mv2, CelebA-Spoof, DF40) need their own EULA/DRA + counsel's
+  research-license blessing (ask #8) before download — no auto-fetch script for those.
+
 ## Required sets
 
 | Set | Purpose | Metric it feeds | Minimum size (pilot) | Notes |
