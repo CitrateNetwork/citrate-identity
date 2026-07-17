@@ -19,14 +19,22 @@
  * Wired into `server.ts` next to `mountKycRoutes`.
  */
 
+import { timingSafeEqual } from 'node:crypto';
+
 import type Provider from 'oidc-provider';
-import { createPublicClient, http, type Address, type Hex } from 'viem';
+import { createPublicClient, getAddress, http, type Address, type Hex } from 'viem';
+import { privateKeyToAccount } from 'viem/accounts';
 
 import { type AaConfig } from './config.js';
 import { buildPermit } from './permit.js';
 import { registerWalletIfNeeded, WalletNotDeployedError } from './register-wallet.js';
 import { predictWalletAddress } from './predict.js';
 import { accountIdToAaUserId } from './wallet-claims.js';
+import {
+  buildSponsorship,
+  computeSponsorWindow,
+  SponsorCategory,
+} from './sponsor.js';
 
 type Ctx = Parameters<Parameters<Provider['use']>[0]>[0];
 type Next = Parameters<Parameters<Provider['use']>[0]>[1];
@@ -43,6 +51,20 @@ interface AaRouteOptions {
  */
 export function mountAaRoutes(provider: Provider, options: AaRouteOptions): void {
   const { config, rpcUrl } = options;
+
+  // WS-6 boot sanity check: if the sponsor is configured with an expected
+  // public address, verify the derived key maps to it. Fail loud at boot
+  // rather than mint signatures from the wrong signer. The raw key is never
+  // logged — only the derived + expected public addresses are compared.
+  if (config.sponsor?.signerAddr) {
+    const derived = privateKeyToAccount(config.sponsor.signerKey).address;
+    if (derived.toLowerCase() !== config.sponsor.signerAddr.toLowerCase()) {
+      throw new Error(
+        `[aa-sponsor] CITRATE_AA_SPONSOR_SIGNER_KEY derives ${derived} but ` +
+          `CITRATE_AA_SPONSOR_SIGNER_ADDR is ${config.sponsor.signerAddr}`,
+      );
+    }
+  }
 
   // The chain client is shared across requests; cheap to construct.
   const chainClient = createPublicClient({
@@ -233,6 +255,102 @@ export function mountAaRoutes(provider: Provider, options: AaRouteOptions): void
       return;
     }
 
+    // POST /aa/sponsor ─────────────────────────────────────────
+    // WS-6 (Wave-2 Track G): sign a CitratePaymaster sponsorship digest so a
+    // member's UserOp can be gas-sponsored. AUTH: a shared SERVICE TOKEN — the
+    // caller is a trusted machine (core-membership), NOT an end user. The
+    // caller supplies `sender` (the member smart-wallet address) in the body;
+    // we treat the token as fully authorizing sponsorship of that account. The
+    // trust boundary: anyone holding CITRATE_AA_SPONSOR_SERVICE_TOKEN can mint
+    // a sponsorship signature for any sender, bounded by the paymaster's own
+    // per-account caps (firstOpCap / hasUsedFirstOp / daily caps) and the SHORT
+    // signed window this route enforces (<= 15 min). Keep the token
+    // machine-to-machine only; never expose it to browsers.
+    if (ctx.method === 'POST' && ctx.path === '/aa/sponsor') {
+      const sponsor = config.sponsor;
+      if (!sponsor) {
+        respondJson(ctx, 503, {
+          error: 'sponsor_unconfigured',
+          reason: 'authority has no paymaster sponsor signer configured',
+        });
+        return;
+      }
+      if (!serviceTokenOk(ctx, sponsor.serviceToken)) {
+        respondJson(ctx, 401, {
+          error: 'unauthorized',
+          reason: 'valid service token required',
+        });
+        return;
+      }
+      const body = await readJsonBody(ctx);
+      const rawSender = body ? stringField(body, 'sender') : null;
+      if (!rawSender || !/^0x[a-fA-F0-9]{40}$/.test(rawSender)) {
+        respondJson(ctx, 400, {
+          error: 'invalid_request',
+          reason: 'sender must be a 20-byte 0x-prefixed address',
+        });
+        return;
+      }
+      // Normalize to a checksummed address (case-insensitive → same 20 bytes,
+      // so the digest is unchanged); tolerates lowercase input from callers.
+      const sender: Address = getAddress(rawSender);
+      // Category: default to first-op (the deploy + first sponsored action).
+      let category = SponsorCategory.FirstOp as number;
+      if (body && body.category !== undefined) {
+        const c = numberField(body, 'category');
+        if (c === null || (c !== 0 && c !== 1 && c !== 2)) {
+          respondJson(ctx, 400, {
+            error: 'invalid_request',
+            reason: 'category must be 0 (standard), 1 (recovery), or 2 (first-op)',
+          });
+          return;
+        }
+        category = c;
+      }
+      // TTL: default from config, clamped to [60, 900] inside computeSponsorWindow.
+      let ttlSeconds = sponsor.defaultTtlSeconds;
+      if (body && body.ttlSeconds !== undefined) {
+        const t = numberField(body, 'ttlSeconds');
+        if (t === null) {
+          respondJson(ctx, 400, {
+            error: 'invalid_request',
+            reason: 'ttlSeconds must be a positive number',
+          });
+          return;
+        }
+        ttlSeconds = t;
+      }
+      try {
+        const nowSeconds = BigInt(Math.floor(Date.now() / 1000));
+        const window = computeSponsorWindow(nowSeconds, ttlSeconds);
+        const s = await buildSponsorship({
+          chainId: config.chainId,
+          paymaster: sponsor.paymaster,
+          account: sender,
+          category,
+          validUntil: window.validUntil,
+          validAfter: window.validAfter,
+          sponsorSignerHex: sponsor.signerKey,
+        });
+        respondJson(ctx, 200, {
+          paymaster: sponsor.paymaster,
+          account: sender,
+          chainId: config.chainId.toString(),
+          category: s.category,
+          validUntil: s.validUntil.toString(),
+          validAfter: s.validAfter.toString(),
+          signature: s.signature,
+          digest: s.digest,
+        });
+      } catch (err) {
+        respondJson(ctx, 500, {
+          error: 'sponsor_sign_failed',
+          reason: (err as Error).message,
+        });
+      }
+      return;
+    }
+
     // GET /aa/validators ──────────────────────────────────────
     if (ctx.method === 'GET' && ctx.path === '/aa/validators') {
       const userId = parseUserIdQuery(ctx);
@@ -322,6 +440,37 @@ function numberField(body: Record<string, unknown>, key: string): number | null 
     if (Number.isFinite(n) && n >= 0) return n;
   }
   return null;
+}
+
+/**
+ * Constant-time service-token check for POST /aa/sponsor. Reads the token
+ * from `Authorization: Bearer <token>` or the `X-Citrate-Service-Token`
+ * header and compares it against the configured secret without leaking
+ * length or content via timing. Mirrors the alf/admin route posture.
+ */
+function serviceTokenOk(ctx: Ctx, expected: string): boolean {
+  if (!expected) return false;
+  const presented = presentedServiceToken(ctx);
+  if (presented === undefined) return false;
+  const a = Buffer.from(presented, 'utf8');
+  const b = Buffer.from(expected, 'utf8');
+  if (a.length !== b.length) {
+    // Equal-length compare against self so timing does not reveal length.
+    timingSafeEqual(b, b);
+    return false;
+  }
+  return timingSafeEqual(a, b);
+}
+
+function presentedServiceToken(ctx: Ctx): string | undefined {
+  const auth = ctx.headers.authorization;
+  if (typeof auth === 'string') {
+    const m = /^Bearer\s+(.+)$/i.exec(auth.trim());
+    if (m) return m[1].trim();
+  }
+  const h = ctx.headers['x-citrate-service-token'];
+  if (typeof h === 'string' && h.length > 0) return h.trim();
+  return undefined;
 }
 
 function respondJson(ctx: Ctx, status: number, body: unknown): void {

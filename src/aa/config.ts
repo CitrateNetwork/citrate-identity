@@ -40,6 +40,25 @@ export interface AaConfigEnv extends ConfigEnv {
    */
   CITRATE_AA_PAYMASTER?: string;
   CITRATE_AA_REGISTRAR_KEY?: string;
+  /**
+   * WS-6 (gasless membership): the CitratePaymaster `sponsorSigner` private
+   * key (0x 32-byte hex). The authority signs paymaster sponsorship digests
+   * with it on behalf of authenticated machine callers. Custody posture is
+   * identical to the identity-signer key: droplet `.env`, never logged,
+   * rotate per ADR. The public address is 0x03067c…b2a4 (bind via the
+   * optional _ADDR sanity check below).
+   */
+  CITRATE_AA_SPONSOR_SIGNER_KEY?: string;
+  /** OPTIONAL: public address the sponsor key must map to (boot sanity check). */
+  CITRATE_AA_SPONSOR_SIGNER_ADDR?: string;
+  /**
+   * WS-6: the shared service token the machine caller (core-membership)
+   * presents on POST /aa/sponsor. Constant-time compared. Unset → the
+   * sponsor route answers 503 sponsor_unconfigured.
+   */
+  CITRATE_AA_SPONSOR_SERVICE_TOKEN?: string;
+  /** OPTIONAL: default sponsorship-window TTL (seconds); clamped to [60, 900]. */
+  CITRATE_AA_SPONSOR_TTL_SECONDS?: string;
 }
 
 /**
@@ -54,6 +73,25 @@ export interface AaConfig {
   /** Present only when both paymaster env vars are set and well-formed. */
   paymaster?: Address;
   registrarKey?: Hex;
+  /**
+   * WS-6 gasless sponsorship. Present only when the paymaster address, the
+   * sponsor-signer key, AND the service token are all set and well-formed;
+   * otherwise POST /aa/sponsor answers 503. Never enabled by a half-pair.
+   */
+  sponsor?: SponsorConfig;
+}
+
+export interface SponsorConfig {
+  /** CitratePaymaster address the digest is domain-separated against. */
+  paymaster: Address;
+  /** sponsorSigner private key (0x 32-byte hex). NEVER log. */
+  signerKey: Hex;
+  /** Optional public address the signer key must map to. */
+  signerAddr?: Address;
+  /** Shared service token presented by the machine caller. */
+  serviceToken: string;
+  /** Default window TTL in seconds, already clamped to [60, 900]. */
+  defaultTtlSeconds: number;
 }
 
 /**
@@ -116,6 +154,39 @@ export function loadAaConfig(env: AaConfigEnv): AaConfig {
     console.warn(`[aa-config] ${msg} — route will answer 503`);
   }
 
+  // WS-6 sponsor surface: enabled only when the paymaster address, the
+  // sponsor-signer key, AND the service token are all present + well-formed.
+  const sponsorSignerKey = (env.CITRATE_AA_SPONSOR_SIGNER_KEY ?? '').trim();
+  const sponsorSignerAddr = (env.CITRATE_AA_SPONSOR_SIGNER_ADDR ?? '').trim();
+  const sponsorServiceToken = (env.CITRATE_AA_SPONSOR_SERVICE_TOKEN ?? '').trim();
+  const sponsorAny =
+    sponsorSignerKey.length > 0 ||
+    sponsorSignerAddr.length > 0 ||
+    sponsorServiceToken.length > 0;
+  const sponsorOk =
+    isAddress(paymaster) &&
+    isPrivateKey(sponsorSignerKey) &&
+    sponsorServiceToken.length >= 16 &&
+    (sponsorSignerAddr === '' || isAddress(sponsorSignerAddr));
+  if (sponsorAny && !sponsorOk) {
+    const msg =
+      'CITRATE_AA_PAYMASTER + CITRATE_AA_SPONSOR_SIGNER_KEY + ' +
+      'CITRATE_AA_SPONSOR_SERVICE_TOKEN (>=16 chars) must all be set and ' +
+      'well-formed to enable POST /aa/sponsor';
+    if (isProd) throw new Error(msg);
+    // eslint-disable-next-line no-console
+    console.warn(`[aa-config] ${msg} — route will answer 503`);
+  }
+
+  let sponsorTtl = 900;
+  const ttlRaw = (env.CITRATE_AA_SPONSOR_TTL_SECONDS ?? '').trim();
+  if (ttlRaw.length > 0) {
+    const n = Number(ttlRaw);
+    if (Number.isFinite(n) && n > 0) {
+      sponsorTtl = Math.min(900, Math.max(60, Math.floor(n)));
+    }
+  }
+
   return {
     factory: factory as Address,
     kernelImpl: kernelImpl as Address,
@@ -124,6 +195,17 @@ export function loadAaConfig(env: AaConfigEnv): AaConfig {
     identitySignerAddr: signerAddr ? (signerAddr as Address) : undefined,
     ...(registrarOk
       ? { paymaster: paymaster as Address, registrarKey: registrarKey as Hex }
+      : {}),
+    ...(sponsorOk
+      ? {
+          sponsor: {
+            paymaster: paymaster as Address,
+            signerKey: sponsorSignerKey as Hex,
+            signerAddr: sponsorSignerAddr ? (sponsorSignerAddr as Address) : undefined,
+            serviceToken: sponsorServiceToken,
+            defaultTtlSeconds: sponsorTtl,
+          },
+        }
       : {}),
   };
 }
