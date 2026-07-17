@@ -2,7 +2,7 @@
 created: 2026-07-17T03:20:00Z
 branch: sprint/kyc-autoverify-data-acquisition-2026-07-17
 author: Larry Klosowski (@SaulBuilds) + Claude Opus 4.8
-status: DRAFT — NOT legal advice; outside counsel must finalize before any capture
+status: DRAFT — owner-blessed to finalize (ADR-AV-5); counsel reads finished form before first live capture
 planset: 2026-07-16-kyc-autoverify (AV-S2); counsel packet ask #7
 ---
 

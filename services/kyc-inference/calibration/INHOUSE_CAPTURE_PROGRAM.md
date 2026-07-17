@@ -76,8 +76,16 @@ earn the **document-authenticity** signal.
 - Not a spoof set: presentation-attack (print/replay/mask/deepfake) data comes from the
   external catalog (AV-S3), not from this program.
 
-## Gate
+## Gate (updated 2026-07-17 — ADR-AV-5)
 
-No capture begins until: (1) counsel clears the retention consent basis; (2) the written
-calibration release is drafted; (3) the participant intake + deletion workflow exists.
-Until then this is a design, tracked under AV-S2, not an active collection.
+The owner made an **executive decision (ADR-AV-5)** to proceed on the retention-consent
+basis (packet ask #7) so we produce finished work for counsel to review, rather than
+iterate. So the program advances to **finalize the consent form + intake protocol and
+prepare** now.
+
+**One checkpoint remains, by design:** the **first live capture** collects real people's
+biometrics, which is irreversible and carries BIPA private-right-of-action exposure. The
+*finished* consent form should get a counsel read **before that first session** — "review
+finished work" here must mean *before we collect*, not after. Preparing everything else
+proceeds now; the AI will checkpoint with the owner before initiating live capture rather
+than starting it silently. Tracked under AV-S2.
