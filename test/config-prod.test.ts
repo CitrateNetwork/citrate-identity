@@ -198,6 +198,35 @@ describe('assertProductionConfig — non-production warns but allows (TD-1)', ()
   });
 });
 
+describe('KYC key custody gate (AV-S7 / HAR-244 — opt-in, default off)', () => {
+  /** Safe prod baseline + a fully-configured in-house KYC provider. */
+  function safeProdInhouse(): ConfigEnv {
+    return {
+      ...safeProdEnv(),
+      KYC_PROVIDER: 'inhouse',
+      KYC_MASTER_KEY: 'x'.repeat(44), // any non-empty value; length is checked at crypto load, not here
+      KYC_SESSION_SECRET: 's'.repeat(32),
+      KYC_INHOUSE_WEBHOOK_SECRET: 'w'.repeat(32),
+    };
+  }
+
+  it('default (KYC_REQUIRE_KMS unset) → no custody problem; the live env-key path is unchanged', () => {
+    const { warnings } = assertProductionConfig(safeProdInhouse());
+    expect(warnings).toEqual([]); // no throw, no custody complaint
+  });
+
+  it('KYC_REQUIRE_KMS=true but source is env → REFUSES the plaintext env key in prod (throws)', () => {
+    const env = { ...safeProdInhouse(), KYC_REQUIRE_KMS: 'true' }; // KYC_MASTER_KEY_SOURCE unset → env
+    expect(() => assertProductionConfig(env)).toThrow(/plaintext env master key|HAR-244/);
+  });
+
+  it('KYC_REQUIRE_KMS=true AND source=kms → gate satisfied (no custody problem)', () => {
+    const env = { ...safeProdInhouse(), KYC_REQUIRE_KMS: 'true', KYC_MASTER_KEY_SOURCE: 'kms' };
+    const { warnings } = assertProductionConfig(env);
+    expect(warnings).toEqual([]);
+  });
+});
+
 describe('trusted first-party client set (TD-8)', () => {
   it('contains exactly the two first-party RPs', () => {
     expect(TRUSTED_FIRST_PARTY_CLIENT_IDS.has('citrate-explorer')).toBe(true);

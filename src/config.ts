@@ -472,6 +472,10 @@ export interface ConfigEnv {
   KYC_MASTER_KEY?: string;
   KYC_SESSION_SECRET?: string;
   KYC_INHOUSE_WEBHOOK_SECRET?: string;
+  /** Master-key custody (AV-S7/ADR-AV-4): 'env' (default) or 'kms'. */
+  KYC_MASTER_KEY_SOURCE?: string;
+  /** Opt-in prod gate (default off): refuse the plaintext env master key in prod. */
+  KYC_REQUIRE_KMS?: string;
   /** Self-hosted ONNX inference service (PAD/face-match/OCR). Unset → engine fails closed. */
   KYC_INFERENCE_URL?: string;
   /**
@@ -666,6 +670,18 @@ export function assertProductionConfig(env: ConfigEnv): { warnings: string[] } {
     // dev host. Unset is allowed: the engine then fails closed to needs-review.
     if (env.KYC_INFERENCE_URL && isLocalUrl(env.KYC_INFERENCE_URL)) {
       problems.push(`KYC_INFERENCE_URL points at a local host: ${env.KYC_INFERENCE_URL}`);
+    }
+    // Key custody (AV-S7 / HAR-244 / ADR-AV-4). OPT-IN prod gate: once KMS is wired,
+    // set KYC_REQUIRE_KMS=true to REFUSE the plaintext env master key in prod. Default
+    // (unset) preserves today's env-key behavior — the live decrypt path is unchanged
+    // until the KMS backend (AV-S7 WP-2) is deployed and this flag is turned on.
+    const requireKms = ['1', 'true', 'yes'].includes((env.KYC_REQUIRE_KMS ?? '').trim().toLowerCase());
+    if (requireKms && (env.KYC_MASTER_KEY_SOURCE ?? 'env').trim().toLowerCase() !== 'kms') {
+      problems.push(
+        'KYC_REQUIRE_KMS is set but KYC_MASTER_KEY_SOURCE is not "kms" — refusing the ' +
+          'plaintext env master key in production (HAR-244/ADR-AV-4). Wire the KMS backend ' +
+          'and set KYC_MASTER_KEY_SOURCE=kms, or unset KYC_REQUIRE_KMS.',
+      );
     }
   }
 
