@@ -13,6 +13,36 @@ planset: 2026-07-16-kyc-autoverify
 > licensing, and export-control (ITAR/EAR) considerations. This file is the checklist
 > for whoever assembles them. Until they exist, AV-S2 cannot run and auto-verify cannot
 > ship.
+>
+> **Sourcing status (2026-07-17):** a cited catalog of real candidate datasets is in
+> `DATASET_RESEARCH_2026-07-17.md`; the selfie↔ID gap is addressed by
+> `INHOUSE_CAPTURE_PROGRAM.md`. The acquire-first plan below is the actionable summary.
+
+## Acquire-first plan (verified 2026-07-17 — re-confirm licenses at download)
+
+Owner posture: **research licenses OK for calibration R&D** (must NOT ship in a
+commercial pipeline), **free/open first + scope paid to harden**, **in-house capture on**.
+
+| # | Category → metric | Acquire first (free/open) | Commercial-friendly option | Gap / paid hardening |
+|---|---|---|---|---|
+| 1 | Bona-fide selfies → BPCER | CelebA-Spoof, SiW-Mv2 (live subsets) | — (real biometric) | in-house capture adds real-channel coverage |
+| 2 | Genuine selfie↔ID pairs → FNMR | **none public** | — | **in-house capture** (primary) or paid KYC-vendor corpus |
+| 3 | Impostor selfie↔ID pairs → FMR ≤1e-4 | **none public** | — | **in-house cross-pairing** (~150–350 people → 10⁴–10⁵ pairs) or paid corpus |
+| 4 | Print attacks → APCER | SiW-Mv2, CelebA-Spoof, OULU-NPU | — | iBeta ISO 30107-3 test service (paid; pricing TBD) |
+| 5 | Replay attacks → APCER | SiW-Mv2, CelebA-Spoof, OULU-NPU | — | iBeta (paid) |
+| 6 | Mask/3D → APCER | **SiW-Mv2** (14 spoof types incl. masks) | — | iBeta (paid) |
+| 7 | Deepfake/injection → APCER | **DF40** (40 techniques, 2026-relevant) | — | DeepFakeFace / Deepfake-Eval-2024 *(licenses UNRESOLVED — re-verify)* |
+| 8 | Genuine ID docs → genuine-pass | MIDV-Holo | **MIDV-Holo (CC BY-SA 2.5)** | genuine passport/DL corpus is an OPEN gap (in-house or paid) |
+| 9 | Forged/tampered docs → forged-accept | **IDNet**, SIDTD *(license unresolved)* | **IDNet (CC0)** | — |
+
+**The two hard rules from the research:**
+1. **Only IDNet (CC0) and MIDV-Holo (CC BY-SA 2.5) are commercial-usable.** Everything else
+   free is research-only — fine for calibrating (R&D), but the model shipped to production
+   must not be trained/tuned on a research-only set without counsel's blessing.
+2. **SiW-Mv2 carries IARPA/ODIN provenance → ITAR/EAR review with counsel before import.**
+
+**License-UNRESOLVED (do not use until re-verified):** SIDTD, DeepFakeFace, Deepfake-Eval-2024.
+**Open procurement items:** iBeta/ISO 30107-3 pricing; a commercial genuine-passport corpus.
 
 ## Required sets
 
