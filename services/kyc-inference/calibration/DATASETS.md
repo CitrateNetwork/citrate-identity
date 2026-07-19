@@ -51,10 +51,17 @@ it, stop and get an export-control read first; else default to the non-IARPA set
 **License-UNRESOLVED (do not use until re-verified):** SIDTD, DeepFakeFace, Deepfake-Eval-2024.
 **Open procurement items:** iBeta/ISO 30107-3 pricing; a commercial genuine-passport corpus.
 
-### Acquisition helpers (2026-07-17)
-- `download_doc_datasets.sh` — fetch + SHA-pin the commercial-safe doc sets (IDNet CC0 +
-  MIDV-Holo CC BY-SA 2.5), fail-closed, writes `DOC_DATASETS.lock`. **Start here** — no
-  license/PII blocker; feeds AV-S4 document authenticity.
+### Acquisition helpers (2026-07-17; staging resolved 2026-07-19)
+- `download_doc_datasets.sh` — **turnkey**, fail-closed, writes `DOC_DATASETS.lock`.
+  **Start here** — no license/PII blocker; feeds AV-S4 document authenticity. Run on the
+  calibration HOST (`KYC_CALIB_DIR=…`), not a laptop.
+  - **IDNet (CC0)** — Zenodo record `10570622`, per-jurisdiction zips with the published
+    MD5s **baked in + verified** (rus 6.0GB, svk 4.3GB, lva 17.5GB, california 18.7GB;
+    this record = 46.5GB, full IDNet ~400GB across records). Default stages a **~10GB
+    subset** (`rus.zip svk.zip`); set `IDNET_FILES` for more. URLs verified live 2026-07-19.
+  - **MIDV-Holo (CC BY-SA 2.5)** — `ftp://smartengines.com/midv-holo` (recursive FTP tree,
+    700 clips). **Attribution required:** credit Smart Engines; faces are from Generated
+    Photos (generated.photos) — carry their attribution in derivative work.
 - `VENDOR_OUTREACH_iBeta.md` — draft email to resolve iBeta/ISO 30107-3 pricing + whether
   they license attack corpora (owner sends).
 - `CALIBRATION_CONSENT_DRAFT.md` — draft retention-consent + intake protocol for the
