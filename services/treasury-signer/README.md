@@ -75,6 +75,44 @@ systemctl enable --now citrate-treasury-signer
 # Caddy: reverse_proxy the public route to 127.0.0.1:8790
 ```
 
+## Rekey at a deployer rotation (reroll PHASE 3.5)
+
+When the deployer key rotates (e.g. the 2026-07-20 reroll — the old deployer was
+exposed by a `bash -x` trace), the grant signer rotates with it because it is
+`keccak256(DEPLOYER_PRIVATE_KEY ‖ "citrate/treasury-grant-signer/v1")`. The new
+signer is **`0xF42a19194fee89E71dC4b8631a71a9CeCf42B483`** and it owns the NEW
+CREATE2 SBT/vault (`DeployCoreMembership.FROZEN_OWNER`):
+
+| | OLD | NEW |
+|---|---|---|
+| grant signer (`TREASURY_SIGNER_KEY`) | `0x9aFFF274…8A50` | `0xF42a1919…B483` |
+| `MEMBERSHIP_STAKE_VAULT_ADDRESS` | `0x0aceb7B4…267e` | `0x61E324cFd6B7Cb106AC0AD1dF163bdFef2b74268` |
+| `CITRATE_MEMBER_SBT_ADDRESS` | `0x149E85A3…4578` | `0x3e0c2B1cD29a615E4eA2E263C8e7df3Aef243E42` |
+
+**This rekey is off-chain and address-neutral** — it swaps a credential + two
+pinned-contract env vars in `--env-file`; it changes NO on-chain address, NO
+genesis, NO CREATE2 projection, NO node sync. The addresses are fixed by the
+build (`FROZEN_OWNER`), not by this service. Verified: the signer derived from the
+new key == `FROZEN_OWNER` == the new SBT/vault owner.
+
+**Timing:** run AFTER `post-reroll-membership.sh` deploys the new SBT+vault (they
+must have code on-chain first) and AFTER the new signer is funded. Use `rekey.sh`
+(reads the private key on STDIN only — never argv/log):
+
+```bash
+# from the DGX — key never touches a terminal/log:
+grep -m1 '^GRANT_SIGNER_PRIVATE_KEY=' /home/saul/Projects/Citrate-Labs/.env.testnet \
+  | cut -d= -f2 \
+  | ssh root@<droplet> \
+      'NEW_VAULT=0x61E324cFd6B7Cb106AC0AD1dF163bdFef2b74268 \
+       NEW_SBT=0x3e0c2B1cD29a615E4eA2E263C8e7df3Aef243E42 \
+       bash /opt/citrate-treasury-signer/rekey.sh'
+```
+
+`rekey.sh` patches the env-file atomically, **recreates** the docker container
+(a plain `docker restart` does NOT re-read `--env-file`), and asserts `/health`
+reports the new signer + both new contracts.
+
 ## Dual-control (documented follow-up)
 Beta runs single-operator with the daily cap. To require a second approver, extend
 `/v1/sign` to demand an `X-Approval` HMAC from a second operator key before broadcasting
