@@ -30,6 +30,7 @@ import { mountBundlerKeyRoutes } from './aa/bundler-key-routes.js';
 import { parseAdminSubs } from './aa/bundler-keys.js';
 import { setWalletClaimsConfig } from './aa/wallet-claims.js';
 import { loadAaConfig } from './aa/config.js';
+import { verifyAaStackOnChain, formatAaStackProblems } from './aa/verify-stack.js';
 import { mountStaticAssets } from './static-assets.js';
 import { mountPasswordRoutes } from './auth/password-routes.js';
 import { mountWebauthnRoutes } from './auth/webauthn-routes.js';
@@ -387,17 +388,48 @@ export async function createProvider(
   if (process.env.CITRATE_AA_FACTORY) {
     const aaCfg = loadAaConfig(process.env);
     const rpc = process.env.CITRATE_AA_RPC_URL ?? process.env.CITRATE_RPC_URL ?? 'https://rpc.citrate.ai';
-    mountAaRoutes(provider, { config: aaCfg, rpcUrl: rpc });
+
+    // 2026-07-25 incident guard. `loadAaConfig` validates the SHAPE of the AA
+    // env, not its identity — so a stale-but-well-formed factory/impl from a
+    // wiped chain passed every check and the authority served embedded-wallet
+    // addresses the factory will never deploy to (a money-loss path). Ask the
+    // chain instead: does the factory exist, and does it clone the
+    // implementation we predict against?
+    //
+    // FAIL CLOSED ON THE MONEY PATH, NOT ON LOGIN: a mismatch declines to
+    // mount /aa/* rather than aborting boot. Serving no wallet address is
+    // recoverable; serving a wrong one is not, and taking OIDC down with it
+    // would turn a wallet bug into a total outage.
+    const aaProblems =
+      process.env.CITRATE_AA_SKIP_ONCHAIN_VERIFY === '1'
+        ? []
+        : await verifyAaStackOnChain({
+            factory: aaCfg.factory,
+            walletImpl: aaCfg.kernelImpl,
+            rpcUrl: rpc,
+            chainId: aaCfg.chainId,
+          });
+    if (aaProblems.length > 0) {
+      // eslint-disable-next-line no-console
+      console.error(
+        '[aa-config] REFUSING to mount /aa/* — the configured AA stack does not ' +
+          `match the chain at ${rpc}:\n${formatAaStackProblems(aaProblems)}\n` +
+          '  Fix the env against contracts/addresses/<chainId>.json and redeploy. ' +
+          '(Set CITRATE_AA_SKIP_ONCHAIN_VERIFY=1 to bypass — UNSAFE, offline use only.)',
+      );
+    } else {
+      mountAaRoutes(provider, { config: aaCfg, rpcUrl: rpc });
     // EW-S1 WP-10 item 31: guardian nominations — stored at signup,
     // installed on-chain with the wallet's first deploy (the SDK appends
     // the served initConfig entry to initialize()). Citrate's own signer
     // can never be nominated.
     mountGuardianRoutes(provider, {
-      ...(process.env.CITRATE_AA_GUARDIAN_RECOVERY
-        ? { recoveryModule: process.env.CITRATE_AA_GUARDIAN_RECOVERY as `0x${string}` }
-        : {}),
-      ...(aaCfg.identitySignerAddr ? { forbidden: [aaCfg.identitySignerAddr] } : {}),
-    });
+        ...(process.env.CITRATE_AA_GUARDIAN_RECOVERY
+          ? { recoveryModule: process.env.CITRATE_AA_GUARDIAN_RECOVERY as `0x${string}` }
+          : {}),
+        ...(aaCfg.identitySignerAddr ? { forbidden: [aaCfg.identitySignerAddr] } : {}),
+      });
+    }
     // EW-S1 WP-6: with the AA stack configured, every UUID-keyed user's
     // ID token carries their (counterfactual) smart-wallet address —
     // findAccount predicts it through this seam.
