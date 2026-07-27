@@ -24,6 +24,7 @@ import { mountAccountRoute } from './account-routes.js';
 import { mountAdminEntitlementsRoute } from './admin-routes.js';
 import { mountAlfEnrollRoute } from './alf-routes.js';
 import { mountHttpExtras } from './http-extras.js';
+import { mountOAuthBounce } from './oauth-bounce.js';
 import { mountAaRoutes } from './aa/aa-routes.js';
 import { mountGuardianRoutes } from './aa/guardian-routes.js';
 import { mountBundlerKeyRoutes } from './aa/bundler-key-routes.js';
@@ -217,6 +218,13 @@ export async function createProvider(
     ...(pingRedis ? { pingRedis } : {}),
     ...(pingDb ? { pingDb } : {}),
   });
+
+  // Hosted OAuth redirect bounce (GET /oauth/callback) for Citrate Core desktop
+  // MCP sign-in: providers that reject the http-loopback redirect (Notion) point
+  // at https://auth.citrate.ai/oauth/callback, which 302s the browser back to the
+  // app's loopback listener. Stateless, no secret, no token exchange. See ADR-3 /
+  // OAUTH_SETUP_RUNBOOK.md and src/oauth-bounce.ts.
+  mountOAuthBounce(provider);
 
   // SIWE login. The signing JWK is the same RS256 key the authority publishes
   // via JWKS, so direct-path ID tokens verify against `/jwks`. `keys[0]` is
