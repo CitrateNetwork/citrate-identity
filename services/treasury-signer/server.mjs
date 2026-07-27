@@ -11,7 +11,10 @@
  * Security posture (@rule8):
  *   - Signing key only in this process env (TREASURY_SIGNER_KEY), on an operator
  *     droplet, never in the repo/Vercel. Bearer auth on every call.
- *   - Hard allowlist: only the two pinned contracts + the two grant selectors.
+ *   - Tight op set: sbt.mintMember on the pinned SBT, and a native SALT transfer
+ *     of the (clamped) bond to the REQUEST'S member address ONLY — never an
+ *     arbitrary target, never arbitrary calldata. (ADR 2026-07-27: membership =
+ *     validator, so the 32k funds the member's EOA to bond, replacing vault.grant.)
  *   - amountWei CLAMPED to TREASURY_GRANT_WEI (never trust the caller).
  *   - Per-UTC-day SALT cap + orderId idempotency ledger, persisted to disk.
  *   - Signs → broadcasts → waits for inclusion → returns the REAL hash. Never a
@@ -60,6 +63,9 @@ function authorized(header) {
 }
 const GRANT_WEI = BigInt(process.env.TREASURY_GRANT_WEI ?? String(32_000n * 10n ** 18n)); // policy grant / clamp ceiling
 const DAILY_CAP = BigInt(process.env.TREASURY_DAILY_CAP_WEI ?? String(96_000n * 10n ** 18n));
+// Small SALT on TOP of the bond so the member EOA can pay gas for the
+// registerValidator tx (the 32k is sent as msg.value; ~0.1 SALT covers gas).
+const GAS_BUFFER_WEI = BigInt(process.env.TREASURY_GAS_BUFFER_WEI ?? String(10n ** 17n)); // 0.1 SALT
 const PORT = Number(process.env.PORT ?? "8790");
 const STATE_FILE = process.env.TREASURY_STATE_FILE ?? "/var/lib/citrate-treasury-signer/state.json";
 
@@ -114,20 +120,26 @@ async function handleGrant(body) {
   try {
     const m = getAddress(member);
     const subHash = keccak256(toHex(sub));
-    let vaultTxHash = null, sbtTxHash = null, sbtTokenId = null;
+    let fundTxHash = null, sbtTxHash = null, sbtTokenId = null;
 
-    // ---- Leg 1: vault.grant (skip if already attributed) ----
-    const attributed = await publicClient.readContract({ address: VAULT, abi: VAULT_ABI, functionName: "attributedShares", args: [m] });
-    if (attributed === 0n) {
+    // ---- Leg 1: fund the member EOA with the validator bond (native transfer) ----
+    // Membership = validator (ADR 2026-07-27): the 32k must be the member's OWN
+    // liquid balance so they can send it as registerValidator{value:32k} (staker =
+    // the EOA). So we transfer the bond + a small gas buffer to the member address
+    // ONLY (never an arbitrary target). Same guards as before: amount is clamped to
+    // GRANT_WEI, daily-capped, order-idempotent. Idempotent on re-drive: skip if the
+    // member already holds the bond (never double-send).
+    const bal = await publicClient.getBalance({ address: m });
+    if (bal < amount) {
       rollDay();
       const spent = BigInt(state.spentToday);
-      if (spent + amount > DAILY_CAP) throw new HttpError(403, `daily cap exceeded: ${spent + amount} > ${DAILY_CAP}`);
-      const data = encodeFunctionData({ abi: VAULT_ABI, functionName: "grant", args: [m, amount] });
-      const hash = await walletClient.sendTransaction({ to: VAULT, data, value: amount });
+      const topUp = amount + GAS_BUFFER_WEI - bal; // bring the member up to bond + gas
+      if (spent + topUp > DAILY_CAP) throw new HttpError(403, `daily cap exceeded: ${spent + topUp} > ${DAILY_CAP}`);
+      const hash = await walletClient.sendTransaction({ to: m, value: topUp }); // to the MEMBER, no calldata
       const rcpt = await publicClient.waitForTransactionReceipt({ hash });
-      if (rcpt.status !== "success") throw new HttpError(502, `vault.grant reverted in ${hash}`);
-      state.spentToday = String(spent + amount); saveState(state);
-      vaultTxHash = hash;
+      if (rcpt.status !== "success") throw new HttpError(502, `member fund reverted in ${hash}`);
+      state.spentToday = String(spent + topUp); saveState(state);
+      fundTxHash = hash;
     }
 
     // ---- Leg 2: sbt.mintMember (skip if sub already bound) ----
@@ -143,7 +155,9 @@ async function handleGrant(body) {
       if (log && log.topics[3]) sbtTokenId = hexToBigInt(log.topics[3]).toString();
     }
 
-    const result = { orderId, vaultTxHash, sbtTxHash, sbtTokenId, status: (vaultTxHash || sbtTxHash) ? "granted" : "already_granted" };
+    // `vaultTxHash` retained (null) for response back-compat with the current
+    // core-membership reader; `fundTxHash` is the new bond-funding tx.
+    const result = { orderId, fundTxHash, vaultTxHash: null, sbtTxHash, sbtTokenId, status: (fundTxHash || sbtTxHash) ? "granted" : "already_granted" };
     state.orders[orderId] = { done: true, result }; saveState(state);
     return result;
   } catch (err) {
@@ -156,7 +170,7 @@ const server = createServer(async (req, res) => {
   try {
     if (req.method === "GET" && req.url === "/health") {
       rollDay();
-      return json(res, 200, { status: "ok", signer: account.address, day: state.day, spentToday: state.spentToday, dailyCap: String(DAILY_CAP), grantWei: String(GRANT_WEI), vault: VAULT, sbt: SBT });
+      return json(res, 200, { status: "ok", mode: "member-fund", signer: account.address, day: state.day, spentToday: state.spentToday, dailyCap: String(DAILY_CAP), grantWei: String(GRANT_WEI), gasBufferWei: String(GAS_BUFFER_WEI), sbt: SBT });
     }
     if (req.method === "POST" && req.url === "/grant") {
       if (!authorized(req.headers["authorization"])) return json(res, 401, { error: "unauthorized" });
