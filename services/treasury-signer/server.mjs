@@ -67,6 +67,13 @@ const DAILY_CAP = BigInt(process.env.TREASURY_DAILY_CAP_WEI ?? String(96_000n * 
 // so the treasury must fund that EOA with the bond PLUS a little native SALT for
 // the register tx's gas. GAS_HEADROOM is that gas cushion (default 0.05 SALT).
 const GAS_HEADROOM = BigInt(process.env.TREASURY_GAS_HEADROOM_WEI ?? String(5n * 10n ** 16n));
+// The ValidatorRegistry, read ONLY to answer "has this member already bonded?".
+// See the durability note on Leg 1. Optional: unset degrades to the balance-only
+// check and LOGS that the weaker guard is in force — it never silently downgrades.
+const REGISTRY = (process.env.CITRATE_VALIDATOR_REGISTRY_ADDRESS ?? "").trim()
+  ? getAddress(process.env.CITRATE_VALIDATOR_REGISTRY_ADDRESS.trim())
+  : null;
+const ZERO32 = "0x" + "00".repeat(32);
 const PORT = Number(process.env.PORT ?? "8790");
 const STATE_FILE = process.env.TREASURY_STATE_FILE ?? "/var/lib/citrate-treasury-signer/state.json";
 
@@ -78,6 +85,12 @@ const walletClient = createWalletClient({ account, chain, transport: http(RPC_UR
 const VAULT_ABI = [
   { type: "function", name: "grant", stateMutability: "payable", inputs: [{ name: "member", type: "address" }, { name: "amount", type: "uint256" }], outputs: [{ name: "grantId", type: "uint256" }] },
   { type: "function", name: "attributedShares", stateMutability: "view", inputs: [{ name: "", type: "address" }], outputs: [{ name: "", type: "uint256" }] },
+];
+// One active binding per staker (`ValidatorRegistry.pubkeyOfStaker`). Non-zero
+// means this address has ALREADY registered a validator — the registry itself
+// reverts StakerHasValidator on a second attempt.
+const REGISTRY_ABI = [
+  { type: "function", name: "pubkeyOfStaker", stateMutability: "view", inputs: [{ name: "", type: "address" }], outputs: [{ name: "", type: "bytes32" }] },
 ];
 const SBT_ABI = [
   { type: "function", name: "mintMember", stateMutability: "nonpayable", inputs: [{ name: "to", type: "address" }, { name: "subHash", type: "bytes32" }, { name: "termStart", type: "uint64" }, { name: "termEnd", type: "uint64" }], outputs: [{ name: "tokenId", type: "uint256" }] },
@@ -128,13 +141,27 @@ async function handleGrant(body) {
     // the member's OWN EOA so it can self-bond via
     // ValidatorRegistry.registerValidator{value: 32k}(pubkey, sig). The stake then
     // lives in the ValidatorRegistry (bonded, slashable), not the MembershipStakeVault.
-    // Idempotent: skip if the EOA already holds >= the bond (a re-run for the same
-    // member does not double-fund). Uses eth_getBalance, the on-chain source of truth.
-    // NOTE (@rule8 / follow-up): app-side grant_status currently reads
-    // MembershipStakeVault.attributedStake — with the stake now in the ValidatorRegistry
-    // that read must move to validatorInfo(pubkey).bondedStake, else it shows 0.
+    // IDEMPOTENCY, AND WHY THE BALANCE ALONE IS NOT ENOUGH.
+    // The obvious check — "skip if the EOA already holds >= the bond" — is a signal
+    // CONSUMED BY ITS OWN SUCCESS: the member spends exactly that balance to
+    // self-bond, so a funded-and-bonded member reads as unfunded. The window is
+    // real: fund succeeds -> sbt.mintMember fails -> the catch below DELETES the
+    // orderId record so the order stays re-triable -> the member bonds in the
+    // meantime -> the retry sees a ~0 balance and sends a SECOND 32,000 SALT.
+    //
+    // So we ask the durable question first: has this address already registered a
+    // validator? `pubkeyOfStaker` is non-zero for the life of the binding and does
+    // not drain when the bond is paid — and the registry enforces one validator per
+    // staker (StakerHasValidator), so a bonded member can never need funding again.
+    // Balance stays as the second condition, covering the funded-but-not-yet-bonded
+    // member. Both must say "needs funding" before any SALT moves.
+    let alreadyBonded = false;
+    if (REGISTRY) {
+      const pk = await publicClient.readContract({ address: REGISTRY, abi: REGISTRY_ABI, functionName: "pubkeyOfStaker", args: [m] });
+      alreadyBonded = pk !== ZERO32;
+    }
     const bal = await publicClient.getBalance({ address: m });
-    if (bal < amount) {
+    if (!alreadyBonded && bal < amount) {
       rollDay();
       const target = amount + GAS_HEADROOM;   // fund up to bond + gas for the register tx
       const topUp = target - bal;             // top up only the shortfall (idempotent w/ partial funding)
@@ -173,7 +200,12 @@ const server = createServer(async (req, res) => {
   try {
     if (req.method === "GET" && req.url === "/health") {
       rollDay();
-      return json(res, 200, { status: "ok", signer: account.address, day: state.day, spentToday: state.spentToday, dailyCap: String(DAILY_CAP), grantWei: String(GRANT_WEI), vault: VAULT, sbt: SBT });
+      return json(res, 200, { status: "ok", signer: account.address, day: state.day, spentToday: state.spentToday, dailyCap: String(DAILY_CAP), grantWei: String(GRANT_WEI), vault: VAULT, sbt: SBT,
+      // Which idempotency guard is in force. "registry+balance" is the durable
+      // one; "balance-only" means CITRATE_VALIDATOR_REGISTRY_ADDRESS is unset and
+      // a fund->mint-fail->bond->retry could double-fund. Surfaced so the weaker
+      // mode is visible to an operator instead of inferred from a log line.
+      registry: REGISTRY, fundGuard: REGISTRY ? "registry+balance" : "balance-only" });
     }
     if (req.method === "POST" && req.url === "/grant") {
       if (!authorized(req.headers["authorization"])) return json(res, 401, { error: "unauthorized" });
@@ -191,5 +223,8 @@ const server = createServer(async (req, res) => {
 // (127.0.0.1:8790:8790) + Caddy TLS + bearer auth.
 server.listen(PORT, "0.0.0.0", () => {
   // eslint-disable-next-line no-console
-  console.log(`citrate-treasury-signer on :${PORT} signer=${account.address} vault=${VAULT} sbt=${SBT} grantWei=${GRANT_WEI} dailyCap=${DAILY_CAP}`);
+  console.log(`citrate-treasury-signer on :${PORT} signer=${account.address} vault=${VAULT} sbt=${SBT} grantWei=${GRANT_WEI} dailyCap=${DAILY_CAP} registry=${REGISTRY ?? "UNSET"}`);
+if (!REGISTRY) {
+  console.warn("[treasury-signer] CITRATE_VALIDATOR_REGISTRY_ADDRESS is UNSET — the bond-fund falls back to the BALANCE-ONLY idempotency check, which a member spends when they self-bond. A fund->mint-fail->bond->retry sequence could double-fund. Set it.");
+}
 });

@@ -58,6 +58,8 @@ the member is already attributed / the sub already bound (`already_granted`).
 | `CITRATE_RPC_URL` | `https://rpc.citrate.ai` |
 | `CITRATE_CHAIN_ID` | `40204` |
 | `MEMBERSHIP_STAKE_VAULT_ADDRESS` / `CITRATE_MEMBER_SBT_ADDRESS` | pinned contracts |
+| `CITRATE_VALIDATOR_REGISTRY_ADDRESS` | **strongly recommended.** Read-only, to answer "has this member already bonded?" (`pubkeyOfStaker`). Without it the bond-fund falls back to a BALANCE-ONLY idempotency check — and the member *spends* that balance to self-bond, so a fund → SBT-mint-fail → bond → retry sequence can double-fund 32k SALT. `/health` reports `fundGuard: "registry+balance"` vs `"balance-only"` so the weak mode is visible. |
+| `TREASURY_GAS_HEADROOM_WEI` | gas cushion added on top of the bond so the member can pay for their own `registerValidator` tx (default 0.05 SALT) |
 | `TREASURY_DAILY_CAP_WEI` | per-UTC-day SALT ceiling (default 96k SALT = 3 grants) |
 | `PORT` | default 8790 (bound to 127.0.0.1; Caddy terminates TLS) |
 
