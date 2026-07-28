@@ -200,3 +200,35 @@ describe('clearing the binding writes NULL, never an empty string', () => {
     expect(cleared?.primaryWallet).toBeUndefined();
   });
 });
+
+describe("wallet_bound — an RP that PAYS must be able to tell proven from predicted", () => {
+  // WHY THIS CLAIM EXISTS. `wallet_address` is either a wallet whose control the
+  // member PROVED, or the counterfactual CREATE2 prediction — and the two are
+  // indistinguishable from the address alone. On 2026-07-28 the membership treasury
+  // bond-funded an unspendable address and 32,000 SALT was lost. Any RP that pays
+  // this address must require `wallet_bound: true`.
+  it("is false while the claim is the CREATE2 prediction", async () => {
+    const users = new InMemoryUserStore();
+    const rec = await users.createWithPasskey();
+    const stored = await users.findById(rec.id);
+    // No bound wallet ⇒ findAccount takes the predicted branch ⇒ wallet_bound false.
+    expect(Boolean(stored?.primaryWallet)).toBe(false);
+  });
+
+  it("becomes true once a proven canonical link binds primaryWallet", async () => {
+    const users = new InMemoryUserStore();
+    const rec = await users.createWithPasskey();
+    await users.setPrimaryWallet(rec.id, walletA.address);
+    const stored = await users.findById(rec.id);
+    expect(Boolean(stored?.primaryWallet)).toBe(true);
+  });
+
+  it("and goes back to false if the binding is cleared — never a stale yes", async () => {
+    const users = new InMemoryUserStore();
+    const rec = await users.createWithPasskey();
+    await users.setPrimaryWallet(rec.id, walletA.address);
+    await users.setPrimaryWallet(rec.id, null);
+    const stored = await users.findById(rec.id);
+    expect(Boolean(stored?.primaryWallet)).toBe(false);
+  });
+});
