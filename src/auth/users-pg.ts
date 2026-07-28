@@ -240,10 +240,12 @@ export class PgUserStore {
     );
   }
 
-  async setPrimaryWallet(id: string, walletAddress: string): Promise<void> {
+  async setPrimaryWallet(id: string, walletAddress: string | null): Promise<void> {
+    // NULL (not '') on a clear — readers use `?? predicted`, and an empty
+    // string is not nullish, so '' would suppress the prediction fallback.
     await this.pool.query(
       'UPDATE users SET primary_wallet = $1, updated_at = now() WHERE id = $2',
-      [walletAddress.toLowerCase(), id],
+      [walletAddress === null ? null : walletAddress.toLowerCase(), id],
     );
   }
 
