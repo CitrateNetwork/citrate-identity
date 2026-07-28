@@ -795,8 +795,18 @@ export const findAccount: FindAccount = (_ctx, sub): Account => {
         // remains the standard `amr` claim. KYC is not yet keyed on
         // UUIDs (the vendor attaches verification to a wallet).
         const rec = await getUserStore().findById(accountId);
-        const wallet = rec?.primaryWallet
-          ? getAddress(rec.primaryWallet)
+        // A BOUND wallet is one whose control the member PROVED (the identity↔wallet
+        // registry's EIP-191 challenge). A predicted one is the counterfactual
+        // CREATE2 smart-wallet address — well-formed, but no private key exists for
+        // it and no contract is deployed there.
+        //
+        // `wallet_bound` exists because an RP CANNOT TELL THEM APART from the
+        // address alone, and the difference is money: on 2026-07-28 the membership
+        // treasury bond-funded an unspendable address and the SALT was lost. Any RP
+        // that PAYS this address must require `wallet_bound: true`.
+        const walletBound = Boolean(rec?.primaryWallet);
+        const wallet = walletBound
+          ? getAddress(rec!.primaryWallet!)
           : predictedWalletForAccount(accountId);
         const linked = await linkedWalletsFor(accountId, wallet);
         // KYC is keyed on the OIDC accountId (the UUID here), which is exactly
@@ -820,7 +830,7 @@ export const findAccount: FindAccount = (_ctx, sub): Account => {
           ...(rec?.email
             ? { email: rec.email, email_verified: rec.emailVerified }
             : {}),
-          ...(wallet ? { wallet_address: wallet } : {}),
+          ...(wallet ? { wallet_address: wallet, wallet_bound: walletBound } : {}),
           ...(linked.length > 0 ? { wallets: linked } : {}),
           ...(rec?.lastSigningMethod
             ? { signing_method: rec.lastSigningMethod }
@@ -841,6 +851,8 @@ export const findAccount: FindAccount = (_ctx, sub): Account => {
       return {
         sub: accountId,
         wallet_address: accountId,
+        // A SIWE sub IS its address — control was proven by the login signature.
+        wallet_bound: true,
         wallets: await linkedWalletsFor(accountId, accountId),
         signing_method: 'siwe',
         ...kyc,
@@ -1287,7 +1299,7 @@ export async function buildConfiguration(
       // recent signing method, surfaced under the `wallet` scope (EW-S1
       // WP-6 seam — explorer/dashboard RPs + Lane B's PIN-S4 consume this
       // shape; keep it stable). Linked-wallets list grows in IDP-S3.
-      wallet: ['wallet_address', 'wallets', 'signing_method'],
+      wallet: ['wallet_address', 'wallet_bound', 'wallets', 'signing_method'],
       // IDP-KYC: live, revocable KYC status under its own `kyc` scope. These are
       // read from the KYC store at claims() time so /userinfo reflects the
       // CURRENT record (revocation/expiry), not a stale token snapshot. Record
