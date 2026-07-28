@@ -57,7 +57,8 @@ function readPackageVersion(): string {
   }
 }
 import { createCitratePublicClient, CITRATE_CHAIN_ID, InMemoryNonceStore, type NonceStore } from './siwe.js';
-import { mountIdentityRegistryRoutes } from './identity-registry.js';
+import { mountIdentityRegistryRoutes, setWalletRegistry } from './identity-registry.js';
+import { initWalletRegistryFromEnv } from './wallet-registry-pg.js';
 import { getUserStore } from './auth/stores.js';
 /** Canonical lowercase UUID — only UUID-keyed subs have a user record to bind. */
 const REGISTRY_UUID_RE =
@@ -501,6 +502,12 @@ async function main(): Promise<void> {
   // gate as KYC — Postgres in prod, in-memory in dev — so /auth/password/* and
   // /auth/webauthn/* persist user records as soon as DATABASE_URL is set.
   await initAuthStoresFromEnv(process.env);
+
+  // Install the identity↔wallet registry. Postgres in prod, in-memory in dev.
+  // Until this existed the registry was ALWAYS in-memory: every redeploy wiped
+  // the links, `canonicalFor` went null, and a member linking a second wallet
+  // afterwards silently repointed `primary_wallet` — i.e. their pay-to address.
+  await initWalletRegistryFromEnv(process.env, setWalletRegistry);
 
   // Portal-registration WP-C: install the KycProvider singleton from env.
   // With KYC_PROVIDER unset, /kyc/start fails closed (503). Production
