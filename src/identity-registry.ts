@@ -182,13 +182,51 @@ export interface IdentityRegistryOptions {
   chainId: number;
   /** One-time nonce store — the SAME store SIWE uses (Redis in prod). */
   nonceStore: NonceStore;
+  /**
+   * Called when a sub's CANONICAL wallet changes — on the first proven link,
+   * and on an unlink that promotes a different wallet (or leaves none, `null`).
+   *
+   * WHY THIS HOOK EXISTS. `findAccount` already prefers a user's bound
+   * `primaryWallet` over the counterfactual CREATE2 prediction when minting the
+   * `wallet_address` claim — but nothing ever set `primaryWallet`, so the claim
+   * was always the predicted smart-wallet address, which no private key can
+   * spend from. Anything that pays that address (the validator bond) sends funds
+   * the member cannot move. This hook is the missing wire between the
+   * proof-of-control link that already exists here and the setter that already
+   * exists on the user store.
+   *
+   * It is a CALLBACK rather than a direct user-store import so this module stays
+   * store-agnostic and unit-testable, matching how {@link WalletRegistry} is
+   * injected. A throw is swallowed by the caller: the link itself is already
+   * durable and proven, and failing the request afterwards would tell the client
+   * its wallet was not linked when it was.
+   */
+  onCanonicalWalletChange?: (sub: string, address: string | null) => Promise<void>;
 }
 
 export function mountIdentityRegistryRoutes(
   provider: Provider,
   options: IdentityRegistryOptions,
 ): void {
-  const { authority, chainId, nonceStore } = options;
+  const { authority, chainId, nonceStore, onCanonicalWalletChange } = options;
+
+  /**
+   * Report the current canonical wallet. Swallows a hook failure: the link/unlink
+   * it follows is already committed, so surfacing the error would report failure
+   * for work that succeeded. Logged, never thrown.
+   */
+  async function announceCanonical(sub: string): Promise<void> {
+    if (!onCanonicalWalletChange) return;
+    try {
+      const canonical = await getWalletRegistry().canonicalFor(sub);
+      await onCanonicalWalletChange(sub, canonical ? getAddress(canonical) : null);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error(
+        `[identity-registry] canonical-wallet hook failed for ${sub}: ${(err as Error).message}`,
+      );
+    }
+  }
 
   provider.use(async (ctx: Ctx, next: Next) => {
     const match = /^\/identity\/([^/]+)\/wallets(?:\/(.+))?$/.exec(ctx.path);
@@ -253,6 +291,10 @@ export function mountIdentityRegistryRoutes(
       }
       try {
         const linked = await getWalletRegistry().link(sub, address);
+        // Only a canonical link moves the `wallet_address` claim — a second
+        // wallet is attributable but does not repoint the member's pay-to
+        // address out from under them.
+        if (linked.canonical) await announceCanonical(sub);
         respond(ctx, 201, { wallet: serialize(linked) });
       } catch (err) {
         if (err instanceof WalletRegistryError) {
@@ -277,7 +319,12 @@ export function mountIdentityRegistryRoutes(
         respond(ctx, 400, { error: 'invalid_request', reason: 'path address malformed' });
         return;
       }
+      const wasCanonical = (await getWalletRegistry().canonicalFor(sub))?.toLowerCase();
       await getWalletRegistry().unlink(sub, tail);
+      // Unlinking the canonical wallet promotes another (or leaves none, which
+      // returns the claim to the predicted address). Re-announce so a stale
+      // pay-to address can never outlive the link that justified it.
+      if (wasCanonical && wasCanonical === tail.toLowerCase()) await announceCanonical(sub);
       respond(ctx, 200, { ok: true });
       return;
     }

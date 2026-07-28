@@ -58,6 +58,10 @@ function readPackageVersion(): string {
 }
 import { createCitratePublicClient, CITRATE_CHAIN_ID, InMemoryNonceStore, type NonceStore } from './siwe.js';
 import { mountIdentityRegistryRoutes } from './identity-registry.js';
+import { getUserStore } from './auth/stores.js';
+/** Canonical lowercase UUID — only UUID-keyed subs have a user record to bind. */
+const REGISTRY_UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 import { RedisNonceStore } from './nonce-redis.js';
 import { RedisSessionBus, getSessionBus, setSessionBus } from './session-bus.js';
 import { createRedis, type RedisLike } from './redis.js';
@@ -292,6 +296,18 @@ export async function createProvider(
     authority: siweDomainFromIssuer(issuer),
     chainId: CITRATE_CHAIN_ID,
     nonceStore: nonceStore ?? new InMemoryNonceStore(),
+    // A proven canonical link becomes the user's bound `primaryWallet`, which
+    // `findAccount` already prefers over the counterfactual CREATE2 prediction
+    // when minting `wallet_address`. Without this the claim was ALWAYS the
+    // predicted smart-wallet address — an address no private key can spend
+    // from, so anything paying it (the 32k validator bond) stranded the funds.
+    //
+    // Only UUID-keyed users have a record to bind: a SIWE sub IS its address,
+    // and `findAccount` returns it directly, so there is nothing to set.
+    onCanonicalWalletChange: async (sub, address) => {
+      if (!REGISTRY_UUID_RE.test(sub)) return;
+      await getUserStore().setPrimaryWallet(sub, address);
+    },
   });
 
   const rpId = rpIdFromIssuer(issuer);

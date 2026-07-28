@@ -44,9 +44,13 @@ export interface UserStore {
    * callback when the Google account matches an existing email but
    * has no `google_sub` yet). */
   linkGoogleSub(id: string, googleSub: string): Promise<void>;
-  /** Bind an explicit wallet address to the user (dashboard enrollment;
-   * overrides the predicted smart-wallet address in claims). */
-  setPrimaryWallet(id: string, walletAddress: string): Promise<void>;
+  /** Bind an explicit wallet address to the user (proven canonical link, or
+   * dashboard enrollment); overrides the predicted smart-wallet address in
+   * claims. `null` CLEARS the binding so the prediction resumes — pass null
+   * rather than an empty string: `account-routes` and `kyc-routes` read this
+   * with `??`, and `''` is not nullish, so an empty string would suppress the
+   * fallback and yield a blank address instead of the predicted one. */
+  setPrimaryWallet(id: string, walletAddress: string | null): Promise<void>;
   /** Record the method of the most recent successful sign-in
    * (`email-pw` | `passkey` | `google`) — surfaced as the
    * `signing_method` OIDC claim (EW-S1 WP-6). */
@@ -180,10 +184,11 @@ export class InMemoryUserStore implements UserStore {
     this.byGoogleSub.set(googleSub, id);
   }
 
-  async setPrimaryWallet(id: string, walletAddress: string): Promise<void> {
+  async setPrimaryWallet(id: string, walletAddress: string | null): Promise<void> {
     const rec = this.byId.get(id);
     if (!rec) return;
-    rec.primaryWallet = walletAddress.toLowerCase();
+    if (walletAddress === null) delete rec.primaryWallet;
+    else rec.primaryWallet = walletAddress.toLowerCase();
     rec.updatedAt = new Date();
   }
 
