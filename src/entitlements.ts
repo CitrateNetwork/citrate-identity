@@ -261,10 +261,22 @@ export async function resolveEntitlementClaim(
   // Expired engagement → no entitlement (RP resolves Public).
   if (ent.expiresAt != null && Date.now() > ent.expiresAt) return null;
 
-  // KYC gate: customer tiers require verified KYC; role-bearing principals
-  // (admin/auditor/exec) are authorized by the roster, not consumer KYC.
-  if (ent.tier !== 'public' && !ent.citrateRole && kycStatus !== 'verified') {
-    return { tier: 'public', orgId: null, expiresAt: null };
+  // KYC gate (ADR-2026-07-25 payment-as-sybil): PAYMENT alone authorizes the
+  // `commercial` tier — access is NOT KYC-gated here. KYC is required only for the
+  // VERIFIED tier (`commercial.kyc`) and for the downstream KYC-gated ACTIONS (stake
+  // withdrawal, commissary download), which re-check KYC at their own boundary. So an
+  // unverified, role-less principal:
+  //   - keeps `public` / `commercial` unchanged — a paid-but-unverified member gets
+  //     access instead of being downgraded to Public (the "public despite paid" bug);
+  //   - a `commercial.kyc` grant collapses to `commercial` (paid access preserved),
+  //     never to `public`, so a lapsed-KYC member does not lose paid access;
+  //   - any other consumer tier (academic / confidential) still requires verified KYC.
+  // Role-bearing principals (admin/auditor/exec) bypass consumer KYC as before.
+  if (!ent.citrateRole && kycStatus !== 'verified') {
+    if (ent.tier === 'commercial.kyc') return { ...ent, tier: 'commercial' };
+    if (ent.tier !== 'public' && ent.tier !== 'commercial') {
+      return { tier: 'public', orgId: null, expiresAt: null };
+    }
   }
   return ent;
 }

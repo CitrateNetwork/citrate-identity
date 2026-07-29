@@ -22,9 +22,24 @@ describe('entitlements — resolveEntitlementClaim', () => {
     expect(ent).toEqual({ tier: 'confidential', orgId: null, citrateRole: 'admin', milestone: undefined, expiresAt: null });
   });
 
-  it('downgrades a non-role customer tier to Public when KYC is not verified', async () => {
+  it('KEEPS a paid `commercial` tier WITHOUT KYC (ADR-2026-07-25 payment-as-sybil)', async () => {
+    // A paid-but-unverified member gets ACCESS — payment authorizes `commercial`.
+    // KYC is enforced only at the KYC-gated actions (withdrawal, commissary), not here.
     withRows([{ tier: 'commercial', org_id: 'boeing', citrate_role: null, milestone: null, expires_at: null }]);
     const ent = await resolveEntitlementClaim('sub-2', null, 'x@y.z', 'pending');
+    expect(ent?.tier).toBe('commercial');
+    expect(ent?.orgId).toBe('boeing');
+  });
+
+  it('collapses an unverified `commercial.kyc` to `commercial` — keeps PAID access, never Public', async () => {
+    withRows([{ tier: 'commercial.kyc', org_id: null, citrate_role: null, milestone: null, expires_at: null }]);
+    const ent = await resolveEntitlementClaim('sub-2b', null, 'x@y.z', 'pending');
+    expect(ent?.tier).toBe('commercial');
+  });
+
+  it('STILL downgrades a non-paid consumer tier (academic/confidential) to Public without KYC', async () => {
+    withRows([{ tier: 'academic', org_id: null, citrate_role: null, milestone: null, expires_at: null }]);
+    const ent = await resolveEntitlementClaim('sub-2c', null, 'x@y.z', 'pending');
     expect(ent).toEqual({ tier: 'public', orgId: null, expiresAt: null });
   });
 

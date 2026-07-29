@@ -40,16 +40,27 @@ describe('entitlements adversarial — revocation cascade', () => {
     expect(ent).toEqual({ tier: 'public', orgId: null, expiresAt: null });
   });
 
-  it('KYC status "revoked" downgrades a non-role customer tier to Public', async () => {
+  it('KYC "revoked" collapses a VERIFIED tier to paid `commercial` — keeps paid access, never escalates', async () => {
+    // ADR-2026-07-25: losing KYC drops the verified-only `commercial.kyc` to the paid
+    // baseline `commercial` (payment still stands), NOT to Public. The no-escalation
+    // invariant holds — reaching `commercial.kyc` again still requires verified KYC.
     freshest(row({ tier: 'commercial.kyc', org_id: 'acme' }));
     const ent = await resolveEntitlementClaim('sub-x', null, null, 'revoked');
-    expect(ent).toEqual({ tier: 'public', orgId: null, expiresAt: null });
+    expect(ent?.tier).toBe('commercial');
   });
 
-  it('KYC status "expired" downgrades a non-role customer tier to Public', async () => {
+  it('a paid `commercial` tier SURVIVES an expired/unverified KYC (payment-as-sybil access)', async () => {
     freshest(row({ tier: 'commercial' }));
     const ent = await resolveEntitlementClaim('sub-x', null, null, 'expired');
-    expect(ent).toEqual({ tier: 'public', orgId: null, expiresAt: null });
+    expect(ent?.tier).toBe('commercial');
+  });
+
+  it('a customer STILL cannot reach commercial.kyc without verified KYC (no escalation)', async () => {
+    // The load-bearing security invariant: unverified never yields the VERIFIED tier.
+    freshest(row({ tier: 'commercial.kyc' }));
+    const ent = await resolveEntitlementClaim('sub-x', null, null, 'pending');
+    expect(ent?.tier).not.toBe('commercial.kyc');
+    expect(ent?.tier).toBe('commercial');
   });
 });
 
@@ -83,9 +94,13 @@ describe('entitlements adversarial — no privilege escalation', () => {
     expect(ent?.citrateRole).toBe('admin');
   });
 
-  it('undefined KYC status is treated as not-verified (fail-safe downgrade)', async () => {
+  it('undefined KYC status is treated as not-verified (no escalation to the verified tier)', async () => {
+    // Fail-safe: an unknown KYC status must NOT yield the VERIFIED tier. Under
+    // ADR-2026-07-25 it collapses `commercial.kyc` to the paid baseline `commercial`
+    // (payment stands), never escalating to `commercial.kyc`.
     freshest(row({ tier: 'commercial.kyc' }));
     const ent = await resolveEntitlementClaim('sub-x', null, null, undefined);
-    expect(ent).toEqual({ tier: 'public', orgId: null, expiresAt: null });
+    expect(ent?.tier).toBe('commercial');
+    expect(ent?.tier).not.toBe('commercial.kyc');
   });
 });
