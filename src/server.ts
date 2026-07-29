@@ -22,6 +22,7 @@ import { mountAdminKycRoutes } from './admin-kyc-routes.js';
 import { mountLogoutRoutes } from './logout-routes.js';
 import { mountAccountRoute } from './account-routes.js';
 import { mountAdminEntitlementsRoute } from './admin-routes.js';
+import { mountAgentRoutes } from './agent-routes.js';
 import { mountAlfEnrollRoute } from './alf-routes.js';
 import { mountHttpExtras } from './http-extras.js';
 import { mountOAuthBounce } from './oauth-bounce.js';
@@ -395,6 +396,20 @@ export async function createProvider(
   // AUTHSPINE S1-WP4: admin entitlement grant API (service-guarded; fail-closed
   // when ENTITLEMENTS_ADMIN_SECRET is unset). Grants/raises higher tiers + roles.
   mountAdminEntitlementsRoute(provider);
+
+  // ADR-XA-1 / handoff W1: first-class agent identity + KYA. `/agents/*` mints an
+  // agent subject bound to the authenticated owner, with its own counterfactual
+  // wallet and an independently revocable binding. Registration grants NO spending
+  // authority — that is a separate, waiver-gated, on-chain-bounded opt-in, because
+  // ADR-2026-06-04 (accepted) requires agents to be keyless by default.
+  //
+  // Mounted unconditionally so the routes answer 503 (not 404) without a
+  // DATABASE_URL, matching the KYC/entitlement surfaces. `jwks.keys[0]` is the
+  // ACTIVE signer by invariant, so agent tokens verify against /jwks like any other.
+  mountAgentRoutes(provider, {
+    issuer,
+    signingJwk: jwks.keys[0]!,
+  });
 
   // American Learning Federation enroll API (service-guarded; fail-closed when
   // ALF_ENROLL_SECRET is unset). Least-privilege: grants ONLY academic/orgId:alf,

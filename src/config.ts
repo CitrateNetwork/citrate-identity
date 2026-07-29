@@ -10,11 +10,22 @@ import { randomUUID } from 'node:crypto';
 import { dirname, resolve } from 'node:path';
 import { exportJWK, generateKeyPair, type JWK } from 'jose';
 import { getAddress, isAddress } from 'viem';
-import type { Account, Configuration, FindAccount } from 'oidc-provider';
+import type {
+  Account,
+  AccountClaims,
+  Configuration,
+  FindAccount,
+} from 'oidc-provider';
 import { getKycStore, effectiveVerified, type KycStatus } from './kyc.js';
 import { getUserStore } from './auth/stores.js';
 import { resolveEntitlementClaim, ENTITLEMENT_CLAIM } from './entitlements.js';
 import { predictedWalletForAccount } from './aa/wallet-claims.js';
+import {
+  getAgentStore,
+  agentCanAct,
+  agentCanSpend,
+  type AgentBinding,
+} from './agent-bindings.js';
 import { getWalletRegistry } from './identity-registry.js';
 import { createRedisAdapterFactory } from './redis-adapter.js';
 import type { RedisLike } from './redis.js';
@@ -758,6 +769,114 @@ async function linkedWalletsFor(
 }
 
 /**
+ * Resolve the OWNER's entitlement for an agent token (ADR-XA-1 D5).
+ *
+ * An owner is either UUID-keyed (password / WebAuthn / Google) or an EIP-55
+ * address (SIWE), so this mirrors the two branches `findAccount` already has —
+ * an agent whose owner signed in with a wallet must resolve identically to one
+ * whose owner used a passkey.
+ *
+ * The entitlement is the OWNER's, resolved live, and deliberately reuses
+ * `resolveEntitlementClaim` verbatim rather than applying a stricter agent rule.
+ * That means a `commercial.kyc` grant collapses to `commercial` when the owner is
+ * not verified (ADR-2026-07-25 payment-as-sybil), which IS the "commercial.kyc
+ * actions fail closed" that handoff §4 W1 asks for: the agent no longer holds the
+ * verified tier, while paid access the owner actually bought survives. Minting
+ * nothing here would give an agent LESS than its owner for a reason no ADR states.
+ */
+async function ownerEntitlementForAgent(
+  parentSub: string,
+  ownerKycStatus: KycStatus | 'none' | 'expired',
+): Promise<ReturnType<typeof resolveEntitlementClaim>> {
+  if (UUID_RE.test(parentSub)) {
+    const owner = await getUserStore().findById(parentSub);
+    const ownerWallet = owner?.primaryWallet
+      ? getAddress(owner.primaryWallet)
+      : predictedWalletForAccount(parentSub);
+    return resolveEntitlementClaim(
+      parentSub,
+      ownerWallet ?? null,
+      owner?.email ?? null,
+      ownerKycStatus,
+    );
+  }
+  const addr = isAddress(parentSub) ? getAddress(parentSub) : parentSub;
+  return resolveEntitlementClaim(addr, addr, null, ownerKycStatus);
+}
+
+/**
+ * The claims an AGENT subject mints (ADR-XA-1 D5). Returns null when `sub` is not
+ * a live agent, so the caller falls through to the human paths unchanged.
+ *
+ * What is deliberately ABSENT is the point of this function. Handoff §4 W1 is
+ * normative: the agent token carries `parent_sub` + `actor` and NEVER the human's
+ * identity. So no `email`, no `name`, no `wallets`, no `signing_method`, and no
+ * `kyc_verified_at` / `kyc_expires_at` — an RP learns "this agent's owner is
+ * verified", a boolean fact, and never who the owner is or when they verified.
+ * `parent_sub` is an opaque subject: the linkage an auditor needs, and the least
+ * an RP can act on. (ADR-XA-1 O-2 asks whether even that should be withheld.)
+ */
+async function agentClaimsFor(
+  agentSub: string,
+): Promise<AccountClaims | null> {
+  const store = await getAgentStore();
+  // Store down/unset → NOT an agent, so a human UUID still resolves normally.
+  // An agent, by contrast, gets no claims at all rather than being widened to
+  // its owner's tier on a failed lookup (ADR-XA-1 D5.4).
+  if (!store) return null;
+
+  let binding: AgentBinding | null;
+  try {
+    binding = await store.get(agentSub);
+  } catch (err) {
+    console.error('[agent-claims] binding lookup failed — failing closed:', err);
+    return null;
+  }
+  if (!binding) return null;
+
+  // Revoked or expired → identity itself fails closed (acceptance A4).
+  if (!agentCanAct(binding)) {
+    return { sub: agentSub, actor: 'agent', parent_sub: binding.parentSub };
+  }
+
+  // The owner's LIVE verification, re-read on every claims() call, so a lapse or
+  // a revoke that lands after the agent's token was minted takes effect on the
+  // next /userinfo rather than persisting a stale "verified" (ADR-XA-1 D5 / X4).
+  const ownerKyc = await kycClaimFields(binding.parentSub);
+  const ent = await ownerEntitlementForAgent(binding.parentSub, ownerKyc.kyc_status);
+
+  // The agent's OWN counterfactual wallet — never the owner's. `wallet_bound` is
+  // false: no key exists for a predicted address and no contract is deployed
+  // there. On 2026-07-28 the membership treasury funded such an address and the
+  // SALT was lost, which is why any RP that PAYS must require wallet_bound:true.
+  const wallet = predictedWalletForAccount(agentSub);
+
+  return {
+    sub: agentSub,
+    actor: 'agent',
+    parent_sub: binding.parentSub,
+    ...(wallet ? { wallet_address: wallet, wallet_bound: false } : {}),
+    agent_scope: binding.scope,
+    // The owner's status as a bare fact — no dates, which would narrow toward
+    // identifying the human.
+    kyc_status: ownerKyc.kyc_status,
+    ...(ent ? { [ENTITLEMENT_CLAIM]: ent } : {}),
+    // Present ONLY when spending authority is actually live, so an RP cannot read
+    // a dormant delegation block as authority (ADR-XA-1 D1).
+    ...(agentCanSpend(binding)
+      ? {
+          agent_delegation: {
+            enabled: true,
+            spendCapWei: binding.delegation.spendCapWei,
+            sessionKeyAddr: binding.delegation.sessionKeyAddr,
+            expiry: binding.expiry,
+          },
+        }
+      : {}),
+  };
+}
+
+/**
  * Account resolver — both SIWE (wallet-bound) and password / WebAuthn
  * (user-UUID-bound).
  *
@@ -795,6 +914,15 @@ export const findAccount: FindAccount = (_ctx, sub): Account => {
         // remains the standard `amr` claim. KYC is not yet keyed on
         // UUIDs (the vendor attaches verification to a wallet).
         const rec = await getUserStore().findById(accountId);
+        // ADR-XA-1 D2: agent subjects are opaque UUIDs, indistinguishable in SHAPE
+        // from human ones — the authoritative signal is the `actor` claim, never
+        // the subject's form. They are told apart by lookup, and this is the cheap
+        // place to do it: an agent has no `users` row, so `rec` is null and only
+        // then do we consult the KYA store. Humans pay ZERO extra lookups.
+        if (!rec) {
+          const agent = await agentClaimsFor(accountId);
+          if (agent) return agent;
+        }
         // A BOUND wallet is one whose control the member PROVED (the identity↔wallet
         // registry's EIP-191 challenge). A predicted one is the counterfactual
         // CREATE2 smart-wallet address — well-formed, but no private key exists for
@@ -1287,13 +1415,13 @@ export async function buildConfiguration(
     // `offline_access` is what turns on the `refresh_token` grant_type in panva
     // (lib/helpers/configuration.js): without a refresh-capable scope the
     // provider rejects a client that declares grant_types: ['…','refresh_token'].
-    scopes: ['openid', 'profile', 'wallet', 'kyc', 'offline_access'],
+    scopes: ['openid', 'profile', 'wallet', 'kyc', 'agent', 'offline_access'],
     claims: {
       // `https://citrate.ai/entitlement` rides under `openid` (always granted) so
       // every RP gets the centralized access tier in the id_token without having
       // to request an extra scope. Minted only when the principal is on the
       // entitlements roster; absent otherwise (RP falls back to Public).
-      openid: ['sub', ENTITLEMENT_CLAIM],
+      openid: ['sub', ENTITLEMENT_CLAIM, 'actor', 'parent_sub'],
       profile: ['name', 'email', 'email_verified'],
       // Citrate extension: canonical wallet + linked wallets + the most
       // recent signing method, surfaced under the `wallet` scope (EW-S1
@@ -1305,6 +1433,13 @@ export async function buildConfiguration(
       // CURRENT record (revocation/expiry), not a stale token snapshot. Record
       // holds NO PII — only status + dates (vendor holds PII; ADR-2026-06-03).
       kyc: ['kyc_status', 'kyc_verified_at', 'kyc_expires_at'],
+      // ADR-XA-1: first-class agent identity. `actor` and `parent_sub` ride under
+      // `openid` below rather than here, because an RP must be able to tell an
+      // agent from a human WITHOUT opting into an extra scope — a delegated actor
+      // that looks human unless you asked the right question is the failure mode
+      // this whole ADR exists to remove. The `agent` scope carries only the
+      // DETAIL an RP needs once it knows: granted scope + the delegation bound.
+      agent: ['agent_scope', 'agent_delegation'],
     },
     cookies: {
       // Keys for signing/verifying interaction + session cookies so tampered
