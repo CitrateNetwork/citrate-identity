@@ -26,14 +26,27 @@ const B = '0x' + 'b2'.repeat(20);
  * UNIQUE(address) constraint — rather than pretending to be a database.
  */
 class FakePg implements PgLike {
-  rows: Array<{ seq: number; sub: string; address: string; linked_at: string }> = [];
+  rows: Array<{
+    seq: number;
+    sub: string;
+    address: string;
+    linked_at: string;
+    is_canonical: boolean;
+  }> = [];
   private seq = 0;
 
   async query(text: string, values: unknown[] = []) {
     const t = text.replace(/\s+/g, ' ').trim();
 
     if (t.startsWith('SELECT 1 FROM information_schema.tables')) return { rows: [{ x: 1 }] };
-    if (t.startsWith('CREATE TABLE') || t.startsWith('CREATE INDEX')) return { rows: [] };
+    if (
+      t.startsWith('CREATE TABLE') ||
+      t.startsWith('CREATE INDEX') ||
+      t.startsWith('CREATE UNIQUE INDEX') ||
+      t.startsWith('ALTER TABLE')
+    ) {
+      return { rows: [] };
+    }
 
     if (t.startsWith('SELECT seq, address, linked_at FROM linked_wallets WHERE sub = $1 AND address = $2')) {
       return { rows: this.rows.filter((r) => r.sub === values[0] && r.address === values[1]) };
@@ -47,7 +60,13 @@ class FakePg implements PgLike {
     if (t.startsWith('INSERT INTO linked_wallets')) {
       const [sub, address] = values as [string, string];
       if (this.rows.some((r) => r.address === address)) throw new Error('unique violation');
-      const row = { seq: ++this.seq, sub, address, linked_at: new Date(this.seq * 1000).toISOString() };
+      const row = {
+        seq: ++this.seq,
+        sub,
+        address,
+        linked_at: new Date(this.seq * 1000).toISOString(),
+        is_canonical: false,
+      };
       this.rows.push(row);
       return { rows: [row] };
     }
@@ -58,9 +77,26 @@ class FakePg implements PgLike {
     if (t.startsWith('SELECT seq, address, linked_at FROM linked_wallets WHERE sub = $1 ORDER BY seq ASC')) {
       return { rows: this.rows.filter((r) => r.sub === values[0]).sort((x, y) => x.seq - y.seq) };
     }
-    if (t.startsWith('SELECT address FROM linked_wallets WHERE sub = $1 ORDER BY seq ASC LIMIT 1')) {
-      const mine = this.rows.filter((r) => r.sub === values[0]).sort((x, y) => x.seq - y.seq);
+    if (
+      t.startsWith(
+        'SELECT address FROM linked_wallets WHERE sub = $1 ORDER BY is_canonical DESC, seq ASC LIMIT 1',
+      )
+    ) {
+      // Models the real ORDER BY: an explicit choice outranks first-linked.
+      const mine = this.rows
+        .filter((r) => r.sub === values[0])
+        .sort((x, y) => Number(y.is_canonical) - Number(x.is_canonical) || x.seq - y.seq);
       return { rows: mine.length ? [mine[0]!] : [] };
+    }
+    if (t.startsWith('UPDATE linked_wallets SET is_canonical = (address = $2)')) {
+      const [sub, addr] = values as [string, string];
+      // The real statement's EXISTS guard: no row for (sub,address) => no rows
+      // updated => the store throws. Model it, or the "refuses an unlinked
+      // wallet" property is not actually under test here.
+      if (!this.rows.some((r) => r.sub === sub && r.address === addr)) return { rows: [] };
+      const touched = this.rows.filter((r) => r.sub === sub);
+      for (const r of touched) r.is_canonical = r.address === addr;
+      return { rows: touched.map((r) => ({ address: r.address })) };
     }
     throw new Error('unhandled SQL in FakePg: ' + t);
   }
@@ -158,3 +194,55 @@ describe('PgWalletRegistry — the guards hold across restarts too', () => {
     await expect(reg.link('sub-1', B)).rejects.toBeInstanceOf(WalletRegistryError);
   });
 });
+
+describe('PgWalletRegistry — explicit canonical rebinding', () => {
+  beforeEach(async () => {
+    pg = new FakePg();
+    reg = new PgWalletRegistry(pg);
+    await reg.ensureSchema();
+  });
+
+  it('keeps first-linked canonical until asked otherwise', async () => {
+    await reg.link('s1', A);
+    await reg.link('s1', B);
+    expect(await reg.canonicalFor('s1')).toBe(A);
+  });
+
+  it('promotes an already-linked wallet, durably', async () => {
+    await reg.link('s1', A);
+    await reg.link('s1', B);
+    await reg.setCanonical('s1', B);
+    expect(await reg.canonicalFor('s1')).toBe(B);
+
+    // Survives a "restart": a fresh store over the SAME rows must agree, which
+    // is the whole point of moving the override into the table rather than
+    // holding it in process memory (the bug this file exists for).
+    const restarted = new PgWalletRegistry(pg);
+    expect(await restarted.canonicalFor('s1')).toBe(B);
+  });
+
+  it('refuses a wallet that is not linked to the sub', async () => {
+    await reg.link('s1', A);
+    await expect(reg.setCanonical('s1', B)).rejects.toBeInstanceOf(WalletRegistryError);
+    expect(await reg.canonicalFor('s1')).toBe(A);
+  });
+
+  it('never leaves two canonical rows for one sub', async () => {
+    await reg.link('s1', A);
+    await reg.link('s1', B);
+    await reg.setCanonical('s1', B);
+    await reg.setCanonical('s1', A);
+    expect(pg.rows.filter((r) => r.sub === 's1' && r.is_canonical)).toHaveLength(1);
+    expect(await reg.canonicalFor('s1')).toBe(A);
+  });
+
+  it('list() reflects the override', async () => {
+    await reg.link('s1', A);
+    await reg.link('s1', B);
+    await reg.setCanonical('s1', B);
+    const wallets = await reg.list('s1');
+    expect(wallets.find((w) => w.address === B)?.canonical).toBe(true);
+    expect(wallets.filter((w) => w.canonical)).toHaveLength(1);
+  });
+});
+

@@ -54,8 +54,26 @@ export interface WalletRegistry {
   link(sub: string, address: string): Promise<LinkedWallet>;
   unlink(sub: string, address: string): Promise<void>;
   list(sub: string): Promise<LinkedWallet[]>;
-  /** The settlement-attribution wallet (first linked), if any. */
+  /** The settlement-attribution wallet, if any. See {@link setCanonical}. */
   canonicalFor(sub: string): Promise<string | null>;
+  /**
+   * Make an ALREADY-LINKED wallet the canonical one for `sub`.
+   *
+   * Canonical defaults to FIRST-linked (the ADR rule) precisely so a restart or
+   * a stray second link can never silently move a member's pay-to address. That
+   * default is correct and stays. What it lacked was any deliberate way OUT: a
+   * member whose device custody vault is replaced links a new wallet, the claim
+   * stays pinned to the old one, and the desktop — which requires
+   * `wallet_address == this device's custody address` — blocks forever with no
+   * error anywhere. Observed live 2026-08-04 on sub a22d6f95.
+   *
+   * So rebinding is explicit, authenticated, and narrow: `address` MUST already
+   * be a proven link for THIS `sub`. It cannot introduce an address, only choose
+   * among ones already proven — the promotion can never outrun the proof.
+   *
+   * Throws {@link WalletRegistryError} if the wallet is not linked to `sub`.
+   */
+  setCanonical(sub: string, address: string): Promise<void>;
 }
 
 // ── in-memory implementation (dev/test; Postgres impl mirrors it) ────
@@ -70,6 +88,8 @@ interface Row {
 export class InMemoryWalletRegistry implements WalletRegistry {
   private rows: Row[] = [];
   private seq = 0;
+  /** sub → explicitly chosen canonical address (lowercase). Absent = first-linked. */
+  private canonicalOverride = new Map<string, string>();
 
   async link(sub: string, address: string): Promise<LinkedWallet> {
     const addr = address.toLowerCase();
@@ -93,28 +113,50 @@ export class InMemoryWalletRegistry implements WalletRegistry {
     return this.toLinked(row);
   }
 
-  async unlink(sub: string, address: string): Promise<void> {
-    const addr = address.toLowerCase();
-    this.rows = this.rows.filter((r) => !(r.sub === sub && r.address === addr));
-  }
-
   async list(sub: string): Promise<LinkedWallet[]> {
-    return this.rows
-      .filter((r) => r.sub === sub)
-      .sort((a, b) => a.seq - b.seq)
-      .map((r, i) => ({ address: r.address, canonical: i === 0, linkedAt: r.linkedAt }));
+    const mine = this.rows.filter((r) => r.sub === sub).sort((a, b) => a.seq - b.seq);
+    const canonical = this.resolveCanonical(sub, mine);
+    return mine.map((r) => ({
+      address: r.address,
+      canonical: r.address === canonical,
+      linkedAt: r.linkedAt,
+    }));
   }
 
   async canonicalFor(sub: string): Promise<string | null> {
-    const list = await this.list(sub);
-    return list[0]?.address ?? null;
+    const mine = this.rows.filter((r) => r.sub === sub).sort((a, b) => a.seq - b.seq);
+    return this.resolveCanonical(sub, mine);
+  }
+
+  async setCanonical(sub: string, address: string): Promise<void> {
+    const addr = address.toLowerCase();
+    const owned = this.rows.some((r) => r.sub === sub && r.address === addr);
+    if (!owned) {
+      throw new WalletRegistryError('wallet is not linked to this identity');
+    }
+    this.canonicalOverride.set(sub, addr);
+  }
+
+  async unlink(sub: string, address: string): Promise<void> {
+    const addr = address.toLowerCase();
+    this.rows = this.rows.filter((r) => !(r.sub === sub && r.address === addr));
+    // Drop a dangling override so canonical falls back to first-linked rather
+    // than pointing at a wallet that is no longer proven.
+    if (this.canonicalOverride.get(sub) === addr) this.canonicalOverride.delete(sub);
+  }
+
+  /** Explicit choice wins; otherwise first-linked (the ADR default). */
+  private resolveCanonical(sub: string, ordered: Row[]): string | null {
+    const chosen = this.canonicalOverride.get(sub);
+    if (chosen && ordered.some((r) => r.address === chosen)) return chosen;
+    return ordered[0]?.address ?? null;
   }
 
   private toLinked(row: Row): LinkedWallet {
     const mine = this.rows.filter((r) => r.sub === row.sub).sort((a, b) => a.seq - b.seq);
     return {
       address: row.address,
-      canonical: mine[0]?.address === row.address,
+      canonical: this.resolveCanonical(row.sub, mine) === row.address,
       linkedAt: row.linkedAt,
     };
   }
@@ -310,6 +352,49 @@ export function mountIdentityRegistryRoutes(
     if (ctx.method === 'GET' && tail === undefined) {
       const wallets = await getWalletRegistry().list(sub);
       respond(ctx, 200, { sub, wallets: wallets.map(serialize) });
+      return;
+    }
+
+    // POST /identity/:sub/wallets/:address/canonical → make it the pay-to wallet
+    //
+    // Canonical defaults to FIRST-linked so a restart or a stray second link can
+    // never silently move a member's pay-to address. That default is right and
+    // stays; this is the deliberate way out of it. A member whose device custody
+    // vault is replaced links a new wallet, and without this the claim stays
+    // pinned to the old one while the desktop — which requires
+    // `wallet_address == this device's custody address` — blocks forever with no
+    // error anywhere (observed live 2026-08-04, sub a22d6f95).
+    //
+    // Narrow by construction: same-sub bearer is already enforced above, and
+    // `setCanonical` refuses any address not already PROVEN for this sub. So the
+    // promotion can never outrun the proof — it only re-orders wallets whose
+    // ownership was established by the EIP-191 challenge.
+    if (ctx.method === 'POST' && tail !== undefined && tail.endsWith('/canonical')) {
+      const raw = tail.slice(0, -'/canonical'.length);
+      if (!isAddress(raw)) {
+        respond(ctx, 400, { error: 'invalid_request', reason: 'path address malformed' });
+        return;
+      }
+      try {
+        await getWalletRegistry().setCanonical(sub, raw);
+      } catch (err) {
+        if (err instanceof WalletRegistryError) {
+          respond(ctx, 409, { error: 'conflict', reason: err.message });
+          return;
+        }
+        throw err;
+      }
+      // Unlike the link path, a hook failure here is NOT cosmetic: the whole
+      // point of the call is to move the claim, so a swallowed failure would
+      // report success while leaving the member exactly as blocked. It is still
+      // logged-not-thrown inside `announceCanonical` (the registry write is
+      // already durable), so re-read and tell the caller what actually landed.
+      await announceCanonical(sub);
+      const canonical = await getWalletRegistry().canonicalFor(sub);
+      respond(ctx, 200, {
+        ok: true,
+        canonical: canonical ? getAddress(canonical) : null,
+      });
       return;
     }
 

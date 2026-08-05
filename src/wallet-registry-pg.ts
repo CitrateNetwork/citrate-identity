@@ -57,6 +57,25 @@ const CREATE_TABLE_SQL = `
 const CREATE_INDEX_SQL = `
   CREATE INDEX IF NOT EXISTS linked_wallets_sub_seq_idx ON linked_wallets (sub, seq)`;
 
+/**
+ * Explicit canonical override (2026-08-04). Additive and default-FALSE, so every
+ * existing row keeps first-linked semantics until someone deliberately rebinds.
+ *
+ * `ADD COLUMN IF NOT EXISTS` because this repo has no migrations directory —
+ * schema is `CREATE TABLE IF NOT EXISTS` executed at boot, so an ALTER is how an
+ * already-deployed table gains a column.
+ */
+const ADD_CANONICAL_COLUMN_SQL = `
+  ALTER TABLE linked_wallets ADD COLUMN IF NOT EXISTS is_canonical BOOLEAN NOT NULL DEFAULT FALSE`;
+
+/**
+ * At most ONE explicit canonical per sub, enforced by the DB rather than by a
+ * read-then-write race. Partial index: rows with FALSE are unconstrained.
+ */
+const CREATE_CANONICAL_UNIQUE_SQL = `
+  CREATE UNIQUE INDEX IF NOT EXISTS linked_wallets_one_canonical_per_sub
+    ON linked_wallets (sub) WHERE is_canonical`;
+
 /** Mirrors InMemoryWalletRegistry's cap so behaviour does not change with backing. */
 const MAX_WALLETS_PER_SUB = 10;
 
@@ -77,6 +96,8 @@ export class PgWalletRegistry implements WalletRegistry {
       await this.pool.query(CREATE_TABLE_SQL);
     }
     await this.pool.query(CREATE_INDEX_SQL);
+    await this.pool.query(ADD_CANONICAL_COLUMN_SQL);
+    await this.pool.query(CREATE_CANONICAL_UNIQUE_SQL);
   }
 
   async link(sub: string, address: string): Promise<LinkedWallet> {
@@ -131,19 +152,50 @@ export class PgWalletRegistry implements WalletRegistry {
       'SELECT seq, address, linked_at FROM linked_wallets WHERE sub = $1 ORDER BY seq ASC',
       [sub],
     );
-    return res.rows.map((r, i) => ({
+    // `i === 0` (first linked) was correct only while canonical was implicit.
+    // With an explicit override it would report the WRONG wallet as canonical to
+    // every client that lists — including the desktop, which decides whether the
+    // member is blocked from that flag. Resolve through the same single source
+    // of truth the claim uses.
+    const canonical = await this.canonicalFor(sub);
+    return res.rows.map((r) => ({
       address: String(r.address),
-      canonical: i === 0, // first linked, by monotonic seq
+      canonical: String(r.address) === canonical,
       linkedAt: new Date(String(r.linked_at)),
     }));
   }
 
   async canonicalFor(sub: string): Promise<string | null> {
+    // `is_canonical DESC` puts a deliberate choice first; `seq ASC` is the ADR
+    // default when none was made. One query, so the two rules can never
+    // disagree between reads.
     const res = await this.pool.query(
-      'SELECT address FROM linked_wallets WHERE sub = $1 ORDER BY seq ASC LIMIT 1',
+      'SELECT address FROM linked_wallets WHERE sub = $1 ORDER BY is_canonical DESC, seq ASC LIMIT 1',
       [sub],
     );
     return res.rows.length > 0 ? String(res.rows[0]!.address) : null;
+  }
+
+  async setCanonical(sub: string, address: string): Promise<void> {
+    const addr = address.toLowerCase();
+    // Clear-then-set in ONE statement so the partial unique index is never
+    // transiently violated and no window exists where a sub has zero or two
+    // canonical rows. `owned` gates on the (sub,address) pair, so this can only
+    // ever choose among wallets already PROVEN for this identity.
+    // RETURNING rather than rowCount: the PgLike seam this class is written
+    // against exposes only `{ rows }`, so an affected-row count is not available
+    // and "did anything match" has to come back as data.
+    const res = await this.pool.query(
+      `UPDATE linked_wallets
+          SET is_canonical = (address = $2)
+        WHERE sub = $1
+          AND EXISTS (SELECT 1 FROM linked_wallets WHERE sub = $1 AND address = $2)
+        RETURNING address`,
+      [sub, addr],
+    );
+    if (res.rows.length === 0) {
+      throw new WalletRegistryError('wallet is not linked to this identity');
+    }
   }
 
   private rowToLinked(row: Record<string, unknown>, canonical: string | null): LinkedWallet {
