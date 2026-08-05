@@ -5,13 +5,32 @@
  * core-membership orchestrator cannot make from Vercel (key NEVER on Vercel).
  *
  * Implements the membership team's API contract (handoffs/PHASE_D_DGX_OPERATOR_HANDOFF
- * appendix 2026-07-15). ONE endpoint does BOTH legs, idempotent by orderId +
+ * appendix 2026-07-15). ONE endpoint does the legs, idempotent by orderId +
  * on-chain guards; the service hashes the raw sub itself and clamps the amount.
+ *
+ * ## Staking model (bond-clone — canonical, owner decision 2026-08-05)
+ * This REVERSES ADR-2026-07-27 (EOA-direct self-bond). The 32k does NOT go to the
+ * member's EOA. It is placed into the member's per-member `MemberBond` clone via
+ * `MembershipStakeVault.grant(member, amount, memberTokenId)` (payable; the clone is
+ * deployed + funded in that one call). The clone — not the member — later becomes the
+ * `ValidatorRegistry` staker when the member calls `MemberBond.activate(pubkey, sig)`
+ * app-side once their node is synced. This structurally avoids the permanent
+ * `StakerHasValidator()` lock the old EOA path hit, and keeps the principal in a
+ * real, member-only-withdrawable contract rather than an unspendable predicted EOA.
+ * See .agentile/sprints/active/sprint-validator-bond-clone (citrate-core) WI-1.
+ *
+ * Legs (leg order flipped — grant needs the SBT tokenId, so mint first):
+ *   1. sbt.mintMember(member, subHash, termStart, termEnd)  — skip if sub already bound.
+ *   2. vault.grant{value: amount}(member, amount, memberTokenId) — deploy + FUND the
+ *      MemberBond clone. Skip if the clone already has code (`BondExists`).
+ *   3. gas top-up: native SALT to the member EOA so it can pay for its own
+ *      `MemberBond.activate` tx (the clone is `onlyMember`, sent FROM the EOA). This
+ *      is GAS ONLY (GAS_HEADROOM) — never the bond, which already lives in the clone.
  *
  * Security posture (@rule8):
  *   - Signing key only in this process env (TREASURY_SIGNER_KEY), on an operator
  *     droplet, never in the repo/Vercel. Bearer auth on every call.
- *   - Hard allowlist: only the two pinned contracts + the two grant selectors.
+ *   - Hard allowlist: only the two pinned contracts (vault + sbt).
  *   - amountWei CLAMPED to TREASURY_GRANT_WEI (never trust the caller).
  *   - Per-UTC-day SALT cap + orderId idempotency ledger, persisted to disk.
  *   - Signs → broadcasts → waits for inclusion → returns the REAL hash. Never a
@@ -22,8 +41,8 @@
  *   POST /grant   (Authorization: Bearer <TREASURY_SIGNER_TOKEN>)
  *     body { orderId, sub, member, amountWei, termStart, termEnd, chainId, contracts:{vault,sbt} }
  *     200  { orderId, fundTxHash|null, vaultTxHash|null, sbtTxHash|null, sbtTokenId|null, status:"granted"|"already_granted" }
- *          (fundTxHash = the ADR-2026-07-27 bond-fund to the member EOA; vaultTxHash stays
- *           null now that Leg 1 funds the EOA instead of vault.grant.)
+ *          (vaultTxHash = the vault.grant that deploys+funds the MemberBond clone;
+ *           fundTxHash  = the gas-only top-up to the member EOA for its activate tx.)
  *     401 auth · 403 cap · 409 orderId in-flight · 422 validation/allowlist · 503 not ready · 5xx broadcast
  */
 import { createServer } from "node:http";
@@ -62,18 +81,12 @@ function authorized(header) {
 }
 const GRANT_WEI = BigInt(process.env.TREASURY_GRANT_WEI ?? String(32_000n * 10n ** 18n)); // policy grant / clamp ceiling
 const DAILY_CAP = BigInt(process.env.TREASURY_DAILY_CAP_WEI ?? String(96_000n * 10n ** 18n));
-// ADR 2026-07-27 (membership = validator): the member SELF-BONDS by calling
-// ValidatorRegistry.registerValidator{value: 32k}(pubkey, sig) from their own EOA,
-// so the treasury must fund that EOA with the bond PLUS a little native SALT for
-// the register tx's gas. GAS_HEADROOM is that gas cushion (default 0.05 SALT).
+// Bond-clone model (2026-08-05): the 32k bond goes INTO the member's MemberBond clone
+// via vault.grant{value: 32k}. The member still sends their own `MemberBond.activate`
+// tx (the clone is onlyMember), which needs a little native SALT for gas. GAS_HEADROOM
+// is that gas-only cushion to the member EOA (default 0.05 SALT). It is NOT the bond.
 const GAS_HEADROOM = BigInt(process.env.TREASURY_GAS_HEADROOM_WEI ?? String(5n * 10n ** 16n));
-// The ValidatorRegistry, read ONLY to answer "has this member already bonded?".
-// See the durability note on Leg 1. Optional: unset degrades to the balance-only
-// check and LOGS that the weaker guard is in force — it never silently downgrades.
-const REGISTRY = (process.env.CITRATE_VALIDATOR_REGISTRY_ADDRESS ?? "").trim()
-  ? getAddress(process.env.CITRATE_VALIDATOR_REGISTRY_ADDRESS.trim())
-  : null;
-const ZERO32 = "0x" + "00".repeat(32);
+const ZERO_BYTECODE = "0x";
 const PORT = Number(process.env.PORT ?? "8790");
 const STATE_FILE = process.env.TREASURY_STATE_FILE ?? "/var/lib/citrate-treasury-signer/state.json";
 
@@ -83,18 +96,19 @@ const publicClient = createPublicClient({ chain, transport: http(RPC_URL) });
 const walletClient = createWalletClient({ account, chain, transport: http(RPC_URL) });
 
 const VAULT_ABI = [
-  { type: "function", name: "grant", stateMutability: "payable", inputs: [{ name: "member", type: "address" }, { name: "amount", type: "uint256" }], outputs: [{ name: "grantId", type: "uint256" }] },
-  { type: "function", name: "attributedShares", stateMutability: "view", inputs: [{ name: "", type: "address" }], outputs: [{ name: "", type: "uint256" }] },
-];
-// One active binding per staker (`ValidatorRegistry.pubkeyOfStaker`). Non-zero
-// means this address has ALREADY registered a validator — the registry itself
-// reverts StakerHasValidator on a second attempt.
-const REGISTRY_ABI = [
-  { type: "function", name: "pubkeyOfStaker", stateMutability: "view", inputs: [{ name: "", type: "address" }], outputs: [{ name: "", type: "bytes32" }] },
+  // Bond-clone grant: payable, msg.value == amount, deploys + funds the member's
+  // MemberBond clone (does NOT stake — MemberBond.activate does, member-side).
+  { type: "function", name: "grant", stateMutability: "payable", inputs: [{ name: "member", type: "address" }, { name: "amount", type: "uint256" }, { name: "memberTokenId", type: "uint256" }], outputs: [{ name: "grantId", type: "uint256" }] },
+  // Predicted (CREATE2) address of the member's bond clone. Non-empty code at this
+  // address == the clone is deployed == already granted (the durable idempotency guard).
+  { type: "function", name: "bondOf", stateMutability: "view", inputs: [{ name: "member", type: "address" }], outputs: [{ name: "", type: "address" }] },
 ];
 const SBT_ABI = [
   { type: "function", name: "mintMember", stateMutability: "nonpayable", inputs: [{ name: "to", type: "address" }, { name: "subHash", type: "bytes32" }, { name: "termStart", type: "uint64" }, { name: "termEnd", type: "uint64" }], outputs: [{ name: "tokenId", type: "uint256" }] },
   { type: "function", name: "isSubBound", stateMutability: "view", inputs: [{ name: "subHash", type: "bytes32" }], outputs: [{ name: "", type: "bool" }] },
+  // Look up the tokenId bound to a subHash (reverts UnknownSub for unbound). Used on a
+  // retry where the SBT was already minted so we can still pass grant's memberTokenId.
+  { type: "function", name: "tokenIdForSub", stateMutability: "view", inputs: [{ name: "subHash", type: "bytes32" }], outputs: [{ name: "", type: "uint256" }] },
 ];
 const TRANSFER_TOPIC = toEventSelector("Transfer(address,address,uint256)");
 
@@ -104,6 +118,12 @@ function saveState(s) { mkdirSync(dirname(STATE_FILE), { recursive: true }); wri
 let state = loadState();
 const utcDay = () => new Date().toISOString().slice(0, 10);
 function rollDay() { const d = utcDay(); if (state.day !== d) { state.day = d; state.spentToday = "0"; saveState(state); } }
+// Charge `wei` against the per-UTC-day cap, or throw 403. Callers roll the day first.
+function chargeDailyCap(wei) {
+  const spent = BigInt(state.spentToday);
+  if (spent + wei > DAILY_CAP) throw new HttpError(403, `daily cap exceeded: ${spent + wei} > ${DAILY_CAP}`);
+  state.spentToday = String(spent + wei); saveState(state);
+}
 
 function json(res, code, obj) { const b = JSON.stringify(obj); res.writeHead(code, { "content-type": "application/json", "content-length": Buffer.byteLength(b) }); res.end(b); }
 function readBody(req) { return new Promise((resolve, reject) => { let b = "", n = 0; req.on("data", (c) => { n += c.length; if (n > 16_384) { reject(new Error("body too large")); req.destroy(); } b += c; }); req.on("end", () => resolve(b)); req.on("error", reject); }); }
@@ -136,45 +156,8 @@ async function handleGrant(body) {
     const subHash = keccak256(toHex(sub));
     let fundTxHash = null, vaultTxHash = null, sbtTxHash = null, sbtTokenId = null;
 
-    // ---- Leg 1: BOND-FUND (ADR 2026-07-27, membership = validator) ----
-    // REPLACES the old vault.grant. Native-transfer the bond (+ gas headroom) to
-    // the member's OWN EOA so it can self-bond via
-    // ValidatorRegistry.registerValidator{value: 32k}(pubkey, sig). The stake then
-    // lives in the ValidatorRegistry (bonded, slashable), not the MembershipStakeVault.
-    // IDEMPOTENCY, AND WHY THE BALANCE ALONE IS NOT ENOUGH.
-    // The obvious check — "skip if the EOA already holds >= the bond" — is a signal
-    // CONSUMED BY ITS OWN SUCCESS: the member spends exactly that balance to
-    // self-bond, so a funded-and-bonded member reads as unfunded. The window is
-    // real: fund succeeds -> sbt.mintMember fails -> the catch below DELETES the
-    // orderId record so the order stays re-triable -> the member bonds in the
-    // meantime -> the retry sees a ~0 balance and sends a SECOND 32,000 SALT.
-    //
-    // So we ask the durable question first: has this address already registered a
-    // validator? `pubkeyOfStaker` is non-zero for the life of the binding and does
-    // not drain when the bond is paid — and the registry enforces one validator per
-    // staker (StakerHasValidator), so a bonded member can never need funding again.
-    // Balance stays as the second condition, covering the funded-but-not-yet-bonded
-    // member. Both must say "needs funding" before any SALT moves.
-    let alreadyBonded = false;
-    if (REGISTRY) {
-      const pk = await publicClient.readContract({ address: REGISTRY, abi: REGISTRY_ABI, functionName: "pubkeyOfStaker", args: [m] });
-      alreadyBonded = pk !== ZERO32;
-    }
-    const bal = await publicClient.getBalance({ address: m });
-    if (!alreadyBonded && bal < amount) {
-      rollDay();
-      const target = amount + GAS_HEADROOM;   // fund up to bond + gas for the register tx
-      const topUp = target - bal;             // top up only the shortfall (idempotent w/ partial funding)
-      const spent = BigInt(state.spentToday);
-      if (spent + topUp > DAILY_CAP) throw new HttpError(403, `daily cap exceeded: ${spent + topUp} > ${DAILY_CAP}`);
-      const hash = await walletClient.sendTransaction({ to: m, value: topUp });
-      const rcpt = await publicClient.waitForTransactionReceipt({ hash });
-      if (rcpt.status !== "success") throw new HttpError(502, `bond-fund reverted in ${hash}`);
-      state.spentToday = String(spent + topUp); saveState(state);
-      fundTxHash = hash;
-    }
-
-    // ---- Leg 2: sbt.mintMember (skip if sub already bound) ----
+    // ---- Leg 1: sbt.mintMember (FIRST — vault.grant needs the tokenId) ----
+    // The SBT enforces uniqueness per subHash, so isSubBound is the durable guard.
     const bound = await publicClient.readContract({ address: SBT, abi: SBT_ABI, functionName: "isSubBound", args: [subHash] });
     if (!bound) {
       const data = encodeFunctionData({ abi: SBT_ABI, functionName: "mintMember", args: [m, subHash, ts, te] });
@@ -186,8 +169,50 @@ async function handleGrant(body) {
       const log = rcpt.logs.find((l) => getAddress(l.address) === SBT && l.topics[0] === TRANSFER_TOPIC);
       if (log && log.topics[3]) sbtTokenId = hexToBigInt(log.topics[3]).toString();
     }
+    // Resolve the tokenId whether we just minted or the sub was already bound (retry).
+    // grant reverts NotTheMembersToken() unless sbt.ownerOf(memberTokenId) == member,
+    // so we MUST pass the real token id.
+    if (sbtTokenId == null) {
+      const tid = await publicClient.readContract({ address: SBT, abi: SBT_ABI, functionName: "tokenIdForSub", args: [subHash] });
+      sbtTokenId = tid.toString();
+    }
+    const memberTokenId = BigInt(sbtTokenId);
 
-    const result = { orderId, fundTxHash, vaultTxHash, sbtTxHash, sbtTokenId, status: (fundTxHash || sbtTxHash) ? "granted" : "already_granted" };
+    // ---- Leg 2: vault.grant (deploy + FUND the member's MemberBond clone) ----
+    // The 32k goes into the clone as msg.value; it does NOT stake yet (the member's
+    // own MemberBond.activate does that once the node is synced). Durable idempotency:
+    // bondOf(member) has non-empty code == BondExists == already granted.
+    const bond = await publicClient.readContract({ address: VAULT, abi: VAULT_ABI, functionName: "bondOf", args: [m] });
+    const bondCode = await publicClient.getBytecode({ address: bond });
+    const bondExists = bondCode != null && bondCode !== ZERO_BYTECODE;
+    if (!bondExists) {
+      rollDay();
+      chargeDailyCap(amount);
+      const data = encodeFunctionData({ abi: VAULT_ABI, functionName: "grant", args: [m, amount, memberTokenId] });
+      const hash = await walletClient.sendTransaction({ to: VAULT, data, value: amount });
+      const rcpt = await publicClient.waitForTransactionReceipt({ hash });
+      if (rcpt.status !== "success") throw new HttpError(502, `vault.grant reverted in ${hash}`);
+      vaultTxHash = hash;
+    }
+
+    // ---- Leg 3: gas top-up (member sends MemberBond.activate itself) ----
+    // The clone is onlyMember, so activate is sent FROM the member EOA, which needs a
+    // little native SALT for gas. The 32k already lives in the clone, so this is GAS
+    // ONLY — never the bond. Balance-gated, idempotent, bounded by GAS_HEADROOM.
+    const bal = await publicClient.getBalance({ address: m });
+    if (bal < GAS_HEADROOM) {
+      rollDay();
+      const topUp = GAS_HEADROOM - bal;   // top up only the shortfall
+      chargeDailyCap(topUp);
+      const hash = await walletClient.sendTransaction({ to: m, value: topUp });
+      const rcpt = await publicClient.waitForTransactionReceipt({ hash });
+      if (rcpt.status !== "success") throw new HttpError(502, `gas top-up reverted in ${hash}`);
+      fundTxHash = hash;
+    }
+
+    // "granted" iff a money leg (grant or SBT mint) actually broadcast this call; a
+    // gas-only top-up on an otherwise-complete order is still an idempotent replay.
+    const result = { orderId, fundTxHash, vaultTxHash, sbtTxHash, sbtTokenId, status: (vaultTxHash || sbtTxHash) ? "granted" : "already_granted" };
     state.orders[orderId] = { done: true, result }; saveState(state);
     return result;
   } catch (err) {
@@ -200,12 +225,11 @@ const server = createServer(async (req, res) => {
   try {
     if (req.method === "GET" && req.url === "/health") {
       rollDay();
-      return json(res, 200, { status: "ok", signer: account.address, day: state.day, spentToday: state.spentToday, dailyCap: String(DAILY_CAP), grantWei: String(GRANT_WEI), vault: VAULT, sbt: SBT,
-      // Which idempotency guard is in force. "registry+balance" is the durable
-      // one; "balance-only" means CITRATE_VALIDATOR_REGISTRY_ADDRESS is unset and
-      // a fund->mint-fail->bond->retry could double-fund. Surfaced so the weaker
-      // mode is visible to an operator instead of inferred from a log line.
-      registry: REGISTRY, fundGuard: REGISTRY ? "registry+balance" : "balance-only" });
+      return json(res, 200, { status: "ok", signer: account.address, day: state.day, spentToday: state.spentToday, dailyCap: String(DAILY_CAP), grantWei: String(GRANT_WEI), gasHeadroomWei: String(GAS_HEADROOM), vault: VAULT, sbt: SBT,
+      // Bond-clone model: idempotency for the grant leg is the durable on-chain
+      // BondExists check (bondOf(member) has code), so there is no weaker fallback
+      // mode to surface — the SBT (isSubBound) and bond (code) guards are both durable.
+      model: "bond-clone" });
     }
     if (req.method === "POST" && req.url === "/grant") {
       if (!authorized(req.headers["authorization"])) return json(res, 401, { error: "unauthorized" });
@@ -223,8 +247,5 @@ const server = createServer(async (req, res) => {
 // (127.0.0.1:8790:8790) + Caddy TLS + bearer auth.
 server.listen(PORT, "0.0.0.0", () => {
   // eslint-disable-next-line no-console
-  console.log(`citrate-treasury-signer on :${PORT} signer=${account.address} vault=${VAULT} sbt=${SBT} grantWei=${GRANT_WEI} dailyCap=${DAILY_CAP} registry=${REGISTRY ?? "UNSET"}`);
-if (!REGISTRY) {
-  console.warn("[treasury-signer] CITRATE_VALIDATOR_REGISTRY_ADDRESS is UNSET — the bond-fund falls back to the BALANCE-ONLY idempotency check, which a member spends when they self-bond. A fund->mint-fail->bond->retry sequence could double-fund. Set it.");
-}
+  console.log(`citrate-treasury-signer on :${PORT} signer=${account.address} vault=${VAULT} sbt=${SBT} grantWei=${GRANT_WEI} dailyCap=${DAILY_CAP} model=bond-clone`);
 });

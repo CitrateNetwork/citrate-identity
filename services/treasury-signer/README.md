@@ -30,24 +30,38 @@ utf8("citrate/treasury-grant-signer/v1"))`, regenerable via
 `CitrateMemberSBT`. On a reroll the reroll runbook re-derives it, re-funds it, and
 redeploys the contracts owned by it — see the reroll master checklist.
 
+## Staking model — bond-clone (canonical, owner decision 2026-08-05)
+The 32k bond does **not** go to the member's EOA (that was ADR-2026-07-27, now
+reversed). It is placed into the member's per-member `MemberBond` clone via
+`MembershipStakeVault.grant(member, amount, memberTokenId){value: amount}`, which
+deploys **and** funds the clone in one call. The clone — not the member — becomes the
+`ValidatorRegistry` staker later, when the member calls `MemberBond.activate(pubkey, sig)`
+app-side once their node is synced. This avoids the permanent `StakerHasValidator()`
+lock the EOA path hit, and keeps the principal in a real, member-only-withdrawable
+contract. See `citrate-core/.agentile/sprints/active/sprint-validator-bond-clone` WI-1.
+
 ## HTTP contract (membership team's Phase-D appendix)
-One endpoint does BOTH `onlyOwner` legs of a membership grant, idempotent by
+One endpoint does the `onlyOwner` legs of a membership grant, idempotent by
 `orderId` and by on-chain state; the service hashes the raw `sub` itself and
 clamps `amountWei` to the policy grant. It never fabricates a hash — a skipped
-leg returns `null`.
+leg returns `null`. The leg order is mint-first because `grant` needs the SBT
+`tokenId` (`ownerOf(memberTokenId) == member`).
 ```
-GET  /health   -> { status, signer, day, spentToday, dailyCap, grantWei, vault, sbt }
+GET  /health   -> { status, signer, day, spentToday, dailyCap, grantWei, gasHeadroomWei, vault, sbt, model }
 POST /grant   (Authorization: Bearer <TREASURY_SIGNER_TOKEN>)
   body: { orderId, sub, member, amountWei, termStart, termEnd, chainId, contracts:{vault,sbt} }
-    leg 1  vault.grant(member, amount){value:amount}   — skipped if attributedShares(member) > 0
-    leg 2  sbt.mintMember(member, keccak256(sub), termStart, termEnd) — skipped if isSubBound(subHash)
-  200 -> { orderId, vaultTxHash|null, sbtTxHash|null, sbtTokenId|null, status:"granted"|"already_granted" }
+    leg 1  sbt.mintMember(member, keccak256(sub), termStart, termEnd) — skipped if isSubBound(subHash)
+    leg 2  vault.grant(member, amount, memberTokenId){value:amount}   — deploy+fund the clone; skipped if bondOf(member) has code (BondExists)
+    leg 3  gas top-up: native SALT to member EOA for its activate tx  — GAS ONLY, skipped if balance >= GAS_HEADROOM
+  200 -> { orderId, fundTxHash|null, vaultTxHash|null, sbtTxHash|null, sbtTokenId|null, status:"granted"|"already_granted" }
   401 bad/absent bearer · 403 daily cap · 409 orderId in-flight · 422 validation/allowlist
   502 broadcast/revert · (503 reserved for not-ready)
 ```
+(`vaultTxHash` = the vault.grant that deploys+funds the clone; `fundTxHash` = the
+gas-only top-up. core-membership validates `vaultTxHash`/`sbtTxHash`/`sbtTokenId`/`status`.)
 Idempotency is layered: a completed `orderId` replays its stored result; an
-in-flight `orderId` gets 409; and even a fresh `orderId` is a no-op per-leg if
-the member is already attributed / the sub already bound (`already_granted`).
+in-flight `orderId` gets 409; and even a fresh `orderId` is a no-op per-leg if the
+clone already exists (`bondOf` has code) / the sub already bound (`already_granted`).
 
 ## Env
 | var | meaning |
@@ -58,8 +72,7 @@ the member is already attributed / the sub already bound (`already_granted`).
 | `CITRATE_RPC_URL` | `https://rpc.citrate.ai` |
 | `CITRATE_CHAIN_ID` | `40204` |
 | `MEMBERSHIP_STAKE_VAULT_ADDRESS` / `CITRATE_MEMBER_SBT_ADDRESS` | pinned contracts |
-| `CITRATE_VALIDATOR_REGISTRY_ADDRESS` | **strongly recommended.** Read-only, to answer "has this member already bonded?" (`pubkeyOfStaker`). Without it the bond-fund falls back to a BALANCE-ONLY idempotency check — and the member *spends* that balance to self-bond, so a fund → SBT-mint-fail → bond → retry sequence can double-fund 32k SALT. `/health` reports `fundGuard: "registry+balance"` vs `"balance-only"` so the weak mode is visible. |
-| `TREASURY_GAS_HEADROOM_WEI` | gas cushion added on top of the bond so the member can pay for their own `registerValidator` tx (default 0.05 SALT) |
+| `TREASURY_GAS_HEADROOM_WEI` | gas-only top-up to the member EOA so it can pay for its own `MemberBond.activate` tx (default 0.05 SALT). This is NOT the bond — the 32k lives in the clone. |
 | `TREASURY_DAILY_CAP_WEI` | per-UTC-day SALT ceiling (default 96k SALT = 3 grants) |
 | `PORT` | default 8790 (bound to 127.0.0.1; Caddy terminates TLS) |
 
