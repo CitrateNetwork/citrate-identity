@@ -961,6 +961,32 @@ export async function buildConfiguration(
         scope: 'openid profile wallet kyc offline_access',
       },
       {
+        // kyc-admin-console — the operator console at /admin/kyc.
+        //
+        // The console authorises off the IdP's OWN session cookie
+        // (`provider.Session.get`), NOT off this client's tokens. But a session
+        // only exists once someone completes a login interaction HERE, and
+        // nothing could start one for the console: it answered an unauthenticated
+        // browser with a JSON 403 and no way forward, so an operator could never
+        // reach it without first signing in to some unrelated app in the same
+        // browser. This client exists purely so the console can bounce a visitor
+        // through a normal authorization flow and land them back with a session.
+        //
+        // Same-origin with the issuer: the only redirect_uri is on the authority
+        // itself, so this client cannot be used to ferry a code anywhere else.
+        // No refresh_token grant — the console holds no long-lived credential and
+        // re-authenticates whenever the IdP session lapses. Authorisation is still
+        // the KYC_ADMIN_SUBS allowlist; logging in proves WHO you are, never that
+        // you may adjudicate.
+        client_id: 'kyc-admin-console',
+        token_endpoint_auth_method: 'none',
+        application_type: 'web',
+        grant_types: ['authorization_code'],
+        response_types: ['code'],
+        redirect_uris: [`${ISSUER_URL}/admin/kyc/callback`],
+        scope: 'openid',
+      },
+      {
         // citrate-dashboard — second first-party relying party (IDP-S5b). Same
         // posture as the explorer: PUBLIC client (no secret), Authorization Code
         // + PKCE (S256, enforced globally below), rotating refresh tokens.

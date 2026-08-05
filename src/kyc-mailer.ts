@@ -133,3 +133,121 @@ export async function sendKycApprovedEmail(to: string): Promise<boolean> {
     return false;
   }
 }
+
+// ── operator alert: a case is waiting for a human ───────────────────────────
+
+/**
+ * Who to alert when a case needs adjudication.
+ *
+ * `KYC_ALERT_EMAIL` (comma-separated). Deliberately NOT derived from
+ * `KYC_ADMIN_SUBS`: those are OIDC subjects, not addresses, and quietly mailing
+ * whatever address happens to sit on an admin's account record is a PII leak
+ * waiting to happen. Alerting is opt-in and explicit.
+ */
+function alertRecipients(): string[] {
+  return (process.env.KYC_ALERT_EMAIL ?? '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+/** True when someone is configured to receive review alerts. */
+export function isKycAlertConfigured(): boolean {
+  return alertRecipients().length > 0 && isMailerConfigured();
+}
+
+function reviewHtml(caseId: string, reasons: string[], consoleUrl: string): string {
+  const why = reasons.length
+    ? `<ul>${reasons.map((r) => `<li>${escapeHtml(r)}</li>`).join('')}</ul>`
+    : '<p>No specific reasons recorded.</p>';
+  return [
+    '<div style="font-family:system-ui,sans-serif;max-width:520px">',
+    '<h2 style="margin:0 0 12px">A KYC case needs your review</h2>',
+    `<p style="margin:0 0 8px"><strong>Case:</strong> <code>${escapeHtml(caseId)}</code></p>`,
+    '<p style="margin:12px 0 4px"><strong>Why it stopped:</strong></p>',
+    why,
+    `<p style="margin:20px 0"><a href="${escapeHtml(consoleUrl)}" `,
+    'style="background:#8ac926;color:#0e1a13;padding:10px 18px;border-radius:6px;',
+    'text-decoration:none;font-weight:600">Open the review console</a></p>',
+    '<p style="color:#666;font-size:12px;margin-top:20px">This case is waiting on a human. ',
+    'No applicant data is included in this email — open the console to review it.</p>',
+    '</div>',
+  ].join('');
+}
+
+/** Minimal HTML escape — these strings are engine-authored, but never trust them into markup. */
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+/**
+ * Tell the operator a case is parked in `pending` and needs adjudication.
+ *
+ * WHY: `needs-review` is a terminal state until a human acts, and nothing
+ * surfaced it. A case could sit indefinitely with the applicant blocked and no
+ * one aware — the console had to be opened on a hunch.
+ *
+ * DELIVERY: direct SMTP only. The `KYC_EMAIL_RELAY_URL` path takes just `{to}`
+ * and renders the fixed *approved* template on the far side, so routing an
+ * operator alert through it would send the applicant's "you're verified" mail to
+ * an admin. Wrong template, wrong meaning, wrong recipient.
+ *
+ * PRIVACY: carries the case id and the engine's reasons — never applicant PII,
+ * never biometrics. The console is where the actual evidence lives, behind the
+ * admin session.
+ *
+ * GRACEFUL: returns false and logs if unconfigured or if the send fails. This is
+ * a notification; it must never block or fail an adjudication decision.
+ */
+export async function sendKycReviewNeededEmail(opts: {
+  caseId: string;
+  reasons?: string[];
+}): Promise<boolean> {
+  const to = alertRecipients();
+  if (to.length === 0) return false;
+
+  const cfg = smtpConfig();
+  const t = await transporter();
+  if (!cfg || !t) {
+    // eslint-disable-next-line no-console
+    console.warn(
+      `[citrate-identity] KYC review alert skipped for ${opts.caseId} — SMTP not configured.`,
+    );
+    return false;
+  }
+
+  const issuer = (process.env.ISSUER_URL ?? 'http://localhost:3000').replace(/\/+$/, '');
+  const consoleUrl = `${issuer}/admin/kyc`;
+  const reasons = opts.reasons ?? [];
+  try {
+    await t.sendMail({
+      from: cfg.from,
+      to: to.join(', '),
+      subject: `[Citrate KYC] Case needs review — ${opts.caseId}`,
+      text: [
+        'A KYC case needs a human decision.',
+        '',
+        `Case:    ${opts.caseId}`,
+        reasons.length ? `Reasons: ${reasons.join('; ')}` : 'Reasons: (none recorded)',
+        '',
+        `Review:  ${consoleUrl}`,
+        '',
+        'No applicant data is included in this email.',
+      ].join('\n'),
+      html: reviewHtml(opts.caseId, reasons, consoleUrl),
+      headers: { 'X-Citrate-Mail': 'kyc-review-needed' },
+    });
+    return true;
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.error(
+      `[citrate-identity] KYC review alert failed for ${opts.caseId}:`,
+      (err as Error).message,
+    );
+    return false;
+  }
+}

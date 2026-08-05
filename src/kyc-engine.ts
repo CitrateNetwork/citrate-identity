@@ -24,6 +24,7 @@ import { createHmac } from 'node:crypto';
 import type { KycCaseStore } from './kyc-cases-pg.js';
 import { openBytes, openField } from './kyc-crypto.js';
 import type { SanctionsScreener, ScreeningResult } from './kyc-screening.js';
+import { sendKycReviewNeededEmail } from './kyc-mailer.js';
 
 export interface LivenessResult {
   /** True only if the frame is a live human AND matches the ID portrait (1:1). */
@@ -154,6 +155,18 @@ export class VerificationEngine {
         ? { verifiedAt: now, expiresAt: now + 365 * 24 * 60 * 60 * 1000, retentionUntil: now + 365 * 24 * 60 * 60 * 1000 }
         : { retentionUntil: now + 365 * 24 * 60 * 60 * 1000 }),
     });
+
+    // A `needs-review` case is TERMINAL until a human acts, and nothing used to
+    // surface that: it could sit indefinitely with the applicant blocked and no
+    // operator aware the queue had grown. Alert on the transition.
+    //
+    // Fire-and-forget, and deliberately NOT awaited into the return path: this
+    // is a notification, and a mail outage must never fail or delay an
+    // adjudication. `sendKycReviewNeededEmail` already swallows its own errors;
+    // the extra catch covers a synchronous throw before the promise exists.
+    if (DECISION_TO_KIND[decision] === 'pending') {
+      void sendKycReviewNeededEmail({ caseId, reasons }).catch(() => {});
+    }
 
     const signedWebhook = this.signDecision({
       caseId,
