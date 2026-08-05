@@ -45,6 +45,13 @@ services:
       # Optional dedicated secret for the server-side /kyc/status re-check; falls
       # back to KYC_WEBHOOK_SECRET when unset (endpoint disabled if both unset).
       KYC_STATUS_SECRET: ${KYC_STATUS_SECRET:-}
+      # Operator alert recipients when a KYC case parks in needs-review
+      # (comma-separated). MUST be listed here: this service has an explicit
+      # `environment:` map and NO env_file, so a var added only to .env never
+      # reaches the container — verified the hard way on 2026-08-05, when the
+      # address was set in .env, the service was recreated, and the alert stayed
+      # silent because nothing passed it through. Unset => alerts off, by design.
+      KYC_ALERT_EMAIL: ${KYC_ALERT_EMAIL:-}
       # American Learning Federation applicant flow. FEDERATION_ORIGIN is the
       # landing origin the alf OIDC client's /alf/callback + KYC return use — it
       # MUST be set to a non-local https origin in prod or assertProductionConfig
