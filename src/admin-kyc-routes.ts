@@ -23,6 +23,8 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { getKycProvider } from './kyc-providers/index.js';
 import { InhouseKycProvider } from './kyc-providers/inhouse.js';
 import { renderAdminKycUI } from './admin-kyc-ui.js';
+import { randomBytes, timingSafeEqual } from 'node:crypto';
+import { ISSUER_URL } from './config.js';
 import { getKycAuditLog } from './kyc-audit-pg.js';
 import { parseAdminSubs } from './aa/bundler-keys.js';
 import type { CaseStatus } from './kyc-cases-pg.js';
@@ -99,8 +101,73 @@ export function mountAdminKycRoutes(provider: Provider): void {
       accountId = undefined;
     }
     const admins = parseAdminSubs(process.env.KYC_ADMIN_SUBS);
+
+    // --- login bounce: give an unauthenticated BROWSER a way in ------------
+    //
+    // The guard below authorises off the IdP's own session cookie. Without one
+    // this route used to answer a JSON 403 — correct for an API client, useless
+    // for a human: there was no link, no redirect, no way to obtain the session
+    // it demands. The console was reachable only by first signing in to some
+    // unrelated app in the same browser and then knowing to navigate here.
+    //
+    // So: a browser (Accept: text/html) with NO session is sent through a normal
+    // authorization flow and lands back here with one. Anything else — an API
+    // client, XHR, curl — still gets the JSON 403, because redirecting a
+    // programmatic caller to an HTML login is its own kind of broken.
+    //
+    // This only ever establishes IDENTITY. Authorisation stays the
+    // KYC_ADMIN_SUBS allowlist below, so a successful login by a non-admin still
+    // ends in 403 — now an honest one, naming the signed-in subject.
+    if (!accountId && ctx.method === 'GET' && wantsHtml(ctx) && isConsolePath(ctx.path)) {
+      const state = randomBytes(32).toString('base64url');
+      // Bind the state to THIS browser: the callback accepts it only if the
+      // cookie matches, so a stray/forged callback cannot drive a redirect.
+      // Host-only, SameSite=Lax (the IdP redirect is a top-level GET), and
+      // scoped to the console path so it is not sent anywhere else.
+      ctx.res.setHeader('set-cookie', [
+        `_kyc_admin_state=${state}; Path=/admin/kyc; HttpOnly; Secure; SameSite=Lax; Max-Age=600`,
+      ]);
+      const authorize = new URL('/auth', ISSUER_URL);
+      authorize.searchParams.set('client_id', 'kyc-admin-console');
+      authorize.searchParams.set('response_type', 'code');
+      authorize.searchParams.set('scope', 'openid');
+      authorize.searchParams.set('redirect_uri', `${ISSUER_URL}/admin/kyc/callback`);
+      authorize.searchParams.set('state', state);
+      ctx.res.writeHead(302, { location: authorize.toString(), 'cache-control': 'no-store' });
+      ctx.res.end();
+      return;
+    }
+
+    // The landing leg. By the time the IdP redirects here the session cookie is
+    // already set, so there is nothing to exchange — the authorization code is
+    // deliberately ignored and left to expire. The console reads the SESSION,
+    // never this client's tokens, so minting them would create a credential with
+    // no consumer. Just verify the state and hand the browser back to the guard.
+    if (ctx.method === 'GET' && ctx.path === '/admin/kyc/callback') {
+      const expected = readCookie(ctx.req.headers.cookie, '_kyc_admin_state');
+      const got = str(ctx.query['state']);
+      const ok = !!expected && !!got && timingSafeEqualStr(expected, got);
+      // Clear the one-shot state either way.
+      ctx.res.setHeader('set-cookie', [
+        '_kyc_admin_state=; Path=/admin/kyc; HttpOnly; Secure; SameSite=Lax; Max-Age=0',
+      ]);
+      if (!ok) {
+        sendJson(ctx.res, 400, { error: 'invalid_state' });
+        return;
+      }
+      ctx.res.writeHead(302, { location: '/admin/kyc', 'cache-control': 'no-store' });
+      ctx.res.end();
+      return;
+    }
+
     if (!accountId || !admins.includes(accountId)) {
-      sendJson(ctx.res, 403, { error: 'forbidden', reason: 'admin session required (KYC_ADMIN_SUBS)' });
+      sendJson(ctx.res, 403, {
+        error: 'forbidden',
+        reason: accountId
+          ? 'signed in, but this subject is not in KYC_ADMIN_SUBS'
+          : 'admin session required (KYC_ADMIN_SUBS)',
+        ...(accountId ? { sub: accountId } : {}),
+      });
       return;
     }
     const actor = accountId;
@@ -194,3 +261,58 @@ export function mountAdminKycRoutes(provider: Provider): void {
     return next();
   });
 }
+
+// ── login-bounce helpers ────────────────────────────────────────────────────
+
+/** Only the console's own GET surfaces get bounced; sub-resources stay JSON. */
+function isConsolePath(path: string): boolean {
+  return path === '/admin/kyc' || path === '/admin/kyc/';
+}
+
+/**
+ * A human's browser, not a programmatic caller.
+ *
+ * Redirecting an API client to an HTML login turns a clean 403 into a confusing
+ * 302, so the bounce is gated on the caller actually asking for HTML. `fetch`
+ * and XHR send a wildcard Accept, which does not contain `text/html`, so a
+ * programmatic caller keeps getting the JSON 403.
+ */
+function wantsHtml(ctx: { req: IncomingMessage }): boolean {
+  const accept = String(ctx.req.headers['accept'] ?? '');
+  return accept.includes('text/html');
+}
+
+/** Read one cookie by name from a Cookie header. */
+function readCookie(header: string | undefined, name: string): string | undefined {
+  if (!header) return undefined;
+  for (const part of header.split(';')) {
+    const [k, ...v] = part.trim().split('=');
+    if (k === name) return v.join('=');
+  }
+  return undefined;
+}
+
+/** Constant-time string compare — the state is a CSRF token, so leak no timing. */
+function timingSafeEqualStr(a: string, b: string): boolean {
+  const ab = Buffer.from(a);
+  const bb = Buffer.from(b);
+  if (ab.length !== bb.length) return false;
+  return timingSafeEqual(ab, bb);
+}
+
+
+/**
+ * Test-only surface for the login-bounce helpers.
+ *
+ * The bounce itself lives inside `provider.use`, which needs a full
+ * oidc-provider to exercise. These are the decision points that carry the
+ * security properties — who gets redirected, which paths bounce, and the
+ * constant-time state compare — so they are exported for direct testing rather
+ * than left implicitly covered.
+ */
+export const __testing = {
+  wantsHtml,
+  isConsolePath,
+  readCookie,
+  timingSafeEqualStr,
+};
