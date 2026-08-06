@@ -21,6 +21,8 @@ import { mountVerifyRoutes } from './verify-routes.js';
 import { mountAdminKycRoutes } from './admin-kyc-routes.js';
 import { mountLogoutRoutes } from './logout-routes.js';
 import { mountAccountRoute } from './account-routes.js';
+import { mountKycHandoffRoute } from './kyc-handoff-routes.js';
+import { createHandoffStore, type HandoffStore } from './handoff-store.js';
 import { mountAdminEntitlementsRoute } from './admin-routes.js';
 import { mountAlfEnrollRoute } from './alf-routes.js';
 import { mountHttpExtras } from './http-extras.js';
@@ -98,6 +100,12 @@ export interface CreateProviderOptions {
    * one explicitly.
    */
   nonceStore?: NonceStore;
+  /**
+   * Hand-off store override (item 2, 2026-08-06). Defaults to a
+   * {@link RedisHandoffStore} when `redis` is provided, else an in-memory store.
+   * Tests pass one explicitly to assert the /kyc/handoff → /kyc/start round-trip.
+   */
+  handoffStore?: HandoffStore;
   /**
    * Override the `/health` Redis probe. Defaults to a round-trip against the
    * `redis` client when one is provided (and omitted entirely otherwise, so the
@@ -248,6 +256,13 @@ export async function createProvider(
     options.nonceStore ??
     (options.redis ? new RedisNonceStore(options.redis) : undefined);
 
+  // Authenticated hand-off store (item 2, 2026-08-06): subject-bound single-use
+  // nonces minted at POST /kyc/handoff and consumed by /kyc/start + /account, so
+  // those surfaces open for the desktop app's subject rather than the browser
+  // cookie's. Redis-backed (one-time across instances) when a client is wired,
+  // else in-memory — the same posture as the SIWE nonce store above.
+  const handoffStore = options.handoffStore ?? createHandoffStore(options.redis);
+
   // WalletConnect: explicit option wins, else the env var. Undefined → the page
   // hides the WalletConnect button (injected still works; not fail-closed).
   const walletConnectProjectId =
@@ -365,7 +380,12 @@ export async function createProvider(
   // interaction whose session carries an accountId. 503 when KYC_PROVIDER is
   // unset (the env init left the singleton undefined). The route reads the
   // active vendor name from KYC_PROVIDER to choose the SDK URL pattern.
-  mountKycStartRoute(provider);
+  mountKycStartRoute(provider, { handoffStore });
+
+  // Item 2 (2026-08-06): POST /kyc/handoff — the desktop app proves who it is with
+  // its access token and gets a subject-bound nonce URL to open in the browser, so
+  // /kyc/start + /account bind to the app's user, not the browser's session.
+  mountKycHandoffRoute(provider, handoffStore);
 
   // COMP-S1: the REAL vendor webhook (Sumsub HMAC over the raw body), distinct
   // from the /kyc/_set bearer stand-in. Verifies via the active KycProvider,
@@ -390,7 +410,7 @@ export async function createProvider(
 
   // AUTHSPINE S1-WP3: the Account Hub (/account) — the universal authenticated
   // surface every RP links to (identity, wallet, KYC status + CTA, access tier).
-  mountAccountRoute(provider);
+  mountAccountRoute(provider, { handoffStore });
 
   // AUTHSPINE S1-WP4: admin entitlement grant API (service-guarded; fail-closed
   // when ENTITLEMENTS_ADMIN_SECRET is unset). Grants/raises higher tiers + roles.

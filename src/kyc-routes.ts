@@ -34,6 +34,7 @@ import { grantKycBaseline } from './entitlements.js';
 import { sendKycApprovedEmail } from './kyc-mailer.js';
 import { getUserStore } from './auth/stores.js';
 import { predictedWalletForAccount } from './aa/wallet-claims.js';
+import type { HandoffStore } from './handoff-store.js';
 
 export interface KycRouteOptions {
   /**
@@ -133,6 +134,15 @@ export interface KycStartRouteOptions {
   vendor?: string;
   /** TTL the WebSDK token is requested with (seconds). Default 600. */
   ttlSec?: number;
+  /**
+   * Authenticated hand-off store (item 2, 2026-08-06). When present, a
+   * `?handoff=<nonce>` on `/kyc/start` is consumed to resolve the acting subject
+   * from the nonce the app minted at `POST /kyc/handoff`, IGNORING the browser
+   * cookie. This is what makes the page open for the app's user rather than for
+   * whichever account the browser happens to hold. Omitted → cookie-only
+   * behaviour, unchanged (no regression for web RPs).
+   */
+  handoffStore?: HandoffStore;
 }
 
 async function readJson(
@@ -595,6 +605,7 @@ export function mountKycStartRoute(
 ): void {
   const vendor = options.vendor ?? process.env.KYC_PROVIDER;
   const ttlSec = options.ttlSec ?? 600;
+  const handoffStore = options.handoffStore;
   const cache = new ApplicantCache();
 
   provider.use(async (ctx, next) => {
@@ -603,18 +614,41 @@ export function mountKycStartRoute(
     const path = ctx.path;
     if (path !== '/kyc/start') return next();
 
+    // --- authenticated hand-off (item 2) ---------------------------------
+    // A `?handoff=<nonce>` means the desktop app proved who it is at
+    // `POST /kyc/handoff` and we minted a subject-bound, single-use nonce. It is
+    // AUTHORITATIVE: resolving the subject from the nonce (and ignoring the
+    // browser cookie) is exactly what stops the page from opening for whichever
+    // account the browser holds. An unknown / replayed / expired nonce fails
+    // closed here — we never fall back to the cookie for a hand-off attempt, or
+    // the misbinding this fixes would reappear on a stale link.
+    let accountId: string | undefined;
+    const handoffNonce = ctx.query['handoff'];
+    if (handoffStore && typeof handoffNonce === 'string' && handoffNonce) {
+      accountId = (await handoffStore.consume(handoffNonce)) ?? undefined;
+      if (!accountId) {
+        sendJson(ctx.res, 401, {
+          error: 'invalid_handoff',
+          reason:
+            'this verification link has expired or was already used — reopen it from the app',
+        });
+        return;
+      }
+    }
+
     // Active interaction is required: this surface lives behind a
     // sign-in flow, exactly like /auth/webauthn/register-options.
     // Resolve the signed-in user from EITHER an active authorize interaction
     // (called mid-flow) OR the post-login auth.citrate.ai session cookie (a
     // standalone top-level GET — how the data room invokes it after its own
     // PKCE login). C.2 of the dataroom hand-off.
-    let accountId: string | undefined;
-    try {
-      const interaction = await provider.interactionDetails(ctx.req, ctx.res);
-      accountId = interaction?.session?.accountId;
-    } catch {
-      // no active interaction — fall through to the session
+    if (!accountId) {
+      try {
+        const interaction = await provider.interactionDetails(ctx.req, ctx.res);
+        accountId = interaction?.session?.accountId;
+      } catch {
+        // no active interaction — fall through to the session
+      }
     }
     if (!accountId) {
       try {
