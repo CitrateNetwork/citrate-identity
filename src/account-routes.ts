@@ -20,6 +20,7 @@ import { getKycStore, effectiveVerified, type KycStatus, type KycClaim } from '.
 import { resolveEntitlementClaim, type EntitlementClaim } from './entitlements.js';
 import { getUserStore } from './auth/stores.js';
 import { predictedWalletForAccount } from './aa/wallet-claims.js';
+import type { HandoffStore } from './handoff-store.js';
 
 function escapeHtml(v: string): string {
   return v
@@ -151,21 +152,50 @@ function renderSignedOut(): string {
 </div></body></html>`;
 }
 
+/** Options for {@link mountAccountRoute}. */
+export interface AccountRouteOptions {
+  /**
+   * Authenticated hand-off store (item 2, 2026-08-06). When present, a
+   * `?handoff=<nonce>` on `/account` resolves the acting subject from the nonce
+   * the app minted at `POST /kyc/handoff`, IGNORING the browser cookie — so
+   * "Manage account" opens the APP's account, not whichever one the browser
+   * holds. Omitted → cookie-only behaviour, unchanged.
+   */
+  handoffStore?: HandoffStore;
+}
+
 /**
- * Mount `GET /account` — the Account Hub. Reads the OIDC session; renders the user's
- * identity, wallet, KYC status (+ Start/Finish CTA), and access tier. Optional
- * `?return_to=<https *.citrate.ai|*.vercel.app>` shows a back-link to the calling app.
+ * Mount `GET /account` — the Account Hub. Reads the OIDC session (or a `?handoff=`
+ * nonce, which wins); renders the user's identity, wallet, KYC status (+
+ * Start/Finish CTA), and access tier. Optional `?return_to=<https
+ * *.citrate.ai|*.vercel.app>` shows a back-link to the calling app.
  */
-export function mountAccountRoute(provider: Provider): void {
+export function mountAccountRoute(
+  provider: Provider,
+  options: AccountRouteOptions = {},
+): void {
+  const handoffStore = options.handoffStore;
   provider.use(async (ctx, next) => {
     if (ctx.method !== 'GET' || ctx.path !== '/account') return next();
 
+    // Authenticated hand-off wins over the cookie (item 2): a single-use,
+    // subject-bound nonce the desktop app minted with its own access token. A
+    // present-but-invalid nonce falls through to the cookie/signed-out render
+    // (this is a read-only page — unlike /kyc/start there is no wrong-account
+    // side effect to guard against, so a stale link simply shows the hub for
+    // whoever the browser is, or the signed-out copy).
     let accountId: string | undefined;
-    try {
-      const session = await provider.Session.get(ctx);
-      accountId = session?.accountId;
-    } catch {
-      accountId = undefined;
+    const handoffNonce = ctx.query['handoff'];
+    if (handoffStore && typeof handoffNonce === 'string' && handoffNonce) {
+      accountId = (await handoffStore.consume(handoffNonce)) ?? undefined;
+    }
+    if (!accountId) {
+      try {
+        const session = await provider.Session.get(ctx);
+        accountId = session?.accountId;
+      } catch {
+        accountId = undefined;
+      }
     }
     if (!accountId) {
       sendHtml(ctx.res, 200, renderSignedOut());
