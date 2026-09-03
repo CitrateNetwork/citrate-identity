@@ -140,7 +140,7 @@ FROM entitlements
 WHERE ($1::text IS NOT NULL AND sub = $1)
    OR ($2::text IS NOT NULL AND lower(wallet) = lower($2))
    OR ($3::text IS NOT NULL AND lower(email) = lower($3))
-ORDER BY (sub = $1) DESC, (lower(wallet) = lower($2)) DESC, created_at DESC
+ORDER BY ((sub = $1) IS TRUE) DESC, ((lower(wallet) = lower($2)) IS TRUE) DESC, created_at DESC
 LIMIT 1`;
 
 export class EntitlementStore {
@@ -252,10 +252,16 @@ export async function resolveEntitlementClaim(
   wallet: string | null,
   email: string | null,
   kycStatus: KycStatus | 'none' | 'expired' | undefined,
+  emailVerified = false,
 ): Promise<EntitlementClaim | null> {
   const store = await getStore();
   if (!store) return null;
-  const ent = await store.lookup(sub, wallet, email);
+  // F-01 (ID-B-001): a self-asserted, UNVERIFIED email must not match any
+  // entitlement grant — neither a tier nor a role. Only a verified email
+  // participates in the lookup; `sub` is authenticated by the IdP and `wallet`
+  // is SIWE-proven. Without this gate, registering a victim's email inherits
+  // their tier and (because role grants bypass the KYC gate) their role.
+  const ent = await store.lookup(sub, wallet, emailVerified === true ? email : null);
   if (!ent) return null;
 
   // Expired engagement → no entitlement (RP resolves Public).

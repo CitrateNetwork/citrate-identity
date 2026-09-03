@@ -218,6 +218,7 @@ export function mountAccountRoute(
       wallet ?? null,
       rec?.email ?? null,
       kyc,
+      rec?.emailVerified ?? false, // F-01: only a verified email matches a grant
     );
     const backLink = validatedBackLink(ctx.query['return_to']);
 

@@ -821,6 +821,7 @@ export const findAccount: FindAccount = (_ctx, sub): Account => {
           wallet ?? null,
           rec?.email ?? null,
           kyc.kyc_status,
+          rec?.emailVerified ?? false, // F-01: only a verified email matches a grant
         );
         return {
           sub: accountId,
