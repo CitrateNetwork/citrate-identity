@@ -375,6 +375,29 @@ export function mountGoogleRoutes(
       return;
     }
 
+    // ID-B-002 (login-CSRF / session fixation): bind the OAuth `state` to the
+    // browser/interaction that began the flow. `/auth/google/start` recorded the
+    // originating `interactionUid` in the state; the cookie on THIS request names
+    // the interaction `interactionResult` would resume. If they differ, someone is
+    // completing THEIR Google login into a VICTIM's in-flight interaction — refuse
+    // before any token exchange. (Mirrors the browser-cookie state binding the
+    // KYC-admin login-bounce already enforces; SIWE/consent use a same-origin guard.)
+    let cbInteraction: Awaited<
+      ReturnType<typeof provider.interactionDetails>
+    > | null = null;
+    try {
+      cbInteraction = await provider.interactionDetails(ctx.req, ctx.res);
+    } catch {
+      cbInteraction = null;
+    }
+    if (!cbInteraction || cbInteraction.uid !== pending.interactionUid) {
+      sendJson(ctx.res, 400, {
+        error: 'invalid_request',
+        reason: 'interaction mismatch',
+      });
+      return;
+    }
+
     // Exchange the authorization code for tokens.
     const tokenBody = new URLSearchParams({
       code,
