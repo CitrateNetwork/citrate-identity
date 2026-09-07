@@ -13,7 +13,8 @@
     "typecheck": "tsc --noEmit",
     "start": "node dist/server.js",
     "rotate-key": "tsx scripts/rotate-jwks.ts",
-    "test": "vitest run"
+    "test": "vitest run",
+    "audit:prod": "npm audit --omit=dev --audit-level=high"
   },
   "dependencies": {
     "@node-rs/argon2": "^2.0.2",

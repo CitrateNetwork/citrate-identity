@@ -258,8 +258,10 @@ describe('branded /interaction/:uid login surface', () => {
     it('renders BOTH connector buttons (injected + WalletConnect)', () => {
       expect(html).toContain('id="signin-injected"');
       expect(html).toContain('id="signin-walletconnect"');
-      // The CDN ESM WalletConnect provider import is present.
-      expect(html).toContain('@walletconnect/ethereum-provider');
+      // The WalletConnect provider is imported SAME-ORIGIN from the self-hosted
+      // vendor bundle — never a third-party CDN (ID-B-004). No esm.sh.
+      expect(html).toContain('/vendor/walletconnect-ethereum-provider.mjs');
+      expect(html).not.toContain('esm.sh');
       // The configured project id is wired into the page config.
       expect(html).toContain('test-wc-project-id');
     });
@@ -292,7 +294,7 @@ describe('branded /interaction/:uid login surface', () => {
 
     it('hides the WalletConnect connector entirely', () => {
       expect(html).not.toContain('id="signin-walletconnect"');
-      expect(html).not.toContain('@walletconnect/ethereum-provider');
+      expect(html).not.toContain('/vendor/walletconnect-ethereum-provider.mjs');
     });
   });
 });

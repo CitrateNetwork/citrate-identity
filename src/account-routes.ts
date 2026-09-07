@@ -36,6 +36,22 @@ function sendHtml(res: ServerResponse, status: number, html: string): void {
     'content-type': 'text/html; charset=utf-8',
     'cache-control': 'no-store',
     'x-content-type-options': 'nosniff',
+    // The Account Hub is pure HTML + inline CSS with NO script of any kind, so
+    // a strict `script-src 'self'` (no nonce, no `'unsafe-inline'`) forbids any
+    // injected or third-party script from executing on the auth origin
+    // (ID-B-004). `frame-ancestors 'none'` blocks clickjacking.
+    'content-security-policy': [
+      "default-src 'self'",
+      "script-src 'self'",
+      "style-src 'self' 'unsafe-inline'",
+      "img-src 'self' data:",
+      "font-src 'self'",
+      "connect-src 'self'",
+      "frame-ancestors 'none'",
+      "base-uri 'none'",
+      "form-action 'self'",
+      "object-src 'none'",
+    ].join('; '),
   });
   res.end(html);
 }

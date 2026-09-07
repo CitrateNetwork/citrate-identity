@@ -52,9 +52,13 @@ const CONTENT_TYPES: Record<string, string> = {
   ico: 'image/x-icon',
   json: 'application/json; charset=utf-8',
   css: 'text/css; charset=utf-8',
+  // Self-hosted browser JS the interaction page loads SAME-ORIGIN instead of
+  // from a third-party CDN (ID-B-004): /vendor/*.mjs.
+  mjs: 'text/javascript; charset=utf-8',
+  js: 'text/javascript; charset=utf-8',
 };
 
-const ALLOWED_PREFIXES = ['/brand/', '/fonts/'];
+const ALLOWED_PREFIXES = ['/brand/', '/fonts/', '/vendor/'];
 
 function safeJoin(root: string, urlPath: string): string | null {
   // Strip leading slash so join doesn't absolutize against root.
