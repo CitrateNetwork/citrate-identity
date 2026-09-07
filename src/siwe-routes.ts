@@ -30,6 +30,7 @@
  * model (`findAccount`), so security checks and claims can never diverge.
  */
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import { randomBytes } from 'node:crypto';
 import { SignJWT, importJWK, type JWK } from 'jose';
 import type Provider from 'oidc-provider';
 import type { Account } from 'oidc-provider';
@@ -125,12 +126,60 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
   res.end(payload);
 }
 
-function sendHtml(res: ServerResponse, status: number, html: string): void {
+function sendHtml(
+  res: ServerResponse,
+  status: number,
+  html: string,
+  extraHeaders?: Record<string, string>,
+): void {
   res.writeHead(status, {
     'content-type': 'text/html; charset=utf-8',
     'cache-control': 'no-store',
+    ...extraHeaders,
   });
   res.end(html);
+}
+
+/**
+ * A random per-response CSP nonce (base64) for the single inline `<script>`
+ * the interaction / consent pages ship, so the page can run under a strict
+ * `script-src 'self' 'nonce-…'` with NO `'unsafe-inline'` and NO off-origin
+ * source (ID-B-004). 128 bits of entropy per RFC-recommended minimum.
+ */
+function cspNonce(): string {
+  return randomBytes(16).toString('base64');
+}
+
+/**
+ * Build the Content-Security-Policy for the credential-entry surfaces. The
+ * whole point (ID-B-004) is that NO third-party origin can execute script on
+ * the auth origin: `script-src` is `'self'` plus the per-response nonce only —
+ * esm.sh (or any CDN) is denied, and the vendored `/vendor/*.mjs` modules load
+ * because they are same-origin. Inline `<style>` is still allowed (no secret
+ * leaks through CSS here) but inline/injected `<script>` without the nonce is
+ * rejected. `frame-ancestors 'none'` blocks clickjacking of the sign-in page.
+ *
+ * When the WalletConnect connector is enabled the page's provider (also
+ * self-hosted, `/vendor/walletconnect-ethereum-provider.mjs`) must still reach
+ * the WalletConnect relay / web3modal API at runtime — those are `connect-src`
+ * (network) endpoints, NOT script sources, so they are allowed there only.
+ */
+function cspHeader(nonce: string, opts?: { walletConnect?: boolean }): string {
+  const connectSrc = opts?.walletConnect
+    ? "connect-src 'self' https://*.walletconnect.org https://*.walletconnect.com https://*.web3modal.org wss://*.walletconnect.org wss://*.walletconnect.com"
+    : "connect-src 'self'";
+  return [
+    "default-src 'self'",
+    `script-src 'self' 'nonce-${nonce}'`,
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data:",
+    "font-src 'self'",
+    connectSrc,
+    "frame-ancestors 'none'",
+    "base-uri 'none'",
+    "form-action 'self'",
+    "object-src 'none'",
+  ].join('; ');
 }
 
 /** Minimal HTML-attribute/text escaping for the values we interpolate. */
@@ -232,6 +281,8 @@ function renderInteractionPage(opts: {
   googleEnabled: boolean;
   /** Footer build-version string. */
   version: string;
+  /** Per-response CSP nonce for the inline `<script>` (ID-B-004). */
+  cspNonce: string;
 }): string {
   // Values that land inside the inline script as JSON literals. The
   // walletConnectProjectId is included only when configured; its presence is
@@ -658,7 +709,7 @@ h1 {
   </div>
 </main>
 
-<script>
+<script nonce="${opts.cspNonce}">
 const CFG = ${cfg};
 const statusEl = document.getElementById('status');
 
@@ -947,13 +998,15 @@ function setSiweBusy(busy) {
 // \`new SiweMessage(...)\` (@spruceid/siwe-parser), which REJECTS a non-checksummed
 // address as a "malformed message". Many wallets (and WalletConnect in particular)
 // return a lowercase address, so we must checksum it before it goes into the
-// signed message. Pure-JS keccak (no bundler / no viem in the page) via esm.sh.
+// signed message. Pure-JS keccak (no bundler / no viem in the page), loaded from
+// the SAME-ORIGIN self-hosted vendor bundle — never a third-party CDN, so a CDN
+// compromise cannot execute script on the auth origin (ID-B-004).
 let _keccak = null;
 async function toChecksumAddress(addr) {
   const a = String(addr).toLowerCase().replace(/^0x/, '');
   if (!/^[0-9a-f]{40}$/.test(a)) return addr; // not an address — leave as-is
   if (!_keccak) {
-    const mod = await import('https://esm.sh/@noble/hashes@1.3.3/sha3');
+    const mod = await import('/vendor/noble-sha3.mjs');
     _keccak = mod.keccak_256;
   }
   const hash = _keccak(new TextEncoder().encode(a)); // keccak256 of the ascii lowercase hex
@@ -1032,7 +1085,7 @@ ${
   setSiweBusy(true);
   try {
     setStatus('Starting WalletConnect…');
-    const { EthereumProvider } = await import('https://esm.sh/@walletconnect/ethereum-provider@2');
+    const { EthereumProvider } = await import('/vendor/walletconnect-ethereum-provider.mjs');
     const wc = await EthereumProvider.init({
       projectId: CFG.walletConnectProjectId,
       chains: [CFG.chainId],
@@ -1081,6 +1134,8 @@ function renderConsentPage(opts: {
   uid: string;
   clientId: string;
   details: ConsentPromptDetails;
+  /** Per-response CSP nonce for the inline `<script>` (ID-B-004). */
+  cspNonce: string;
 }): string {
   const scopes = (opts.details.missingOIDCScope ?? []).join(' ');
   const claims = (opts.details.missingOIDCClaims ?? []).join(', ');
@@ -1105,7 +1160,7 @@ function renderConsentPage(opts: {
   ${claims ? `<p>Claims: <code>${escapeHtml(claims)}</code></p>` : ''}
   <button id="approve" type="button">Approve</button>
   <p id="status" role="status"></p>
-<script>
+<script nonce="${opts.cspNonce}">
 const statusEl = document.getElementById('status');
 const btn = document.getElementById('approve');
 btn.addEventListener('click', async () => {
@@ -1329,6 +1384,7 @@ export function mountSiweRoutes(
         }
         // Untrusted / third-party client: fall through to an explicit consent
         // prompt. The user must POST /consent/approve to grant — no auto-grant.
+        const consentNonce = cspNonce();
         sendHtml(
           ctx.res,
           200,
@@ -1336,7 +1392,9 @@ export function mountSiweRoutes(
             uid,
             clientId,
             details: interaction.prompt.details as ConsentPromptDetails,
+            cspNonce: consentNonce,
           }),
+          { 'content-security-policy': cspHeader(consentNonce) },
         );
         return;
       }
@@ -1347,6 +1405,7 @@ export function mountSiweRoutes(
         const clientId = interaction.params.client_id
           ? String(interaction.params.client_id)
           : 'a Citrate app';
+        const nonce = cspNonce();
         sendHtml(
           ctx.res,
           200,
@@ -1359,10 +1418,16 @@ export function mountSiweRoutes(
             clientId,
             googleEnabled: options.googleEnabled ?? false,
             version: options.version ?? 'dev',
+            cspNonce: nonce,
             ...(options.walletConnectProjectId
               ? { walletConnectProjectId: options.walletConnectProjectId }
               : {}),
           }),
+          {
+            'content-security-policy': cspHeader(nonce, {
+              walletConnect: Boolean(options.walletConnectProjectId),
+            }),
+          },
         );
         return;
       }
