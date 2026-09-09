@@ -1,0 +1,26 @@
+name: ci
+
+# Hardened CI baseline (pre-public). Inherits the org reusable workflows from
+# CitrateNetwork/.github, pinned to a full commit SHA (supply-chain).
+# secret-scan is the blocking gate; js CI is best-effort. Tune script inputs on
+# first green run once GitHub Actions billing is restored.
+
+on:
+  push:
+    branches: [main]
+  pull_request: {}
+
+# Least privilege: read-only token; elevate per-job only if ever needed.
+permissions:
+  contents: read
+
+jobs:
+  secret-scan:
+    uses: CitrateNetwork/.github/.github/workflows/reusable-secret-scan.yml@5d24169b7acf6533b1eaba2399a25effc6c346d6
+
+  js:
+    uses: CitrateNetwork/.github/.github/workflows/reusable-js-ci.yml@5d24169b7acf6533b1eaba2399a25effc6c346d6
+    with:
+      node-version: '20'
+      # repo has no `lint` script — skip lint, keep build + test
+      lint-script: ''
