@@ -1,155 +1,133 @@
 # citrate-identity
 
-The **Citrate OIDC/OAuth2 authority** — `auth.citrate.ai`. Built on
-[panva `oidc-provider`](https://github.com/panva/node-oidc-provider) (per
-`ADR-idp-stack`: Node/TS, not hand-rolled). This repo is the **Stage-3 IDP-S0/S1
-foundation**: a minimal but real, runnable OIDC issuer plus the harness/doc for
-the Privy custom-auth proof-of-concept.
+> The Citrate Network's OIDC/OAuth2 authority — SIWE wallet login, passkeys, and OIDC single sign-on for every Citrate app.
 
-> Scope note: this is the S0/S1 floor. Refresh/revocation/logout-bus (S2),
-> identity↔wallet registry (S3), device grant (S4), RP wiring (S5+), and SAML
-> (S9) land in later stages per the design's build order. PKCE, refresh rotation
-> and revocation are already wired here.
+## What it is
 
-## What it does today
+`citrate-identity` is the identity provider (IdP) behind `auth.citrate.ai`. It is a
+real, runnable OpenID Connect issuer built on
+[panva `oidc-provider`](https://github.com/panva/node-oidc-provider): it publishes
+OIDC discovery + JWKS, runs Authorization Code + PKCE with refresh-token rotation
+and revocation, and adds a custom **Sign-In With Ethereum (SIWE / EIP-4361)**
+interaction bound to Citrate chain **40204**. Every other Citrate front-end
+(explorer, comms-web, memrizz, dashboard) authenticates against it as a registered
+relying party.
 
-- Publishes OIDC **discovery** at `/.well-known/openid-configuration`.
-- Serves a rotating-capable **JWKS** (RS256) at `/jwks`.
-- Registers one reference relying party, **`citrate-explorer`** — a public client
-  requiring **PKCE (S256)**, scopes `openid profile wallet offline_access`, with
-  redirect URI `${EXPLORER_ORIGIN}/auth/callback` (default
-  `http://localhost:3001/auth/callback`).
-- Authorization Code + PKCE `/auth` + `/token`, refresh-token rotation, and
-  token revocation are enabled.
-- A **custom SIWE interaction view** at `GET /interaction/:uid` replaces panva's
-  dev login page: the `login` prompt renders a wallet sign-in page that drives
-  SIWE; the `consent` prompt is auto-granted for the trusted first-party explorer
-  (a real persisted `Grant`). This lets the explorer complete a full
-  Authorization-Code + SIWE login end-to-end (IDP-S5).
-- **SIWE (EIP-4361) login** (IDP-S1.5): `GET /siwe/challenge` issues a fresh
-  single-use nonce; `POST /siwe/verify` `{message, signature}` verifies the
-  wallet signature and logs the user in as the OIDC account
-  `accountId = wallet address` (claim `wallet_address` populated).
+See the concept docs at https://docs.citrate.ai/identity. Consumed by
+[citrate-explorer](https://github.com/CitrateNetwork/citrate-explorer),
+[citrate-comms](https://github.com/CitrateNetwork/citrate-comms) (web client), and
+[citrate-memories](https://github.com/CitrateNetwork/citrate-memories) (Memrizz + gateway).
 
-## SIWE login (IDP-S1.5)
-
-panva has no built-in SIWE; this repo adds a custom interaction. Flow:
+## Prerequisites
 
 ```bash
-# 1) get a nonce
-curl http://localhost:3000/siwe/challenge          # → { "nonce": "..." }
-# 2) build + sign an EIP-4361 message bound to this host, chainId 40204,
-#    that nonce, with a future expirationTime, then:
-curl -X POST http://localhost:3000/siwe/verify \
-  -H 'content-type: application/json' \
-  -d '{"message":"<eip-4361 message>","signature":"0x..."}'
+# Node 20+ and npm. Nothing else is required to run the authority locally
+# (Postgres + Redis are optional in dev — see "Configuration").
+node --version      # must be >= 20
+npm --version
 ```
 
-Security checks enforced on `/siwe/verify` (all fail closed → 401):
+- OS: Linux or macOS (developed on both).
+- Optional for the SIWE EIP-1271 (smart-contract wallet) path: a reachable Citrate
+  JSON-RPC endpoint (public `https://rpc.citrate.ai`, or a local devnet node).
+- Optional for HA / restart-safe state: Postgres and Redis (Docker is fine).
 
-- **nonce / replay** — single-use; consumed once, even within its TTL.
-- **domain binding** — `message.domain` must equal the authority host (anti-phishing).
-- **expirationTime** — a message past its expiry is rejected.
-- **chainId** — must equal Citrate (`40204`).
-- **low-S only** — high-S (malleable) ECDSA signatures rejected (EIP-2).
-- **EIP-1271** — Safe / smart-contract wallets verified on-chain via
-  `isValidSignature` using a viem public client. Set `CITRATE_RPC_URL` (or pass
-  `publicClient`) to enable; without it only EOA signatures are accepted.
-
-Integration with panva: a valid signature resumes an in-flight OIDC interaction
-via `provider.interactionResult({ login: { accountId } })` (the production code
-path), or — for headless/API logins with no interaction — mints a real RS256 ID
-token signed by the authority's JWKS (verifiable against `/jwks`). Both paths
-share one verification core and one `findAccount`, so claims never diverge.
-
-> Note: the nonce store is an in-memory Map (correct for a single instance).
-> For multi-instance HA, back it with Redis (`NonceStore` is a drop-in seam).
-
-## Explorer relying party — Authorization Code + SIWE (IDP-S5)
-
-The `citrate-explorer` RP completes a full OIDC login backed by SIWE:
-
-1. Explorer sends the browser to `/auth?response_type=code&client_id=citrate-explorer&redirect_uri=${EXPLORER_ORIGIN}/auth/callback&scope=openid%20profile%20wallet&code_challenge=<S256>&code_challenge_method=S256&state=...`.
-2. panva 303s to the `login` interaction at `/interaction/:uid`, which serves
-   the SIWE sign-in page. The page fetches `/siwe/challenge`, has the wallet sign
-   the EIP-4361 message (domain = authority host, chainId 40204, nonce, issuedAt,
-   expirationTime), and POSTs `/siwe/verify`. With the interaction cookie present
-   this is **Path A** → `provider.interactionResult({ login: { accountId } })`
-   → returns `redirectTo`.
-3. The browser follows `redirectTo`; the `consent` prompt is auto-granted (a
-   persisted `Grant` for the trusted first-party explorer), and panva redirects
-   to `${EXPLORER_ORIGIN}/auth/callback?code=...&state=...`.
-4. Explorer exchanges the code at `/token` (with the PKCE `code_verifier`) for an
-   `id_token` (and `access_token`). The ID token carries `iss`, `aud =
-   citrate-explorer`, `sub = wallet address`, and `wallet_address`, and verifies
-   against `/jwks`.
-
-`EXPLORER_ORIGIN` (env, default `http://localhost:3001`) makes the registered
-redirect URI configurable; production uses `https://explorer.citrate.ai`.
-
-## Run
+## Build from source
 
 ```bash
-cp .env.example .env        # adjust ISSUER_URL / PORT if needed
+git clone https://github.com/CitrateNetwork/citrate-identity.git
+cd citrate-identity
 npm install
-npm run dev                 # tsx src/server.ts
+npm run build           # tsc -p tsconfig.build.json  →  dist/
 ```
 
-Then:
+Expected artifact: compiled JS in `dist/` (entry `dist/server.js`). Build is fast
+(< 30s) and light on RAM. `npm test` runs the vitest suite, including the IDP-S1
+bootstrap gate (`test/discovery.test.ts`) which boots the provider on an ephemeral
+port and asserts discovery + JWKS are well-formed.
+
+## Run locally
 
 ```bash
-curl http://localhost:3000/.well-known/openid-configuration
-curl http://localhost:3000/jwks
-```
-
-## Test
-
-```bash
+cp .env.example .env     # defaults are dev-ready (ISSUER_URL=http://localhost:3000)
 npm install
-npm test                    # vitest run
+npm run dev              # tsx src/server.ts  — listens on PORT (default 3000)
 ```
 
-`test/discovery.test.ts` is the **automated IDP-S1 bootstrap gate**: it boots the
-provider on an ephemeral port, asserts discovery exposes `issuer`,
-`authorization_endpoint`, `token_endpoint`, and `jwks_uri`, and asserts the JWKS
-has at least one signing key (with no private material leaked).
-
-## Build
+Default port: **3000**. Verify it's up:
 
 ```bash
-npm run build               # tsc → dist/
+curl -s http://localhost:3000/.well-known/openid-configuration | jq '{issuer, authorization_endpoint, token_endpoint, jwks_uri}'
+curl -s http://localhost:3000/jwks | jq '.keys | length'   # >= 1 signing key
 ```
 
-## Design + acceptance criteria
+You should get a discovery document with `issuer=http://localhost:3000` and a JWKS
+with at least one RS256 key (no private material). In dev, Postgres/Redis are
+unset and the provider falls back to in-memory stores (with a warning) — fine for a
+single instance; state is lost on restart.
 
-- Design: [`citrate-identity.md`](../citrate-federation/.agentile/gtm-spine/design/citrate-identity.md)
-  (in `citrate-federation`).
-- IDP-S0 (Privy custom-auth PoC):
-  [`IDP-S0-privy-custom-auth-poc.feature`](../citrate-federation/.agentile/gtm-spine/features/IDP-S0-privy-custom-auth-poc.feature).
-- IDP-S1 (authority bootstrap):
-  [`IDP-S1-authority-bootstrap.feature`](../citrate-federation/.agentile/gtm-spine/features/IDP-S1-authority-bootstrap.feature).
+Production start (after `npm run build`): `npm start` (`node dist/server.js`).
 
-## What YOU (the owner) must provide to run the Privy PoC
+## Connect it locally  ← the differentiator
 
-The IDP issuer here runs with zero external accounts. The **IDP-S0 PoC** needs
-things only you (Privy account holder) can supply. Full step-by-step in
-[`src/privy-custom-auth.md`](src/privy-custom-auth.md). In short:
+`citrate-identity` is an **upstream** — other apps point at it. To run the minimal
+identity + relying-party loop on one box:
 
-1. **A Privy app** (https://dashboard.privy.io) → put its **App ID** in `.env` as
-   `PRIVY_APP_ID`.
-2. **Enable Custom Auth** on that app.
-3. Point Privy's **JWKS URL** at this issuer's `{ISSUER_URL}/jwks`.
-4. Set Privy's **`iss`** to your `ISSUER_URL` and **`aud`** to match the token
-   you mint (`citrate-explorer`).
-5. Confirm Privy keys users on the **`sub`** claim.
-6. Because Privy's servers must reach the JWKS, expose your local issuer over a
-   public HTTPS tunnel (cloudflared/ngrok) and set `ISSUER_URL` to that URL
-   before starting the server.
+1. **Start the authority** on `:3000` (above). This is the issuer.
+2. **(Optional) Enable EIP-1271** for Safe / smart-contract-wallet SIWE by pointing
+   the authority at a chain RPC:
+   ```bash
+   # in .env — enables on-chain isValidSignature checks against chain 40204
+   CITRATE_RPC_URL=https://rpc.citrate.ai      # or a local devnet node's RPC
+   ```
+   Without it, EOA (externally-owned-account) signatures still log in fine.
+3. **Point a relying party at it.** The reference RP is `citrate-explorer`,
+   pre-registered with redirect URI `${EXPLORER_ORIGIN}/auth/callback`
+   (`EXPLORER_ORIGIN` defaults to `http://localhost:3001`). In the explorer's
+   `.env.local` set `NEXT_PUBLIC_AUTH_MODE=oidc`,
+   `NEXT_PUBLIC_OIDC_ISSUER=http://localhost:3000`, `OIDC_ISSUER=http://localhost:3000`,
+   `OIDC_JWKS_URL=http://localhost:3000/jwks`, `OIDC_AUDIENCE=citrate-explorer`, and
+   run the explorer on **:3001** (`pnpm dev -p 3001`). comms-web (`:3004`) and Memrizz
+   register the same way under their own `client_id`s.
+4. **End-to-end SIWE check** (headless):
+   ```bash
+   curl -s http://localhost:3000/siwe/challenge          # → {"nonce":"..."}
+   # build + sign an EIP-4361 message (domain=localhost:3000, chainId 40204,
+   # that nonce, a future expirationTime), then:
+   curl -s -X POST http://localhost:3000/siwe/verify \
+     -H 'content-type: application/json' \
+     -d '{"message":"<eip-4361 message>","signature":"0x..."}'
+   ```
 
-Then run the four IDP-S0 scenarios and record the result in
-`ADR-idp-privy-role` (Option 1 = Citrate-issues/Privy-consumes, vs Option 3 =
-Citrate-only auth + Privy REST for wallets).
+For the full multi-repo bring-up (chain → identity → apps), see the federation
+`LOCAL_STACK` at https://docs.citrate.ai/local-stack.
+
+## Configuration
+
+Key env vars (full annotations in `.env.example`):
+
+| Var | Default (dev) | Purpose |
+|-----|---------------|---------|
+| `ISSUER_URL` | `http://localhost:3000` | Public issuer URL; host must match `PORT`. |
+| `PORT` | `3000` | Listen port. |
+| `EXPLORER_ORIGIN` | `http://localhost:3001` | Registered redirect base for the explorer RP. |
+| `DASHBOARD_ORIGIN` | `http://localhost:3002` | Redirect base for the dashboard RP. |
+| `COOKIE_KEYS` | dev default | Comma-separated cookie-signing secrets (prepend to rotate). |
+| `DATABASE_URL` | unset → in-memory | Postgres for the KYC claim store (persists across restarts). **Required in production.** |
+| `REDIS_URL` | unset → in-memory | Redis backing the panva adapter, SIWE nonce store, and logout bus. **Required in production.** |
+| `CITRATE_RPC_URL` | unset | Chain 40204 RPC; enables SIWE EIP-1271 smart-contract-wallet verification. |
+| `WALLETCONNECT_PROJECT_ID` | unset | Optional; adds the WalletConnect connector to the SIWE page. |
+
+In production the authority refuses to boot unless `DATABASE_URL`, `REDIS_URL`, and
+`COOKIE_KEYS` are set (`assertProductionConfig`).
+
+## Links
+
+- Docs: https://docs.citrate.ai/identity
+- Depends on: [citrate-chain](https://github.com/CitrateNetwork/citrate-chain) (optional, for EIP-1271 SIWE)
+- Consumed by: [citrate-explorer](https://github.com/CitrateNetwork/citrate-explorer) · [citrate-comms](https://github.com/CitrateNetwork/citrate-comms) · [citrate-memories](https://github.com/CitrateNetwork/citrate-memories)
+- Contributing (DCO): CONTRIBUTING.md · Security: SECURITY.md · License: LICENSE
 
 ## License
 
-Part of the Citrate federation. See org-level `SECURITY.md` / `LICENSE`.
+Source-available (BUSL-1.1) — free for personal/non-commercial; commercial = membership.
