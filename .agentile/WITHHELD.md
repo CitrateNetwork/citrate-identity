@@ -14,3 +14,7 @@ engineering:
   separation-of-duties) is fully published in the redacted `ADR-AV-1..5` in this directory.
 
 Questions: security@citrate.ai.
+
+Also excluded (operational deploy records, not narrative — the engineering story is in
+the ADRs above): `deploys/*/DEPLOY_LOG.md` (5 files). Infra addresses were redacted, but
+raw per-deploy logs are kept out of the public record by policy.
