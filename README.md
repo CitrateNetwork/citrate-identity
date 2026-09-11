@@ -1,5 +1,7 @@
 # citrate-identity
 
+*Part of the **[Citrate Network](https://citrate.ai)** — own the means of computation. · [Docs](https://docs.citrate.ai) · [Run a node](https://citrate.ai/download) · [Contribute → free membership](https://github.com/CitrateNetwork/.github/blob/main/CONTRIBUTING.md)*
+
 > The Citrate Network's OIDC/OAuth2 authority — SIWE wallet login, passkeys, and OIDC single sign-on for every Citrate app.
 
 ## What it is
