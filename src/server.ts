@@ -61,6 +61,8 @@ function readPackageVersion(): string {
 import { createCitratePublicClient, CITRATE_CHAIN_ID, InMemoryNonceStore, type NonceStore } from './siwe.js';
 import { mountIdentityRegistryRoutes, setWalletRegistry } from './identity-registry.js';
 import { initWalletRegistryFromEnv } from './wallet-registry-pg.js';
+import { mountDirectoryRoutes, setDirectoryStore } from './directory.js';
+import { initDirectoryStoreFromEnv } from './directory-pg.js';
 import { getUserStore } from './auth/stores.js';
 /** Canonical lowercase UUID — only UUID-keyed subs have a user record to bind. */
 const REGISTRY_UUID_RE =
@@ -326,6 +328,14 @@ export async function createProvider(
     },
   });
 
+  // citrate-core#61: the self-published bindings directory ("find-via-X"). A
+  // member publishes a signed, revocable `(platform, handle) ↔ address` binding
+  // (opt-in, self-published only — NO X API); lookup/search return ONLY published,
+  // non-revoked bindings, Bearer-gated + rate-limited so it is not a scraper. Both
+  // the app's social-ownership attestation AND a directory-intent signature must
+  // verify before a binding is stored. Postgres in prod, in-memory in dev.
+  mountDirectoryRoutes(provider);
+
   const rpId = rpIdFromIssuer(issuer);
   mountWebauthnRoutes(provider, {
     rp: {
@@ -528,6 +538,11 @@ async function main(): Promise<void> {
   // the links, `canonicalFor` went null, and a member linking a second wallet
   // afterwards silently repointed `primary_wallet` — i.e. their pay-to address.
   await initWalletRegistryFromEnv(process.env, setWalletRegistry);
+
+  // citrate-core#61: install the self-published bindings directory store.
+  // Postgres in prod (same DATABASE_URL gate as the wallet registry), in-memory
+  // in dev — so /directory/* persists bindings as soon as DATABASE_URL is set.
+  await initDirectoryStoreFromEnv(process.env, setDirectoryStore);
 
   // Portal-registration WP-C: install the KycProvider singleton from env.
   // With KYC_PROVIDER unset, /kyc/start fails closed (503). Production
