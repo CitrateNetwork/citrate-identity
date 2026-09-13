@@ -19,6 +19,7 @@ import type { AddressInfo } from 'node:net';
 import { createHash, randomBytes } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createProvider } from '../src/server.js';
+import { armEmailCapture, lastVerificationCode } from './helpers/verify.js';
 import {
   setUserStore,
   setWebAuthnStore,
@@ -145,6 +146,7 @@ async function signInAndStartFreshInteraction(
 
   // Register → sets login on the interaction, returns a redirectTo that
   // resumes the /auth flow and completes consent + lands at the RP.
+  armEmailCapture();
   const reg = await fetch(`${baseUrl}/auth/password/register`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', cookie: jar.header() },
@@ -153,7 +155,16 @@ async function signInAndStartFreshInteraction(
   });
   jar.absorb(reg);
   expect(reg.status).toBe(200);
-  const regBody = (await reg.json()) as { redirectTo: string };
+  // FWA #87.1: register no longer signs in — enter the emailed code to verify.
+  const ver = await fetch(`${baseUrl}/auth/password/verify`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', cookie: jar.header() },
+    body: JSON.stringify({ email: args.email, code: lastVerificationCode() }),
+    redirect: 'manual',
+  });
+  jar.absorb(ver);
+  expect(ver.status).toBe(200);
+  const regBody = (await ver.json()) as { redirectTo: string };
 
   // Follow the redirect chain until we either land at the RP redirect
   // (the OIDC session cookie has been set by then) or run out of hops.

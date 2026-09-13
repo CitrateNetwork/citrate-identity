@@ -55,6 +55,14 @@ export interface UserStore {
    * (`email-pw` | `passkey` | `google`) — surfaced as the
    * `signing_method` OIDC claim (EW-S1 WP-6). */
   setLastSigningMethod(id: string, method: string): Promise<void>;
+  /** Flip `email_verified` true. The SOLE caller is the email-verification
+   * flow (FWA #87.1) after a Resend OTP is confirmed — an email never binds /
+   * provisions / matches a grant until this runs (mirrors the Google guard). */
+  markEmailVerified(id: string): Promise<void>;
+  /** Set/replace the Argon2id password hash. Used by the verify flow to attach
+   * the pending signup password once ownership is proven, and as the
+   * email-proven password-reset path. */
+  rotatePasswordHash(id: string, passwordHash: string): Promise<void>;
 }
 
 /** WebAuthn credential store shape used by the webauthn HTTP routes. */
@@ -196,6 +204,20 @@ export class InMemoryUserStore implements UserStore {
     const rec = this.byId.get(id);
     if (!rec) return;
     rec.lastSigningMethod = method;
+    rec.updatedAt = new Date();
+  }
+
+  async markEmailVerified(id: string): Promise<void> {
+    const rec = this.byId.get(id);
+    if (!rec) return;
+    rec.emailVerified = true;
+    rec.updatedAt = new Date();
+  }
+
+  async rotatePasswordHash(id: string, passwordHash: string): Promise<void> {
+    const rec = this.byId.get(id);
+    if (!rec) return;
+    rec.passwordHash = passwordHash;
     rec.updatedAt = new Date();
   }
 }

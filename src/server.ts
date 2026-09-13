@@ -63,6 +63,7 @@ import { mountIdentityRegistryRoutes, setWalletRegistry } from './identity-regis
 import { initWalletRegistryFromEnv } from './wallet-registry-pg.js';
 import { mountDirectoryRoutes, setDirectoryStore } from './directory.js';
 import { initDirectoryStoreFromEnv } from './directory-pg.js';
+import { initEmailVerificationStoreFromEnv } from './auth/email-verification-pg.js';
 import { getUserStore } from './auth/stores.js';
 /** Canonical lowercase UUID — only UUID-keyed subs have a user record to bind. */
 const REGISTRY_UUID_RE =
@@ -543,6 +544,11 @@ async function main(): Promise<void> {
   // Postgres in prod (same DATABASE_URL gate as the wallet registry), in-memory
   // in dev — so /directory/* persists bindings as soon as DATABASE_URL is set.
   await initDirectoryStoreFromEnv(process.env, setDirectoryStore);
+
+  // FWA #87.1: install the email-verification (Resend OTP) store. Same
+  // DATABASE_URL gate — Postgres in prod, in-memory in dev. Backs the
+  // verified-email gate on /auth/password/{register,login,verify}.
+  await initEmailVerificationStoreFromEnv(process.env);
 
   // Portal-registration WP-C: install the KycProvider singleton from env.
   // With KYC_PROVIDER unset, /kyc/start fails closed (503). Production
