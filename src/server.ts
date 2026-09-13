@@ -38,6 +38,7 @@ import { mountStaticAssets } from './static-assets.js';
 import { mountPasswordRoutes } from './auth/password-routes.js';
 import { mountWebauthnRoutes } from './auth/webauthn-routes.js';
 import { mountGoogleRoutes } from './auth/google-routes.js';
+import { mountConfiguredOAuth2Providers } from './auth/oauth2-provider.js';
 import { initAuthStoresFromEnv } from './auth/stores.js';
 import { rpIdFromIssuer } from './auth/webauthn.js';
 import { initKycStoreFromEnv, getKycStore } from './kyc.js';
@@ -378,6 +379,25 @@ export async function createProvider(
         'CITRATE_AA_GOOGLE_CLIENT_SECRET is not — Google tab will render as ' +
         '"not enabled" since the routes were not mounted.',
     );
+  }
+
+  // FWA #87.3: GitHub / Discord / X federation. Each mounts ONLY when its
+  // CITRATE_AA_<PROVIDER>_CLIENT_ID + _SECRET are set (same gate as Google), and
+  // binds an email ONLY when the provider proves ownership. Callback is
+  // <ISSUER_URL>/auth/<name>/callback — register that exact URL in each app.
+  {
+    const mountedProviders = mountConfiguredOAuth2Providers(
+      provider,
+      process.env,
+      issuer,
+      options.redis,
+    );
+    if (mountedProviders.length > 0) {
+      // eslint-disable-next-line no-console
+      console.log(
+        `[citrate-identity] OAuth2 federation mounted: ${mountedProviders.join(', ')}`,
+      );
+    }
   }
 
   // IDP-KYC: the vendor-webhook stand-in that writes the LIVE KYC claim record

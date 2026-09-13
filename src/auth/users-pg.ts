@@ -99,6 +99,29 @@ function rowToRecord(row: RawRow): UserRecord {
   };
 }
 
+// FWA #87.3: generic federated-identity map (GitHub / Discord / X, and any
+// future OAuth provider). Google keeps its dedicated `users.google_sub` column;
+// everything else lands here keyed by (provider, provider_sub) → user id. One
+// portable `IF NOT EXISTS` statement (pg-mem supports it).
+// No `IF NOT EXISTS` — pg-mem (users-pg.test.ts) doesn't support it; guard with
+// the probe below, same discipline as the users table.
+const FEDERATED_TABLE_SQL = `
+CREATE TABLE federated_identities (
+  federated_key text PRIMARY KEY,
+  provider      text NOT NULL,
+  provider_sub  text NOT NULL,
+  user_id       uuid NOT NULL,
+  created_at    timestamptz NOT NULL DEFAULT now()
+)`;
+
+const FEDERATED_TABLE_EXISTS_SQL =
+  "SELECT 1 AS present FROM information_schema.tables WHERE table_name = 'federated_identities' LIMIT 1";
+
+/** Composite lookup key: `<provider>:<provider_sub>` (single-column PK). */
+function federatedKey(provider: string, providerSub: string): string {
+  return `${provider}:${providerSub}`;
+}
+
 export class PgUserStore {
   constructor(private readonly pool: PgLike) {}
 
@@ -114,14 +137,20 @@ export class PgUserStore {
     const probe = await this.pool.query(TABLE_EXISTS_SQL);
     if (probe.rows.length === 0) {
       await this.pool.query(CREATE_TABLE_SQL);
-      return;
+    } else {
+      // Existing table: bring it up to the current shape. Column probe
+      // (instead of `ADD COLUMN IF NOT EXISTS`) keeps pg-mem-driven tests
+      // on the portable SQL subset.
+      const col = await this.pool.query(COLUMN_EXISTS_SQL);
+      if (col.rows.length === 0) {
+        await this.pool.query(ADD_COLUMN_SQL);
+      }
     }
-    // Existing table: bring it up to the current shape. Column probe
-    // (instead of `ADD COLUMN IF NOT EXISTS`) keeps pg-mem-driven tests
-    // on the portable SQL subset.
-    const col = await this.pool.query(COLUMN_EXISTS_SQL);
-    if (col.rows.length === 0) {
-      await this.pool.query(ADD_COLUMN_SQL);
+    // FWA #87.3: the generic federated-identity table (probe-guarded, no
+    // IF NOT EXISTS, for pg-mem portability), regardless of the users branch.
+    const fed = await this.pool.query(FEDERATED_TABLE_EXISTS_SQL);
+    if (fed.rows.length === 0) {
+      await this.pool.query(FEDERATED_TABLE_SQL);
     }
   }
 
@@ -159,6 +188,59 @@ export class PgUserStore {
       [id, args.email ? normalizeEmail(args.email) : null, args.googleSub],
     );
     return rowToRecord(res.rows[0] as RawRow);
+  }
+
+  /**
+   * Create a brand-new user from a non-Google federation (GitHub/Discord/X).
+   * The email binds (and `email_verified=true`) ONLY when the caller has proven
+   * ownership — same posture as {@link createWithGoogle} (FWA #87.3). A
+   * provider that yields no proven email (e.g. X) creates an email-less account.
+   */
+  async createWithFederated(args: {
+    provider: string;
+    providerSub: string;
+    email?: string;
+  }): Promise<UserRecord> {
+    const id = randomUUID();
+    const res = await this.pool.query(
+      `INSERT INTO users (id, email, email_verified)
+       VALUES ($1, $2, $3)
+       RETURNING id, email, email_verified, password_hash, google_sub,
+                 primary_wallet, legacy_siwe_eoa, last_signing_method,
+                 created_at, updated_at`,
+      [id, args.email ? normalizeEmail(args.email) : null, args.email !== undefined],
+    );
+    await this.pool.query(
+      'INSERT INTO federated_identities (federated_key, provider, provider_sub, user_id) VALUES ($1, $2, $3, $4)',
+      [federatedKey(args.provider, args.providerSub), args.provider, args.providerSub, id],
+    );
+    return rowToRecord(res.rows[0] as RawRow);
+  }
+
+  /** Look up a user by a federated (provider, sub) pair. */
+  async findByFederated(
+    provider: string,
+    providerSub: string,
+  ): Promise<UserRecord | undefined> {
+    const link = await this.pool.query(
+      'SELECT user_id FROM federated_identities WHERE federated_key = $1',
+      [federatedKey(provider, providerSub)],
+    );
+    const row = link.rows[0] as { user_id: string } | undefined;
+    if (!row) return undefined;
+    return this.findById(row.user_id);
+  }
+
+  /** Link a federated (provider, sub) onto an existing user. */
+  async linkFederated(
+    userId: string,
+    provider: string,
+    providerSub: string,
+  ): Promise<void> {
+    await this.pool.query(
+      'INSERT INTO federated_identities (federated_key, provider, provider_sub, user_id) VALUES ($1, $2, $3, $4)',
+      [federatedKey(provider, providerSub), provider, providerSub, userId],
+    );
   }
 
   /**
