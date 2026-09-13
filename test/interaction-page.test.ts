@@ -169,14 +169,28 @@ describe('branded /interaction/:uid login surface', () => {
       expect(html).toMatch(/id="panel-password"[^>]*data-active="false"/);
     });
 
-    it('renders the "Google sign-in is not enabled" message when CITRATE_AA_GOOGLE_CLIENT_ID is unset', () => {
-      // The Google tab is rendered unconditionally (so users can see why it
-      // is unavailable), but with the env-disabled copy.
+    it('renders the "Social sign-in is not enabled" message when no provider env is set', () => {
+      // The Social tab is rendered unconditionally (so users can see why it
+      // is unavailable), but with the env-disabled copy (#87.3 — the panel now
+      // hosts Google/GitHub/Discord/X, so the copy is provider-agnostic).
       expect(html).toContain('id="tab-google"');
-      expect(html).toContain('Google sign-in is not enabled on this server');
-      // The active "Continue with Google" button is NOT rendered when the
-      // env is unset — the tab body shows only the disabled-copy note.
+      expect(html).toContain('Social sign-in is not enabled on this server');
+      // No provider button renders when every provider env is unset.
       expect(html).not.toMatch(/id="signin-google"[^>]*href="\/auth\/google\/start"/);
+      expect(html).not.toMatch(/id="signin-github"/);
+      expect(html).not.toMatch(/id="signin-discord"/);
+      expect(html).not.toMatch(/id="signin-x"/);
+    });
+
+    it('#87.1 — always renders the verified-email code-entry panel + POSTs to /auth/password/verify', () => {
+      // The panel is present in the markup (shown programmatically on
+      // {status:"verification_required"}); the JS wires it to the verify route.
+      expect(html).toContain('id="panel-verify"');
+      expect(html).toContain('id="verify-code"');
+      expect(html).toContain("'/auth/password/verify'");
+      // The stale 409 "already have an account" copy is gone (register is now
+      // enumeration-safe → verification_required).
+      expect(html).not.toContain('You already have an account with this email');
     });
 
     it('uses the canonical design tokens lifted from the explorer scan.css', () => {
