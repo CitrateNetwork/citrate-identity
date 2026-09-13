@@ -97,6 +97,15 @@ export interface SiweRouteOptions {
    */
   googleEnabled?: boolean;
   /**
+   * #87.3 — True iff the GitHub / Discord / X OAuth2 provider is configured (its
+   * `CITRATE_AA_<P>_CLIENT_ID` + `_CLIENT_SECRET` are set). When true, the Social
+   * panel renders an active "Continue with <provider>" button linking to
+   * `/auth/<name>/start`; when false the button is omitted. Mirrors googleEnabled.
+   */
+  githubEnabled?: boolean;
+  discordEnabled?: boolean;
+  xEnabled?: boolean;
+  /**
    * Build version surfaced in the interaction page footer (e.g. the package
    * version). Defaults to "dev" so tests don't need to thread it.
    */
@@ -279,6 +288,10 @@ function renderInteractionPage(opts: {
   walletConnectProjectId?: string;
   /** True iff `/auth/google/start` is mounted and ready (env was set). */
   googleEnabled: boolean;
+  /** #87.3 — True iff the github/discord/x OAuth2 provider is mounted (env set). */
+  githubEnabled: boolean;
+  discordEnabled: boolean;
+  xEnabled: boolean;
   /** Footer build-version string. */
   version: string;
   /** Per-response CSP nonce for the inline `<script>` (ID-B-004). */
@@ -301,6 +314,10 @@ function renderInteractionPage(opts: {
   });
   const hasWalletConnect = Boolean(opts.walletConnectProjectId);
   const googleEnabled = opts.googleEnabled;
+  const githubEnabled = opts.githubEnabled ?? false;
+  const discordEnabled = opts.discordEnabled ?? false;
+  const xEnabled = opts.xEnabled ?? false;
+  const anySocialEnabled = Boolean(googleEnabled || githubEnabled || discordEnabled || xEnabled);
 
   // The custom 1.5-stroke `currentColor` icon glyphs lifted verbatim from
   // citrate-explorer/src/scan/icons.tsx. Inlined as SVG strings to avoid
@@ -311,6 +328,12 @@ function renderInteractionPage(opts: {
   const ICON_WALLET = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="6" width="18" height="13" rx="2.5"/><path d="M3 10 H21 M16.5 14 h.01"/></svg>';
   const ICON_SHIELD = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3 L19 6 V11 c0 5-3 8-7 10 c-4-2-7-5-7-10 V6 Z"/><path d="M9 12 L11 14 L15 9.5"/></svg>';
   const ICON_CHECK = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5 L10 17.5 L19 7"/></svg>';
+  // #87.3 — provider brand marks. Monochrome `currentColor` glyphs to match the rest of the
+  // interaction UI (the existing ICON_GOOGLE is a stylised glyph too, not the multicolour G).
+  const ICON_SOCIAL = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="9" cy="8" r="3"/><circle cx="17" cy="10" r="2.3"/><path d="M4 19 c0-3 2.2-5 5-5 s5 2 5 5 M15.5 19 c0-2 1-3.5 3-3.5 s2.5 1.5 2.5 3.5"/></svg>';
+  const ICON_X = '<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor" aria-hidden="true"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24h-6.66l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231 5.45-6.231Zm-1.161 17.52h1.833L7.084 4.126H5.117l11.966 15.644Z"/></svg>';
+  const ICON_GITHUB = '<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor" aria-hidden="true"><path d="M12 2C6.48 2 2 6.58 2 12.26c0 4.5 2.87 8.32 6.84 9.67.5.1.68-.22.68-.49 0-.24-.01-.87-.01-1.71-2.78.62-3.37-1.37-3.37-1.37-.45-1.18-1.11-1.5-1.11-1.5-.91-.64.07-.62.07-.62 1 .07 1.53 1.06 1.53 1.06.89 1.56 2.34 1.11 2.91.85.09-.66.35-1.11.63-1.37-2.22-.26-4.56-1.14-4.56-5.06 0-1.12.39-2.03 1.03-2.75-.1-.26-.45-1.3.1-2.71 0 0 .84-.28 2.75 1.05a9.36 9.36 0 0 1 2.5-.34c.85 0 1.71.12 2.5.34 1.91-1.33 2.75-1.05 2.75-1.05.55 1.41.2 2.45.1 2.71.64.72 1.03 1.63 1.03 2.75 0 3.93-2.34 4.79-4.57 5.05.36.32.68.94.68 1.9 0 1.37-.01 2.48-.01 2.82 0 .27.18.6.69.49A10.02 10.02 0 0 0 22 12.26C22 6.58 17.52 2 12 2Z"/></svg>';
+  const ICON_DISCORD = '<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor" aria-hidden="true"><path d="M20.317 4.369A19.79 19.79 0 0 0 15.446 3c-.21.375-.454.88-.622 1.28a18.27 18.27 0 0 0-5.649 0A12.6 12.6 0 0 0 8.552 3 19.74 19.74 0 0 0 3.677 4.37C.99 8.36.26 12.25.626 16.09a19.9 19.9 0 0 0 6.06 3.05c.49-.67.926-1.38 1.3-2.13-.714-.27-1.4-.6-2.045-.99.171-.126.34-.257.502-.39a14.2 14.2 0 0 0 12.114 0c.164.14.332.27.502.39-.647.39-1.334.72-2.048.99.375.75.81 1.46 1.3 2.13a19.85 19.85 0 0 0 6.062-3.05c.43-4.45-.732-8.31-3.06-11.72ZM8.02 13.75c-1.183 0-2.157-1.09-2.157-2.42 0-1.33.955-2.42 2.157-2.42 1.21 0 2.176 1.1 2.157 2.42 0 1.33-.955 2.42-2.157 2.42Zm7.96 0c-1.183 0-2.157-1.09-2.157-2.42 0-1.33.955-2.42 2.157-2.42 1.21 0 2.176 1.1 2.157 2.42 0 1.33-.946 2.42-2.157 2.42Z"/></svg>';
 
   return `<!doctype html>
 <html lang="en" data-theme="light">
@@ -610,7 +633,7 @@ h1 {
       <div class="tabs" role="tablist" aria-label="Sign-in methods" data-default-tab="passkey">
         <button id="tab-passkey" role="tab" aria-controls="panel-passkey" aria-selected="true" data-method="passkey">${ICON_KEY}<span>Passkey</span></button>
         <button id="tab-password" role="tab" aria-controls="panel-password" aria-selected="false" data-method="password">${ICON_MAIL}<span>Email</span></button>
-        <button id="tab-google" role="tab" aria-controls="panel-google" aria-selected="false" data-method="google">${ICON_GOOGLE}<span>Google</span></button>
+        <button id="tab-google" role="tab" aria-controls="panel-google" aria-selected="false" data-method="google">${ICON_SOCIAL}<span>Social</span></button>
         <button id="tab-siwe" role="tab" aria-controls="panel-siwe" aria-selected="false" data-method="siwe">${ICON_WALLET}<span>Wallet</span></button>
       </div>
 
@@ -642,14 +665,42 @@ h1 {
         </form>
       </div>
 
-      <!-- Google panel — gated on the env. -->
+      <!-- Verified-email panel (#87.1) — shown programmatically after register/login returns
+           {status:"verification_required"}. The ONLY path that binds the email + mints a session
+           is POST /auth/password/verify {email,code}; until then no email/wallet/grant binds. Not
+           a tab (no data-method) — the JS toggles data-active and moves focus here. -->
+      <div id="panel-verify" class="panel" role="region" aria-label="Confirm your email" data-active="false">
+        <div class="eyebrow" aria-hidden="true">CONFIRM YOUR EMAIL</div>
+        <p class="note">${ICON_MAIL}<span>We emailed a 6-digit code to <strong id="verify-email"></strong>. Enter it to confirm you own this address &mdash; this is what stops anyone signing up with an email that isn't theirs.</span></p>
+        <form id="form-verify" novalidate>
+          <div class="field">
+            <label for="verify-code">6-digit code</label>
+            <input id="verify-code" name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]*" maxlength="6" placeholder="000000" required style="letter-spacing:.35em;font-family:var(--font-mono)" />
+          </div>
+          <div class="actions">
+            <button id="verify-submit" class="btn primary" type="submit">Confirm email</button>
+          </div>
+        </form>
+        <button id="verify-resend" class="altlink" type="button">Didn't get it? Resend the code.</button>
+        <button id="verify-back" class="altlink" type="button">Use a different email</button>
+      </div>
+
+      <!-- Social panel (#87.3) — each provider button renders only when its env is set.
+           Google keeps the primary style + its stable #signin-google id (e2e asserts on it);
+           the OAuth2 providers (github/discord/x) link to /auth/<name>/start exactly like Google.
+           An X login proves a handle but no email, so those users complete the verified-email
+           step before any email/grant binds — see /auth/password/verify below. -->
       <div id="panel-google" class="panel" role="tabpanel" aria-labelledby="tab-google" data-active="false">
         ${
-          googleEnabled
-            ? `<div class="actions">
-                 <a id="signin-google" class="btn primary" href="/auth/google/start" rel="noopener">Continue with Google</a>
-               </div>`
-            : `<p class="note">${ICON_SHIELD}<span>Google sign-in is not enabled on this server. Use a passkey, email + password, or your wallet to continue.</span></p>`
+          anySocialEnabled
+            ? `<div class="actions" style="display:flex;flex-direction:column;gap:8px">
+                 ${googleEnabled ? `<a id="signin-google" class="btn primary" href="/auth/google/start" rel="noopener">${ICON_GOOGLE}<span>Continue with Google</span></a>` : ''}
+                 ${githubEnabled ? `<a id="signin-github" class="btn" href="/auth/github/start" rel="noopener">${ICON_GITHUB}<span>Continue with GitHub</span></a>` : ''}
+                 ${discordEnabled ? `<a id="signin-discord" class="btn" href="/auth/discord/start" rel="noopener">${ICON_DISCORD}<span>Continue with Discord</span></a>` : ''}
+                 ${xEnabled ? `<a id="signin-x" class="btn" href="/auth/x/start" rel="noopener">${ICON_X}<span>Continue with X</span></a>` : ''}
+               </div>
+               <p class="note" style="margin-top:12px">${ICON_SHIELD}<span>We only ever record an email a provider has verified you own. X doesn't share email &mdash; you'll add and verify one after.</span></p>`
+            : `<p class="note">${ICON_SHIELD}<span>Social sign-in is not enabled on this server. Use a passkey, email + password, or your wallet to continue.</span></p>`
         }
       </div>
 
@@ -935,17 +986,47 @@ passkeySignupBtn.addEventListener('click', async () => {
   }
 });
 
-// --- EMAIL / PASSWORD flow (/auth/password/{login,register}). ---
+// --- EMAIL / PASSWORD flow (/auth/password/{login,register,verify}). ---
+// #87.1 — register/login no longer sign you in directly: unless it's a VERIFIED account with the
+// right password (→ redirectTo), the server emails a 6-digit code and returns
+// {status:"verification_required"}. Ownership is proven at /auth/password/verify, the ONLY path
+// that binds the email + mints a session. This is what closes the email-squat hole.
 const pwForm = document.getElementById('form-password');
 const pwSubmit = document.getElementById('signin-password');
 const pwRegister = document.getElementById('register-password');
+const verifyForm = document.getElementById('form-verify');
+const verifySubmit = document.getElementById('verify-submit');
+const resendBtn = document.getElementById('verify-resend');
+const backBtn = document.getElementById('verify-back');
+let pendingVerify = null; // { email, password, path } — the send that triggered verification.
+
 async function pwPost(path, email, password) {
   const res = await fetch(path, {
     method: 'POST', credentials: 'same-origin',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ email, password }),
   });
-  return { ok: res.ok, status: res.status, body: await res.json() };
+  return { ok: res.ok, status: res.status, body: await res.json().catch(() => ({})) };
+}
+// Reveal the code-entry region (mirrors finishSignin's non-tab panel swap).
+function showVerify(email, password, path) {
+  pendingVerify = { email, password, path };
+  pwSubmit.disabled = false; pwRegister.disabled = false; // re-enabled for the "different email" path
+  document.getElementById('verify-email').textContent = email;
+  document.querySelector('.tabs').style.display = 'none';
+  panels.forEach((p) => p.setAttribute('data-active', 'false'));
+  document.getElementById('panel-verify').setAttribute('data-active', 'true');
+  const c = document.getElementById('verify-code');
+  c.value = '';
+  setStatus('We sent a 6-digit code to ' + email + '.');
+  c.focus();
+}
+// Route a login/register response: verified+password → in; else → code entry.
+function handlePwResult(r, email, password, path, failPrefix, btn) {
+  if (r.ok && r.body && r.body.status === 'verification_required') { showVerify(email, password, path); return; }
+  if (r.ok && r.body && r.body.redirectTo) { setStatus('Signed in.'); finishSignin(r.body); return; }
+  setStatus(failPrefix + (r.body.reason || r.body.error || r.status), true);
+  btn.disabled = false;
 }
 pwForm.addEventListener('submit', async (ev) => {
   ev.preventDefault();
@@ -954,13 +1035,7 @@ pwForm.addEventListener('submit', async (ev) => {
   const password = document.getElementById('pw-password').value;
   if (!email || !password) { setStatus('Email and password are required.', true); pwSubmit.disabled = false; return; }
   setStatus('Signing in…');
-  const r = await pwPost('/auth/password/login', email, password);
-  if (!r.ok || !r.body.redirectTo) {
-    setStatus('Sign-in failed: ' + (r.body.reason || r.body.error || r.status), true);
-    pwSubmit.disabled = false; return;
-  }
-  setStatus('Signed in.');
-  finishSignin(r.body);
+  handlePwResult(await pwPost('/auth/password/login', email, password), email, password, '/auth/password/login', 'Sign-in failed: ', pwSubmit);
 });
 pwRegister.addEventListener('click', async () => {
   pwRegister.disabled = true;
@@ -969,16 +1044,44 @@ pwRegister.addEventListener('click', async () => {
   if (!email || !password) { setStatus('Email and password are required to register.', true); pwRegister.disabled = false; return; }
   if (password.length < 8) { setStatus('Password must be at least 8 characters.', true); pwRegister.disabled = false; return; }
   setStatus('Creating your account…');
-  const r = await pwPost('/auth/password/register', email, password);
-  if (!r.ok || !r.body.redirectTo) {
-    const msg = r.status === 409
-      ? 'You already have an account with this email — tap Sign in.'
-      : 'Could not create account: ' + (r.body.reason || r.body.error || r.status);
-    setStatus(msg, true);
-    pwRegister.disabled = false; return;
-  }
-  setStatus('Account created.');
-  finishSignin(r.body);
+  handlePwResult(await pwPost('/auth/password/register', email, password), email, password, '/auth/password/register', 'Could not create account: ', pwRegister);
+});
+// Confirm the code → binds the email + mints the session (the only such path).
+verifyForm.addEventListener('submit', async (ev) => {
+  ev.preventDefault();
+  if (!pendingVerify) { setStatus('Start again from the Email tab.', true); return; }
+  const code = document.getElementById('verify-code').value.trim();
+  if (!/^[0-9]{6}$/.test(code)) { setStatus('Enter the 6-digit code we emailed.', true); return; }
+  verifySubmit.disabled = true;
+  setStatus('Confirming…');
+  const res = await fetch('/auth/password/verify', {
+    method: 'POST', credentials: 'same-origin',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ email: pendingVerify.email, code }),
+  });
+  const body = await res.json().catch(() => ({}));
+  if (res.ok && body.redirectTo) { setStatus('Email confirmed.'); finishSignin(body); return; }
+  verifySubmit.disabled = false;
+  if (res.status === 401) setStatus('That code is wrong or expired — check the latest email, or resend.', true);
+  else if (res.status === 429) setStatus('Too many attempts — wait a minute, then resend a code.', true);
+  else setStatus('Could not confirm: ' + (body.reason || body.error || res.status), true);
+});
+resendBtn.addEventListener('click', async () => {
+  if (!pendingVerify) return;
+  resendBtn.disabled = true;
+  setStatus('Sending a new code…');
+  const r = await pwPost(pendingVerify.path, pendingVerify.email, pendingVerify.password);
+  resendBtn.disabled = false;
+  if (r.ok && r.body && r.body.status === 'verification_required') setStatus('New code sent to ' + pendingVerify.email + '.');
+  else if (r.ok && r.body && r.body.redirectTo) finishSignin(r.body);
+  else if (r.status === 429) setStatus('Too many requests — wait a minute before resending.', true);
+  else setStatus('Could not resend: ' + (r.body.reason || r.body.error || r.status), true);
+});
+backBtn.addEventListener('click', () => {
+  pendingVerify = null;
+  document.getElementById('panel-verify').setAttribute('data-active', 'false');
+  document.querySelector('.tabs').style.display = '';
+  activate('password');
 });
 
 // --- SIWE flow (preserves /siwe/challenge + /siwe/verify + personal_sign). ---
@@ -1417,6 +1520,9 @@ export function mountSiweRoutes(
             statement: 'Sign in to Citrate',
             clientId,
             googleEnabled: options.googleEnabled ?? false,
+            githubEnabled: options.githubEnabled ?? false,
+            discordEnabled: options.discordEnabled ?? false,
+            xEnabled: options.xEnabled ?? false,
             version: options.version ?? 'dev',
             cspNonce: nonce,
             ...(options.walletConnectProjectId

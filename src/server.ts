@@ -287,6 +287,20 @@ export async function createProvider(
       process.env.CITRATE_AA_GOOGLE_CLIENT_ID &&
         process.env.CITRATE_AA_GOOGLE_CLIENT_SECRET,
     );
+  // #87.3 — the OAuth2 federation providers (github/discord/x) render a button on
+  // the interaction page ONLY when their CLIENT_ID + CLIENT_SECRET are set, exactly
+  // like Google. This governs the UI; `mountConfiguredOAuth2Providers` mounts the
+  // actual /auth/<name>/* routes below under the identical env gate, so the button
+  // and the route can never disagree.
+  const githubEnabled = Boolean(
+    process.env.CITRATE_AA_GITHUB_CLIENT_ID && process.env.CITRATE_AA_GITHUB_CLIENT_SECRET,
+  );
+  const discordEnabled = Boolean(
+    process.env.CITRATE_AA_DISCORD_CLIENT_ID && process.env.CITRATE_AA_DISCORD_CLIENT_SECRET,
+  );
+  const xEnabled = Boolean(
+    process.env.CITRATE_AA_X_CLIENT_ID && process.env.CITRATE_AA_X_CLIENT_SECRET,
+  );
   // Footer build version: read once from package.json. Best-effort so dev/test
   // never crash if the file's missing — we just label the build "dev".
   const version = readPackageVersion();
@@ -297,6 +311,9 @@ export async function createProvider(
     signingJwk: jwks.keys[0],
     publicClient,
     googleEnabled,
+    githubEnabled,
+    discordEnabled,
+    xEnabled,
     version,
     ...(nonceStore ? { nonceStore } : {}),
     ...(walletConnectProjectId ? { walletConnectProjectId } : {}),
