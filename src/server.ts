@@ -339,13 +339,21 @@ export async function createProvider(
   mountDirectoryRoutes(provider);
 
   const rpId = rpIdFromIssuer(issuer);
+  // WebAuthn origin allowlist. The browser/OIDC ceremony runs on the issuer
+  // (https://auth.citrate.ai in prod), so that's always allowed. FWA #87.2: the
+  // desktop app may run the passkey ceremony from its own webview origin — add
+  // those via CITRATE_WEBAUTHN_EXTRA_ORIGINS (comma-separated) so passkeys work
+  // FROM THE APP without a code change. The rpID stays auth.citrate.ai for all
+  // (Apple binds the credential to the RP ID, not the invoking origin).
+  const extraOrigins = (process.env.CITRATE_WEBAUTHN_EXTRA_ORIGINS ?? '')
+    .split(',')
+    .map((o) => o.trim())
+    .filter((o) => o.length > 0);
   mountWebauthnRoutes(provider, {
     rp: {
       rpId,
       rpName: 'Citrate',
-      // WebAuthn requires the origin match the issuer host; in dev that's
-      // http://localhost:PORT, in prod https://auth.citrate.ai.
-      expectedOrigin: issuer,
+      expectedOrigin: extraOrigins.length > 0 ? [issuer, ...extraOrigins] : issuer,
     },
   });
 
