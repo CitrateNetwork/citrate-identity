@@ -21,6 +21,7 @@ import type { AddressInfo } from 'node:net';
 import { createHash, randomBytes } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createProvider } from '../src/server.js';
+import { armEmailCapture, lastVerificationCode } from './helpers/verify.js';
 import { InMemoryHandoffStore } from '../src/handoff-store.js';
 import {
   setUserStore,
@@ -87,6 +88,7 @@ async function signUpAndToken(
     jar.absorb(view);
   }
 
+  armEmailCapture();
   const reg = await fetch(`${baseUrl}/auth/password/register`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', cookie: jar.header() },
@@ -94,8 +96,16 @@ async function signUpAndToken(
     redirect: 'manual',
   });
   jar.absorb(reg);
+  // FWA #87.1: register no longer signs in — verify the emailed code.
+  const ver = await fetch(`${baseUrl}/auth/password/verify`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', cookie: jar.header() },
+    body: JSON.stringify({ email, code: lastVerificationCode() }),
+    redirect: 'manual',
+  });
+  jar.absorb(ver);
 
-  let location: string | null = ((await reg.json()) as { redirectTo: string }).redirectTo;
+  let location: string | null = ((await ver.json()) as { redirectTo: string }).redirectTo;
   let code = '';
   for (let hop = 0; hop < 12 && location; hop++) {
     const url = location.startsWith('http') ? location : `${baseUrl}${location}`;

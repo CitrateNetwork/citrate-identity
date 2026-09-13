@@ -38,6 +38,7 @@ import { mountStaticAssets } from './static-assets.js';
 import { mountPasswordRoutes } from './auth/password-routes.js';
 import { mountWebauthnRoutes } from './auth/webauthn-routes.js';
 import { mountGoogleRoutes } from './auth/google-routes.js';
+import { mountConfiguredOAuth2Providers } from './auth/oauth2-provider.js';
 import { initAuthStoresFromEnv } from './auth/stores.js';
 import { rpIdFromIssuer } from './auth/webauthn.js';
 import { initKycStoreFromEnv, getKycStore } from './kyc.js';
@@ -63,6 +64,7 @@ import { mountIdentityRegistryRoutes, setWalletRegistry } from './identity-regis
 import { initWalletRegistryFromEnv } from './wallet-registry-pg.js';
 import { mountDirectoryRoutes, setDirectoryStore } from './directory.js';
 import { initDirectoryStoreFromEnv } from './directory-pg.js';
+import { initEmailVerificationStoreFromEnv } from './auth/email-verification-pg.js';
 import { getUserStore } from './auth/stores.js';
 /** Canonical lowercase UUID — only UUID-keyed subs have a user record to bind. */
 const REGISTRY_UUID_RE =
@@ -337,13 +339,21 @@ export async function createProvider(
   mountDirectoryRoutes(provider);
 
   const rpId = rpIdFromIssuer(issuer);
+  // WebAuthn origin allowlist. The browser/OIDC ceremony runs on the issuer
+  // (https://auth.citrate.ai in prod), so that's always allowed. FWA #87.2: the
+  // desktop app may run the passkey ceremony from its own webview origin — add
+  // those via CITRATE_WEBAUTHN_EXTRA_ORIGINS (comma-separated) so passkeys work
+  // FROM THE APP without a code change. The rpID stays auth.citrate.ai for all
+  // (Apple binds the credential to the RP ID, not the invoking origin).
+  const extraOrigins = (process.env.CITRATE_WEBAUTHN_EXTRA_ORIGINS ?? '')
+    .split(',')
+    .map((o) => o.trim())
+    .filter((o) => o.length > 0);
   mountWebauthnRoutes(provider, {
     rp: {
       rpId,
       rpName: 'Citrate',
-      // WebAuthn requires the origin match the issuer host; in dev that's
-      // http://localhost:PORT, in prod https://auth.citrate.ai.
-      expectedOrigin: issuer,
+      expectedOrigin: extraOrigins.length > 0 ? [issuer, ...extraOrigins] : issuer,
     },
   });
 
@@ -377,6 +387,25 @@ export async function createProvider(
         'CITRATE_AA_GOOGLE_CLIENT_SECRET is not — Google tab will render as ' +
         '"not enabled" since the routes were not mounted.',
     );
+  }
+
+  // FWA #87.3: GitHub / Discord / X federation. Each mounts ONLY when its
+  // CITRATE_AA_<PROVIDER>_CLIENT_ID + _SECRET are set (same gate as Google), and
+  // binds an email ONLY when the provider proves ownership. Callback is
+  // <ISSUER_URL>/auth/<name>/callback — register that exact URL in each app.
+  {
+    const mountedProviders = mountConfiguredOAuth2Providers(
+      provider,
+      process.env,
+      issuer,
+      options.redis,
+    );
+    if (mountedProviders.length > 0) {
+      // eslint-disable-next-line no-console
+      console.log(
+        `[citrate-identity] OAuth2 federation mounted: ${mountedProviders.join(', ')}`,
+      );
+    }
   }
 
   // IDP-KYC: the vendor-webhook stand-in that writes the LIVE KYC claim record
@@ -543,6 +572,11 @@ async function main(): Promise<void> {
   // Postgres in prod (same DATABASE_URL gate as the wallet registry), in-memory
   // in dev — so /directory/* persists bindings as soon as DATABASE_URL is set.
   await initDirectoryStoreFromEnv(process.env, setDirectoryStore);
+
+  // FWA #87.1: install the email-verification (Resend OTP) store. Same
+  // DATABASE_URL gate — Postgres in prod, in-memory in dev. Backs the
+  // verified-email gate on /auth/password/{register,login,verify}.
+  await initEmailVerificationStoreFromEnv(process.env);
 
   // Portal-registration WP-C: install the KycProvider singleton from env.
   // With KYC_PROVIDER unset, /kyc/start fails closed (503). Production

@@ -31,6 +31,27 @@ export interface UserStore {
     email?: string;
   }): Promise<UserRecord>;
   /**
+   * Create a user from a non-Google federation (GitHub/Discord/X, FWA #87.3).
+   * The email binds (email_verified=true) ONLY when proven — a provider with no
+   * proven email (X) creates an email-less account, mirroring createWithGoogle.
+   */
+  createWithFederated(args: {
+    provider: string;
+    providerSub: string;
+    email?: string;
+  }): Promise<UserRecord>;
+  /** Look up a user by a federated (provider, providerSub) pair. */
+  findByFederated(
+    provider: string,
+    providerSub: string,
+  ): Promise<UserRecord | undefined>;
+  /** Link a federated (provider, providerSub) onto an existing user. */
+  linkFederated(
+    userId: string,
+    provider: string,
+    providerSub: string,
+  ): Promise<void>;
+  /**
    * Create a brand-new account with no email/password/Google federation,
    * intended for a first-time passkey signup (WP-A). The caller is
    * expected to immediately insert a WebAuthn credential bound to the
@@ -55,6 +76,14 @@ export interface UserStore {
    * (`email-pw` | `passkey` | `google`) — surfaced as the
    * `signing_method` OIDC claim (EW-S1 WP-6). */
   setLastSigningMethod(id: string, method: string): Promise<void>;
+  /** Flip `email_verified` true. The SOLE caller is the email-verification
+   * flow (FWA #87.1) after a Resend OTP is confirmed — an email never binds /
+   * provisions / matches a grant until this runs (mirrors the Google guard). */
+  markEmailVerified(id: string): Promise<void>;
+  /** Set/replace the Argon2id password hash. Used by the verify flow to attach
+   * the pending signup password once ownership is proven, and as the
+   * email-proven password-reset path. */
+  rotatePasswordHash(id: string, passwordHash: string): Promise<void>;
 }
 
 /** WebAuthn credential store shape used by the webauthn HTTP routes. */
@@ -89,6 +118,8 @@ export class InMemoryUserStore implements UserStore {
   private readonly byId = new Map<string, UserRecord>();
   private readonly byEmail = new Map<string, string>();
   private readonly byGoogleSub = new Map<string, string>();
+  /** key = `${provider}:${providerSub}` → user id (FWA #87.3). */
+  private readonly byFederated = new Map<string, string>();
 
   async createWithEmailPassword(args: {
     email: string;
@@ -145,6 +176,55 @@ export class InMemoryUserStore implements UserStore {
     return rec;
   }
 
+  async createWithFederated(args: {
+    provider: string;
+    providerSub: string;
+    email?: string;
+  }): Promise<UserRecord> {
+    const key = `${args.provider}:${args.providerSub}`;
+    if (this.byFederated.has(key)) {
+      throw new Error('federated identity already registered');
+    }
+    const id = randomUUID();
+    const email = args.email ? normalizeEmail(args.email) : undefined;
+    if (email && this.byEmail.has(email)) {
+      throw new Error('email already registered');
+    }
+    const now = new Date();
+    const rec: UserRecord = {
+      id,
+      ...(email !== undefined ? { email } : {}),
+      // Same posture as createWithGoogle: the presence of an email here is the
+      // *proven* signal; an email-less federation (X) is unverified.
+      emailVerified: email !== undefined,
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.byId.set(id, rec);
+    if (email) this.byEmail.set(email, id);
+    this.byFederated.set(key, id);
+    return rec;
+  }
+
+  async findByFederated(
+    provider: string,
+    providerSub: string,
+  ): Promise<UserRecord | undefined> {
+    const id = this.byFederated.get(`${provider}:${providerSub}`);
+    return id ? this.byId.get(id) : undefined;
+  }
+
+  async linkFederated(
+    userId: string,
+    provider: string,
+    providerSub: string,
+  ): Promise<void> {
+    const key = `${provider}:${providerSub}`;
+    if (this.byFederated.has(key)) throw new Error('federated identity already linked');
+    if (!this.byId.has(userId)) return;
+    this.byFederated.set(key, userId);
+  }
+
   async createWithPasskey(): Promise<UserRecord> {
     const id = randomUUID();
     const now = new Date();
@@ -196,6 +276,20 @@ export class InMemoryUserStore implements UserStore {
     const rec = this.byId.get(id);
     if (!rec) return;
     rec.lastSigningMethod = method;
+    rec.updatedAt = new Date();
+  }
+
+  async markEmailVerified(id: string): Promise<void> {
+    const rec = this.byId.get(id);
+    if (!rec) return;
+    rec.emailVerified = true;
+    rec.updatedAt = new Date();
+  }
+
+  async rotatePasswordHash(id: string, passwordHash: string): Promise<void> {
+    const rec = this.byId.get(id);
+    if (!rec) return;
+    rec.passwordHash = passwordHash;
     rec.updatedAt = new Date();
   }
 }

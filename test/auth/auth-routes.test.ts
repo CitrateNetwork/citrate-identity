@@ -16,7 +16,7 @@ import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createHash, randomBytes } from 'node:crypto';
 import { resolve } from 'node:path';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createProvider } from '../../src/server.js';
 import {
   setUserStore,
@@ -25,6 +25,11 @@ import {
   InMemoryUserStore,
   InMemoryWebAuthnCredentialStore,
 } from '../../src/auth/stores.js';
+import {
+  setEmailVerificationStore,
+  InMemoryEmailVerificationStore,
+} from '../../src/auth/email-verification-pg.js';
+import { setEmailSender, resetEmailSender } from '../../src/email-send.js';
 import {
   setWalletClaimsConfig,
   uuidToUserId,
@@ -115,188 +120,172 @@ async function startInteraction(baseUrl: string): Promise<CookieJar> {
   return jar;
 }
 
-describe('POST /auth/password/*', () => {
+describe('POST /auth/password/* (verified-email gate, FWA #87.1)', () => {
   let h: Harness;
+  let lastTo: string | null = null;
+  let lastCode: string | null = null;
+
   beforeAll(async () => {
     h = await listenProvider();
   });
   afterAll(async () => {
+    resetEmailSender();
     await closeServer(h.server);
   });
+  beforeEach(() => {
+    // Fresh stores per test so codes/users don't bleed; capture the emailed code.
+    setUserStore(new InMemoryUserStore());
+    setEmailVerificationStore(new InMemoryEmailVerificationStore());
+    setWalletClaimsConfig(undefined);
+    lastTo = null;
+    lastCode = null;
+    setEmailSender(async (msg) => {
+      lastTo = msg.to;
+      const m = msg.subject.match(/(\d{6})/);
+      lastCode = m ? m[1] : null;
+      return true;
+    });
+  });
 
-  it('register creates a new user and returns a redirectTo', async () => {
-    const jar = await startInteraction(h.baseUrl);
-    const res = await fetch(`${h.baseUrl}/auth/password/register`, {
+  const json = { 'content-type': 'application/json' };
+  const post = (jar: CookieJar, path: string, body: unknown) =>
+    fetch(`${h.baseUrl}${path}`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', cookie: jar.header() },
-      body: JSON.stringify({ email: 'alice@example.com', password: 'correct-horse' }),
+      headers: { ...json, cookie: jar.header() },
+      body: JSON.stringify(body),
       redirect: 'manual',
+    });
+
+  it('register issues a code and creates NO user + NO session', async () => {
+    const jar = await startInteraction(h.baseUrl);
+    const res = await post(jar, '/auth/password/register', {
+      email: 'newbie@example.com',
+      password: 'correct horse battery staple',
     });
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { userId: string; redirectTo: string };
-    expect(typeof body.userId).toBe('string');
-    expect(body.redirectTo).toMatch(/\/auth\/?/);
+    const body = (await res.json()) as { status: string; redirectTo?: string };
+    expect(body.status).toBe('verification_required');
+    expect(body.redirectTo).toBeUndefined(); // no session yet
+    expect(lastTo).toBe('newbie@example.com');
+    expect(lastCode).toMatch(/^\d{6}$/);
+    // No user bound until the code is entered.
+    expect(await getUserStore().findByEmail('newbie@example.com')).toBeUndefined();
   });
 
-  it('register records signing_method and returns the predicted wallet (EW-S1 WP-6)', async () => {
-    setWalletClaimsConfig({
-      factory: '0xd951Cb15495cb6541F7541b9194B2D311E12FD57',
-      kernelImpl: '0x99b370120E7F0A4EA4F85cfcb86D4B8d41C3239b',
-    });
-    try {
-      const jar = await startInteraction(h.baseUrl);
-      const res = await fetch(`${h.baseUrl}/auth/password/register`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', cookie: jar.header() },
-        body: JSON.stringify({ email: 'wallet-claims@example.com', password: 'correct-horse' }),
-        redirect: 'manual',
-      });
-      expect(res.status).toBe(200);
-      const body = (await res.json()) as {
-        userId: string;
-        redirectTo: string;
-        walletAddress?: string;
-      };
-      // The response carries the counterfactual smart-wallet address so the
-      // interaction page can show it before the browser leaves for the RP.
-      expect(body.walletAddress).toBe(
-        predictWalletAddress(
-          '0xd951Cb15495cb6541F7541b9194B2D311E12FD57',
-          '0x99b370120E7F0A4EA4F85cfcb86D4B8d41C3239b',
-          uuidToUserId(body.userId),
-        ),
-      );
-      // The store records the sign-in method for the signing_method claim.
-      const rec = await getUserStore().findByEmail('wallet-claims@example.com');
-      expect(rec?.lastSigningMethod).toBe('email-pw');
-    } finally {
-      setWalletClaimsConfig(undefined);
-    }
-  });
-
-  it('register rejects a duplicate email with 409', async () => {
-    // First registration succeeds.
-    const jar1 = await startInteraction(h.baseUrl);
-    const first = await fetch(`${h.baseUrl}/auth/password/register`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', cookie: jar1.header() },
-      body: JSON.stringify({ email: 'bob@example.com', password: 'hunter2-secure' }),
-      redirect: 'manual',
-    });
-    expect(first.status).toBe(200);
-
-    const jar2 = await startInteraction(h.baseUrl);
-    const dup = await fetch(`${h.baseUrl}/auth/password/register`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', cookie: jar2.header() },
-      body: JSON.stringify({ email: 'bob@example.com', password: 'different-pw' }),
-      redirect: 'manual',
-    });
-    expect(dup.status).toBe(409);
-    const body = (await dup.json()) as { error: string };
-    expect(body.error).toBe('email_taken');
-  });
-
-  it('register validates the email + password shape', async () => {
+  it('register → verify creates a VERIFIED user + session + predicted wallet', async () => {
+    const factory = ('0x' + '11'.repeat(20)) as `0x${string}`;
+    const implementation = ('0x' + '22'.repeat(20)) as `0x${string}`;
+    setWalletClaimsConfig({ factory, kernelImpl: implementation });
     const jar = await startInteraction(h.baseUrl);
-    const badEmail = await fetch(`${h.baseUrl}/auth/password/register`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', cookie: jar.header() },
-      body: JSON.stringify({ email: 'not-an-email', password: 'whatever-long' }),
-      redirect: 'manual',
+    await post(jar, '/auth/password/register', {
+      email: 'grover@example.com',
+      password: 'correct horse battery staple',
     });
-    expect(badEmail.status).toBe(400);
-
-    const jar2 = await startInteraction(h.baseUrl);
-    const shortPw = await fetch(`${h.baseUrl}/auth/password/register`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', cookie: jar2.header() },
-      body: JSON.stringify({ email: 'charlie@example.com', password: 'short' }),
-      redirect: 'manual',
-    });
-    expect(shortPw.status).toBe(400);
-  });
-
-  it('login succeeds with the right password and returns a redirectTo', async () => {
-    const jar = await startInteraction(h.baseUrl);
-    const reg = await fetch(`${h.baseUrl}/auth/password/register`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', cookie: jar.header() },
-      body: JSON.stringify({ email: 'dave@example.com', password: 'my-real-password' }),
-      redirect: 'manual',
-    });
-    expect(reg.status).toBe(200);
-
-    // New interaction for the subsequent login (the register call burned the
-    // first interaction cookie via interactionResult).
-    const jar2 = await startInteraction(h.baseUrl);
-    const login = await fetch(`${h.baseUrl}/auth/password/login`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', cookie: jar2.header() },
-      body: JSON.stringify({ email: 'dave@example.com', password: 'my-real-password' }),
-      redirect: 'manual',
-    });
-    expect(login.status).toBe(200);
-    const body = (await login.json()) as { userId: string; redirectTo: string };
-    expect(typeof body.userId).toBe('string');
-    expect(body.redirectTo).toMatch(/\/auth\/?/);
-  });
-
-  it('login with a WRONG password on an existing account fails 401', async () => {
-    const jar = await startInteraction(h.baseUrl);
-    await fetch(`${h.baseUrl}/auth/password/register`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', cookie: jar.header() },
-      body: JSON.stringify({ email: 'eve@example.com', password: 'secret-secret' }),
-      redirect: 'manual',
-    });
-
-    const jar2 = await startInteraction(h.baseUrl);
-    const wrong = await fetch(`${h.baseUrl}/auth/password/login`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', cookie: jar2.header() },
-      body: JSON.stringify({ email: 'eve@example.com', password: 'wrong-secret' }),
-      redirect: 'manual',
-    });
-    expect(wrong.status).toBe(401);
-  });
-
-  it('login with an UNKNOWN email auto-creates the account (S1-WP1) → 200 created', async () => {
-    // The accidental-"Sign in" case: a user who meant to sign up is auto-created
-    // and lands on the address modal, not a confusing 401.
-    const jar = await startInteraction(h.baseUrl);
-    const res = await fetch(`${h.baseUrl}/auth/password/login`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', cookie: jar.header() },
-      body: JSON.stringify({ email: 'newcomer@example.com', password: 'correct-horse' }),
-      redirect: 'manual',
+    expect(lastCode).toBeTruthy();
+    const res = await post(jar, '/auth/password/verify', {
+      email: 'grover@example.com',
+      code: lastCode,
     });
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { created?: boolean; userId: string; redirectTo: string };
-    expect(body.created).toBe(true);
-    expect(body.userId).toBeTruthy();
+    const body = (await res.json()) as {
+      userId: string;
+      redirectTo: string;
+      emailVerified: boolean;
+      walletAddress?: string;
+    };
+    expect(body.emailVerified).toBe(true);
     expect(body.redirectTo).toBeTruthy();
+    const user = await getUserStore().findByEmail('grover@example.com');
+    expect(user?.emailVerified).toBe(true);
+    expect(body.walletAddress?.toLowerCase()).toBe(
+      predictWalletAddress(factory, implementation, uuidToUserId(body.userId)).toLowerCase(),
+    );
+  });
 
-    // ...and signing in AGAIN with the same creds now verifies the existing
-    // account (not a second create).
-    const jar2 = await startInteraction(h.baseUrl);
-    const again = await fetch(`${h.baseUrl}/auth/password/login`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', cookie: jar2.header() },
-      body: JSON.stringify({ email: 'newcomer@example.com', password: 'correct-horse' }),
-      redirect: 'manual',
+  it('register is enumeration-safe: an existing email returns the SAME shape (no 409)', async () => {
+    // Seed a verified user directly.
+    const seeded = await getUserStore().createWithEmailPassword({
+      email: 'taken@example.com',
+      passwordHash: 'x',
     });
-    expect(again.status).toBe(200);
-    const againBody = (await again.json()) as { created?: boolean; userId: string };
-    expect(againBody.created).toBeUndefined();
-    expect(againBody.userId).toBe(body.userId);
+    await getUserStore().markEmailVerified(seeded.id);
+    const jar = await startInteraction(h.baseUrl);
+    const res = await post(jar, '/auth/password/register', {
+      email: 'taken@example.com',
+      password: 'another password entirely',
+    });
+    expect(res.status).toBe(200); // NOT 409 — no existence oracle
+    const body = (await res.json()) as { status: string };
+    expect(body.status).toBe('verification_required');
+  });
+
+  it('verify with a wrong code fails 401 and creates nothing', async () => {
+    const jar = await startInteraction(h.baseUrl);
+    await post(jar, '/auth/password/register', {
+      email: 'oscar@example.com',
+      password: 'correct horse battery staple',
+    });
+    const res = await post(jar, '/auth/password/verify', {
+      email: 'oscar@example.com',
+      code: '000000',
+    });
+    expect([400, 401]).toContain(res.status);
+    expect(await getUserStore().findByEmail('oscar@example.com')).toBeUndefined();
+  });
+
+  it('login on a VERIFIED account with the right password signs in (no code)', async () => {
+    // Register + verify to create a verified account.
+    let jar = await startInteraction(h.baseUrl);
+    await post(jar, '/auth/password/register', {
+      email: 'ernie@example.com',
+      password: 'sunny day sweeping the clouds away',
+    });
+    await post(jar, '/auth/password/verify', { email: 'ernie@example.com', code: lastCode });
+    // Now a fresh interaction + correct password → direct sign-in.
+    lastCode = null;
+    jar = await startInteraction(h.baseUrl);
+    const res = await post(jar, '/auth/password/login', {
+      email: 'ernie@example.com',
+      password: 'sunny day sweeping the clouds away',
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { redirectTo: string; status?: string };
+    expect(body.redirectTo).toBeTruthy();
+    expect(body.status).toBeUndefined(); // signed in, not verification_required
+    expect(lastCode).toBeNull(); // no code emailed on a verified login
+  });
+
+  it('login on an unverified/unknown email issues a code (no session)', async () => {
+    const jar = await startInteraction(h.baseUrl);
+    const res = await post(jar, '/auth/password/login', {
+      email: 'stranger@example.com',
+      password: 'guessing at someone elses seat',
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { status: string; redirectTo?: string };
+    expect(body.status).toBe('verification_required');
+    expect(body.redirectTo).toBeUndefined();
+    expect(lastCode).toMatch(/^\d{6}$/);
+  });
+
+  it('validates email, password, and code shape', async () => {
+    const jar = await startInteraction(h.baseUrl);
+    expect(
+      (await post(jar, '/auth/password/register', { email: 'nope', password: 'x' })).status,
+    ).toBe(400);
+    expect(
+      (await post(jar, '/auth/password/register', { email: 'a@b.co', password: '' })).status,
+    ).toBe(400);
+    expect(
+      (await post(jar, '/auth/password/verify', { email: 'a@b.co', code: 'abc' })).status,
+    ).toBe(400);
   });
 
   it('rejects requests without an active interaction cookie', async () => {
     const res = await fetch(`${h.baseUrl}/auth/password/register`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ email: 'frank@example.com', password: 'whatever-pw' }),
+      headers: json,
+      body: JSON.stringify({ email: 'a@b.co', password: 'x'.repeat(12) }),
       redirect: 'manual',
     });
     expect(res.status).toBe(400);
