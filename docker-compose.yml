@@ -109,6 +109,21 @@ services:
       # register in Google Cloud Console: ${ISSUER_URL}/auth/google/callback
       CITRATE_AA_GOOGLE_CLIENT_ID: ${CITRATE_AA_GOOGLE_CLIENT_ID:-}
       CITRATE_AA_GOOGLE_CLIENT_SECRET: ${CITRATE_AA_GOOGLE_CLIENT_SECRET:-}
+      # FWA #87.3 — GitHub / Discord / X federation. Each mounts /auth/<name>/*
+      # when BOTH its id+secret are set. Register callback ${ISSUER_URL}/auth/<name>/callback.
+      CITRATE_AA_GITHUB_CLIENT_ID: ${CITRATE_AA_GITHUB_CLIENT_ID:-}
+      CITRATE_AA_GITHUB_CLIENT_SECRET: ${CITRATE_AA_GITHUB_CLIENT_SECRET:-}
+      CITRATE_AA_DISCORD_CLIENT_ID: ${CITRATE_AA_DISCORD_CLIENT_ID:-}
+      CITRATE_AA_DISCORD_CLIENT_SECRET: ${CITRATE_AA_DISCORD_CLIENT_SECRET:-}
+      CITRATE_AA_X_CLIENT_ID: ${CITRATE_AA_X_CLIENT_ID:-}
+      CITRATE_AA_X_CLIENT_SECRET: ${CITRATE_AA_X_CLIENT_SECRET:-}
+      # FWA #87.1 — Resend transactional email (verification codes). SMTP egress
+      # is blocked on the droplet, so this HTTPS sender is REQUIRED for the
+      # password verified-email flow (else register/login 503).
+      RESEND_API_KEY: ${RESEND_API_KEY:-}
+      # FWA #87.2 — extra allowed WebAuthn origins (e.g. the desktop app webview),
+      # comma-separated. rpID stays auth.citrate.ai regardless.
+      CITRATE_WEBAUTHN_EXTRA_ORIGINS: ${CITRATE_WEBAUTHN_EXTRA_ORIGINS:-}
       # Point the app at the in-network postgres/redis services. The credentials
       # come from the same env vars the postgres/redis services consume below.
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
