@@ -842,6 +842,20 @@ document.getElementById('guardian-save').addEventListener('click', async () => {
 });
 
 // --- PASSKEY flow (/auth/webauthn/authenticate-{options,verify}). ---
+// A first-time user has no passkey yet, so AUTHENTICATE can only fail (nothing to
+// select → NotAllowedError). Don't dead-end at "no passkeys found": point them at
+// the register flow, which needs NO prior session (WP-A self-enroll signup), and
+// promote the "Register a new passkey" control so it reads as the primary action.
+function offerPasskeySignup(prefix) {
+  const btn = document.getElementById('signup-passkey');
+  setStatus((prefix ? prefix + ' ' : '') + 'No passkey on this device yet. First time? Create one below — no password needed.', true);
+  if (btn) {
+    btn.classList.add('primary');
+    btn.classList.remove('altlink');
+    try { btn.focus(); } catch (e) {}
+  }
+}
+
 const passkeyBtn = document.getElementById('signin-passkey');
 passkeyBtn.addEventListener('click', async () => {
   passkeyBtn.disabled = true;
@@ -857,7 +871,12 @@ passkeyBtn.addEventListener('click', async () => {
     });
     if (!optsRes.ok) {
       const err = await optsRes.json().catch(() => ({}));
-      setStatus('Could not start passkey sign-in: ' + (err.reason || optsRes.status), true);
+      const reason = (err.reason || '') + '';
+      if (optsRes.status === 404 || /no.*passkey|no.*credential|not.*found/i.test(reason)) {
+        offerPasskeySignup('');
+      } else {
+        setStatus('Could not start passkey sign-in: ' + (reason || optsRes.status), true);
+      }
       passkeyBtn.disabled = false; return;
     }
     const options = await optsRes.json();
@@ -870,7 +889,7 @@ passkeyBtn.addEventListener('click', async () => {
     };
     const assertion = await navigator.credentials.get({ publicKey });
     if (!assertion) {
-      setStatus('No credential returned.', true);
+      offerPasskeySignup('');
       passkeyBtn.disabled = false; return;
     }
     const response = serializeAssertion(assertion);
@@ -882,13 +901,25 @@ passkeyBtn.addEventListener('click', async () => {
     });
     const result = await verifyRes.json();
     if (!verifyRes.ok || !result.redirectTo) {
-      setStatus('Passkey sign-in failed: ' + (result.reason || result.error || verifyRes.status), true);
+      const reason = (result.reason || result.error || '') + '';
+      if (/no.*passkey|no.*credential|unknown.*credential|not.*found|not.*registered/i.test(reason)) {
+        offerPasskeySignup('That passkey isn’t registered here.');
+      } else {
+        setStatus('Passkey sign-in failed: ' + (reason || verifyRes.status), true);
+      }
       passkeyBtn.disabled = false; return;
     }
     setStatus('Signed in.');
     finishSignin(result);
   } catch (err) {
-    setStatus('Error: ' + describeError(err), true);
+    // NotAllowedError is thrown both when there is no credential to select and when
+    // the user dismisses the prompt; either way the helpful next step is the
+    // create-a-passkey path, not a raw error.
+    if (err && (err.name === 'NotAllowedError' || err.name === 'InvalidStateError')) {
+      offerPasskeySignup('');
+    } else {
+      setStatus('Error: ' + describeError(err), true);
+    }
     passkeyBtn.disabled = false;
   }
 });
