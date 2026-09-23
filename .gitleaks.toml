@@ -1,0 +1,21 @@
+# gitleaks config for citrate-identity (public / open-core).
+# Uses the default rule set, plus a narrowly-scoped allowlist for the two AA
+# test-fixture files that hardcode a THROWAWAY signer key to produce
+# deterministic permit/predict signatures in unit tests.
+#
+# Safety: the production AA signer is read from the CITRATE_AA_IDENTITY_SIGNER_KEY
+# env var (src/aa/config.ts) — never hardcoded. The test key derives to
+# 0x37b36e6b4b8AfD3BFCA78370E372b66493531B7D, which holds no funds and has no
+# deployed/treasury/production role (verified: referenced nowhere else in the
+# federation). Publishing it is inert.
+title = "citrate-identity"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Throwaway AA test-fixture signer key (deterministic-signature unit tests only)."
+paths = [
+  '''test/aa/permit\.test\.ts''',
+  '''test/aa/predict\.test\.ts''',
+]
