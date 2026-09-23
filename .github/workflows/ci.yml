@@ -6,6 +6,7 @@ name: ci
 # first green run once GitHub Actions billing is restored.
 
 on:
+  workflow_dispatch:
   push:
     branches: [main]
   pull_request: {}
