@@ -1,6 +1,7 @@
 {
   "name": "citrate-identity",
   "version": "0.1.0",
+  "license": "BUSL-1.1",
   "private": true,
   "description": "Citrate OIDC/OAuth2 authority (auth.citrate.ai) — Stage-3 IDP-S0/S1 foundation built on panva oidc-provider.",
   "type": "module",

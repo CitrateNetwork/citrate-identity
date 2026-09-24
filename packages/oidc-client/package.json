@@ -2,7 +2,7 @@
   "name": "@citrate/oidc-client",
   "version": "0.1.0",
   "description": "Shared Citrate OIDC entitlement/KYC claim contract + RBAC helpers (AUTHSPINE). Framework-agnostic; consumed by every Citrate RP.",
-  "license": "Apache-2.0",
+  "license": "BUSL-1.1",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

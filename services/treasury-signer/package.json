@@ -1,6 +1,7 @@
 {
   "name": "citrate-treasury-signer",
   "version": "0.1.0",
+  "license": "BUSL-1.1",
   "private": true,
   "type": "module",
   "description": "Droplet signing worker for the Phase-D money path (D2.4, @rule8): holds the vault/SBT owner key, signs onlyOwner grant/mint, caps daily spend.",
