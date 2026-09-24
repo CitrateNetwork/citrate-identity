@@ -18,4 +18,7 @@ description = "Throwaway AA test-fixture signer key (deterministic-signature uni
 paths = [
   '''test/aa/permit\.test\.ts''',
   '''test/aa/predict\.test\.ts''',
+  # Same throwaway key (derives 0x37b3…1B7D: 0 balance, 0 nonce on 40204,
+  # verified 2026-09-24). Its omission kept the blocking secret-scan red on main.
+  '''test/aa/sponsor\.test\.ts''',
 ]
