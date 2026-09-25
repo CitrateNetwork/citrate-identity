@@ -1,9 +1,9 @@
 # citrate-treasury-signer (Phase-D D2.4 / CORE-S5.5, @rule8)
 
-The **droplet signing path** for the membership money flow. core-membership's grant
+The **isolated signing path** for the membership money flow. core-membership's grant
 orchestrator runs on Vercel and MUST NOT hold the vault/SBT owner key (@rule8); it
-POSTs grant/mint requests here, and this worker — holding the deterministic
-**treasury/grant signer** key on an operator droplet — signs the `onlyOwner` calls,
+POSTs grant/mint requests here. This worker holds the deterministic
+**treasury/grant signer** key on an operator host, signs the `onlyOwner` calls,
 broadcasts to chain 40204, and returns tx hashes.
 
 ## Why it's isolated
@@ -16,12 +16,11 @@ broadcasts to chain 40204, and returns tx hashes.
 - The key can only reach a fixed allow-list of `onlyOwner` methods on the two pinned
   contracts (vault + SBT). No arbitrary calldata, no balance transfer-out.
 
-## The key is DETERMINISTIC (survives reroll)
-`TREASURY_SIGNER_KEY` = the treasury/grant signer = `keccak256(DEPLOYER_PRIVATE_KEY ++
-utf8("citrate/treasury-grant-signer/v1"))`, regenerable via
-`citrate-chain/scripts/ops/derive-operator-keys.sh`. It owns `MembershipStakeVault` +
-`CitrateMemberSBT`. On a reroll the reroll runbook re-derives it, re-funds it, and
-redeploys the contracts owned by it — see the reroll master checklist.
+## The signer key
+`TREASURY_SIGNER_KEY` is the treasury/grant signer. It owns `MembershipStakeVault` and
+`CitrateMemberSBT`. The operator key ceremony provisions it; how it is derived, stored and
+rotated is kept in the private operator runbook, not in this public repository. On a re-roll
+the ceremony re-provisions and re-funds it, and redeploys the contracts it owns.
 
 ## Staking model — bond-clone (canonical, owner decision 2026-08-05)
 The 32k bond does **not** go to the member's EOA (that was ADR-2026-07-27, now
@@ -72,9 +71,9 @@ clone already exists (`bondOf` has code) / the sub already bound (`already_grant
 core-membership side: set `TREASURY_SIGNER_URL=https://<host>/v1/sign` (or the base, per
 its client) and the matching bearer token; leave `TREASURY_SIGNER_KEY` UNSET on Vercel.
 
-## Deploy (identity droplet)
+## Deploy (operator host)
 ```
-# on the droplet, as root
+# on the signer host, as an administrator
 install -d /opt/citrate-treasury-signer /var/lib/citrate-treasury-signer
 # copy server.mjs + package.json, then:
 cd /opt/citrate-treasury-signer && npm i --omit=dev
@@ -83,43 +82,35 @@ systemctl enable --now citrate-treasury-signer
 # Caddy: reverse_proxy the public route to 127.0.0.1:8790
 ```
 
-## Rekey at a deployer rotation (reroll PHASE 3.5)
+## Rekey after a re-roll
 
-When the deployer key rotates (e.g. the 2026-07-20 reroll — the old deployer was
-exposed by a `bash -x` trace), the grant signer rotates with it because it is
-`keccak256(DEPLOYER_PRIVATE_KEY ‖ "citrate/treasury-grant-signer/v1")`. The new
-signer is **`0xF42a19194fee89E71dC4b8631a71a9CeCf42B483`** and it owns the NEW
-CREATE2 SBT/vault (`DeployCoreMembership.FROZEN_OWNER`):
+A re-roll can move the vault and SBT addresses and rotate the signer. The rekey is off-chain: it swaps
+the signer credential and the two pinned-contract env vars (`MEMBERSHIP_STAKE_VAULT_ADDRESS`,
+`CITRATE_MEMBER_SBT_ADDRESS`) in the service env file. It changes no on-chain address.
 
-| | OLD | NEW |
-|---|---|---|
-| grant signer (`TREASURY_SIGNER_KEY`) | `0x9aFFF274…8A50` | `0xF42a1919…B483` |
-| `MEMBERSHIP_STAKE_VAULT_ADDRESS` | `0x0aceb7B4…267e` | `0x61E324cFd6B7Cb106AC0AD1dF163bdFef2b74268` |
-| `CITRATE_MEMBER_SBT_ADDRESS` | `0x149E85A3…4578` | `0x3e0c2B1cD29a615E4eA2E263C8e7df3Aef243E42` |
+Do not copy addresses from this README or from chat. Take them from the address book, which is the
+single source of truth:
 
-**This rekey is off-chain and address-neutral** — it swaps a credential + two
-pinned-contract env vars in `--env-file`; it changes NO on-chain address, NO
-genesis, NO CREATE2 projection, NO node sync. The addresses are fixed by the
-build (`FROZEN_OWNER`), not by this service. Verified: the signer derived from the
-new key == `FROZEN_OWNER` == the new SBT/vault owner.
+- `citrate-chain/contracts/addresses/40204.json`, top-level keys `MembershipStakeVault` and
+  `CitrateMemberSBT`, also rendered at [docs.citrate.ai/chain/addresses](https://docs.citrate.ai/chain/addresses).
 
-**Timing:** run AFTER `post-reroll-membership.sh` deploys the new SBT+vault (they
-must have code on-chain first) and AFTER the new signer is funded. Use `rekey.sh`
-(reads the private key on STDIN only — never argv/log):
+Before you rekey, confirm both addresses have code and are owned by the new signer:
 
 ```bash
-# from the DGX — key never touches a terminal/log:
-grep -m1 '^GRANT_SIGNER_PRIVATE_KEY=' /home/saul/Projects/Citrate-Labs/.env.testnet \
-  | cut -d= -f2 \
-  | ssh root@<droplet> \
-      'NEW_VAULT=0x61E324cFd6B7Cb106AC0AD1dF163bdFef2b74268 \
-       NEW_SBT=0x3e0c2B1cD29a615E4eA2E263C8e7df3Aef243E42 \
-       bash /opt/citrate-treasury-signer/rekey.sh'
+BOOK=citrate-chain/contracts/addresses/40204.json
+VAULT=$(jq -r '.MembershipStakeVault' $BOOK)
+SBT=$(jq -r '.CitrateMemberSBT' $BOOK)
+cast code  $VAULT --rpc-url https://rpc.citrate.ai          # must not be "0x"
+cast code  $SBT   --rpc-url https://rpc.citrate.ai          # must not be "0x"
+cast call  $VAULT "owner()(address)" --rpc-url https://rpc.citrate.ai
+cast call  $SBT   "owner()(address)" --rpc-url https://rpc.citrate.ai   # both == the new signer
 ```
 
-`rekey.sh` patches the env-file atomically, **recreates** the docker container
-(a plain `docker restart` does NOT re-read `--env-file`), and asserts `/health`
-reports the new signer + both new contracts.
+Then run `rekey.sh` on the signer host with `NEW_VAULT` and `NEW_SBT` set to those values. It reads
+the new private key on STDIN only (never argv or a log), patches the env file atomically, recreates the
+container (a plain `docker restart` does not re-read `--env-file`), and asserts that `/health` reports
+the new signer and both contracts. Run it only after the new contracts have code and the new signer is
+funded. Key handling for the STDIN pipe is covered in the private operator runbook.
 
 ## Dual-control (documented follow-up)
 Beta runs single-operator with the daily cap. To require a second approver, extend

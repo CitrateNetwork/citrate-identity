@@ -25,3 +25,14 @@ jobs:
       node-version: '20'
       # repo has no `lint` script — skip lint, keep build + test
       lint-script: ''
+
+  public-runbook:
+    # Public-claims accuracy tripwire: no ops topology or stale money-contract
+    # addresses in public READMEs and service runbooks.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Public runbook check
+        run: bash scripts/check-public-runbook.sh .
