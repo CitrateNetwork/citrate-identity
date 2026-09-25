@@ -40,6 +40,14 @@ export interface AaConfigEnv extends ConfigEnv {
    */
   CITRATE_AA_PAYMASTER?: string;
   CITRATE_AA_REGISTRAR_KEY?: string;
+  /**
+   * PBA-L3a-004: the canonical root-validator modules a deploy permit may name
+   * (CitrateECDSAValidator / WebAuthnP256Validator on 40204). A permit is only
+   * signed for an initData whose root validator is one of these AND is owned by
+   * the caller. Unset → /aa/enroll-validator answers 503 (fail closed).
+   */
+  CITRATE_AA_ECDSA_VALIDATOR?: string;
+  CITRATE_AA_WEBAUTHN_VALIDATOR?: string;
 }
 
 /**
@@ -54,6 +62,9 @@ export interface AaConfig {
   /** Present only when both paymaster env vars are set and well-formed. */
   paymaster?: Address;
   registrarKey?: Hex;
+  /** PBA-L3a-004: allowed root validators (absent → permits refused). */
+  ecdsaValidator?: Address;
+  webauthnValidator?: Address;
 }
 
 /**
@@ -116,6 +127,21 @@ export function loadAaConfig(env: AaConfigEnv): AaConfig {
     console.warn(`[aa-config] ${msg} — route will answer 503`);
   }
 
+  // PBA-L3a-004: allowed root validators. Malformed → fail closed in prod.
+  const ecdsaValidator = (env.CITRATE_AA_ECDSA_VALIDATOR ?? '').trim();
+  const webauthnValidator = (env.CITRATE_AA_WEBAUTHN_VALIDATOR ?? '').trim();
+  for (const [name, v] of [
+    ['CITRATE_AA_ECDSA_VALIDATOR', ecdsaValidator],
+    ['CITRATE_AA_WEBAUTHN_VALIDATOR', webauthnValidator],
+  ] as const) {
+    if (v && !isAddress(v)) {
+      const msg = `${name} must be a 20-byte 0x-prefixed address`;
+      if (isProd) throw new Error(msg);
+      // eslint-disable-next-line no-console
+      console.warn(`[aa-config] ${msg} — ignored`);
+    }
+  }
+
   return {
     factory: factory as Address,
     kernelImpl: kernelImpl as Address,
@@ -125,6 +151,8 @@ export function loadAaConfig(env: AaConfigEnv): AaConfig {
     ...(registrarOk
       ? { paymaster: paymaster as Address, registrarKey: registrarKey as Hex }
       : {}),
+    ...(isAddress(ecdsaValidator) ? { ecdsaValidator: ecdsaValidator as Address } : {}),
+    ...(isAddress(webauthnValidator) ? { webauthnValidator: webauthnValidator as Address } : {}),
   };
 }
 

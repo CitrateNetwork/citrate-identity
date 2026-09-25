@@ -37,7 +37,8 @@ import { verifyAaStackOnChain, formatAaStackProblems } from './aa/verify-stack.j
 import { mountStaticAssets } from './static-assets.js';
 import { mountPasswordRoutes } from './auth/password-routes.js';
 import { createRateLimiter, type RateLimiter } from './auth/rate-limit.js';
-import { mountWebauthnRoutes } from './auth/webauthn-routes.js';
+import { initAccountEpochStore, mountSessionEpochGuard } from './auth/account-epoch.js';
+import { mountWebauthnRoutes, RedisChallengeStore } from './auth/webauthn-routes.js';
 import { mountGoogleRoutes } from './auth/google-routes.js';
 import { mountConfiguredOAuth2Providers } from './auth/oauth2-provider.js';
 import { initAuthStoresFromEnv } from './auth/stores.js';
@@ -242,6 +243,12 @@ export async function createProvider(
     ...(pingDb ? { pingDb } : {}),
   });
 
+  // PBA-L3a-008: account-wide revocation epoch (password reset / log out
+  // everywhere). Shared via Redis when wired; the guard ends stale browser
+  // sessions before any route reads them.
+  initAccountEpochStore(options.redis);
+  mountSessionEpochGuard(provider);
+
   // Hosted OAuth redirect bounce (GET /oauth/callback) for Citrate Core desktop
   // MCP sign-in: providers that reject the http-loopback redirect (Notion) point
   // at https://auth.citrate.ai/oauth/callback, which 302s the browser back to the
@@ -380,6 +387,8 @@ export async function createProvider(
       rpName: 'Citrate',
       expectedOrigin: extraOrigins.length > 0 ? [issuer, ...extraOrigins] : issuer,
     },
+    // PBA-L3a-013: challenges shared across instances when Redis is wired.
+    ...(options.redis ? { challengeStore: new RedisChallengeStore(options.redis) } : {}),
   });
 
   // EW-S1 WP-6 slice C — Google federation. Mount the OAuth start +
@@ -527,7 +536,15 @@ export async function createProvider(
           '(Set CITRATE_AA_SKIP_ONCHAIN_VERIFY=1 to bypass — UNSAFE, offline use only.)',
       );
     } else {
-      mountAaRoutes(provider, { config: aaCfg, rpcUrl: rpc });
+      mountAaRoutes(provider, {
+        config: aaCfg,
+        rpcUrl: rpc,
+        // Permit budget shared across instances (R2 verifier nit, PBA-L3a-004).
+        redis: options.redis,
+        ...(process.env.CITRATE_AA_GUARDIAN_RECOVERY
+          ? { recoveryModule: process.env.CITRATE_AA_GUARDIAN_RECOVERY as `0x${string}` }
+          : {}),
+      });
     // EW-S1 WP-10 item 31: guardian nominations — stored at signup,
     // installed on-chain with the wallet's first deploy (the SDK appends
     // the served initConfig entry to initialize()). Citrate's own signer

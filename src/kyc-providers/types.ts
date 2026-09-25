@@ -102,6 +102,12 @@ export interface KycProvider {
      * caller validates this against an allowlist first.
      */
     returnTo?: string;
+    /**
+     * PBA-L3a-009: secret of the browser that started verification (also set as
+     * an HttpOnly cookie). Providers that host their own capture (in-house) bind
+     * the capture session to it; vendor-hosted providers may ignore it.
+     */
+    browserBinding?: string;
   }): Promise<{
     /** Embedded-SDK access token. Empty when a hosted `redirectUrl` is used. */
     token: string;

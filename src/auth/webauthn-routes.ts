@@ -38,7 +38,7 @@
  * Challenge storage is in-memory (process-local). For the WP-A acceptance
  * surface this is sufficient: panva sticks a browser to a single instance
  * during an interaction via its session cookie, and authority deploys are
- * currently single-instance. A Redis-backed challenge store is a follow-up
+ * Redis-backed when REDIS_URL is wired (PBA-L3a-013); was a follow-up
  * mirror of {@link RedisNonceStore}.
  */
 
@@ -59,6 +59,7 @@ import {
 } from './webauthn.js';
 import { getUserStore, getWebAuthnStore } from './stores.js';
 import { predictedWalletForAccount } from '../aa/wallet-claims.js';
+import type { RedisLike } from '../redis.js';
 
 type Ctx = Parameters<Parameters<Provider['use']>[0]>[0];
 type Next = Parameters<Parameters<Provider['use']>[0]>[1];
@@ -73,14 +74,21 @@ interface PendingChallenge {
 }
 
 /**
- * In-memory challenge store. Keyed by `<flow>:<interactionUid>` so an
- * authentication and a registration challenge for the same interaction
- * don't collide.
+ * Challenge store. Keyed by `<flow>:<interactionUid>` so an authentication and a
+ * registration challenge for the same interaction don't collide. Single-use +
+ * TTL. PBA-L3a-013: Redis-backed when REDIS_URL is wired (a challenge issued by
+ * one instance must be consumable on another behind the load balancer), in
+ * memory otherwise.
  */
-class ChallengeStore {
+export interface ChallengeStore {
+  put(key: string, challenge: string, userId?: string): Promise<void>;
+  take(key: string): Promise<PendingChallenge | undefined>;
+}
+
+export class InMemoryChallengeStore implements ChallengeStore {
   private readonly entries = new Map<string, PendingChallenge>();
 
-  put(key: string, challenge: string, userId?: string): void {
+  async put(key: string, challenge: string, userId?: string): Promise<void> {
     this.entries.set(key, {
       challenge,
       ...(userId !== undefined ? { userId } : {}),
@@ -88,12 +96,44 @@ class ChallengeStore {
     });
   }
 
-  take(key: string): PendingChallenge | undefined {
+  async take(key: string): Promise<PendingChallenge | undefined> {
     const e = this.entries.get(key);
     if (!e) return undefined;
     this.entries.delete(key);
     if (e.expiresAt < Date.now()) return undefined;
     return e;
+  }
+}
+
+/** Key prefix, namespaced away from nonces / OAuth state / hand-offs. */
+const CHALLENGE_PREFIX = 'webauthn_challenge:';
+
+export class RedisChallengeStore implements ChallengeStore {
+  constructor(private readonly redis: RedisLike) {}
+
+  async put(key: string, challenge: string, userId?: string): Promise<void> {
+    await this.redis.set(
+      CHALLENGE_PREFIX + key,
+      JSON.stringify({ challenge, ...(userId !== undefined ? { userId } : {}) }),
+      'PX',
+      CHALLENGE_TTL_MS,
+    );
+  }
+
+  async take(key: string): Promise<PendingChallenge | undefined> {
+    const raw = await this.redis.getdel(CHALLENGE_PREFIX + key); // single-use across instances
+    if (raw === null) return undefined;
+    try {
+      const v = JSON.parse(raw) as { challenge?: unknown; userId?: unknown };
+      if (typeof v.challenge !== 'string') return undefined;
+      return {
+        challenge: v.challenge,
+        ...(typeof v.userId === 'string' ? { userId: v.userId } : {}),
+        expiresAt: Date.now() + CHALLENGE_TTL_MS, // Redis enforced the TTL
+      };
+    } catch {
+      return undefined;
+    }
   }
 }
 
@@ -129,6 +169,8 @@ function respondJson(
 export interface WebAuthnRouteOptions {
   /** Relying party identity Citrate's WebAuthn uses (rpID + origin). */
   rp: RelyingPartyConfig;
+  /** PBA-L3a-013: shared challenge store (Redis in production). */
+  challengeStore?: ChallengeStore;
 }
 
 /**
@@ -139,7 +181,7 @@ export function mountWebauthnRoutes(
   provider: Provider,
   options: WebAuthnRouteOptions,
 ): void {
-  const challenges = new ChallengeStore();
+  const challenges: ChallengeStore = options.challengeStore ?? new InMemoryChallengeStore();
   const { rp } = options;
 
   provider.use(async (ctx: Ctx, next: Next) => {
@@ -167,13 +209,13 @@ export function mountWebauthnRoutes(
 
     if (ctx.path === '/auth/webauthn/authenticate-options') {
       const opts = await buildAuthenticationOptions({ rp });
-      challenges.put(`auth:${interactionUid}`, opts.challenge);
+      await challenges.put(`auth:${interactionUid}`, opts.challenge);
       respondJson(ctx.res, 200, opts);
       return;
     }
 
     if (ctx.path === '/auth/webauthn/authenticate-verify') {
-      const pending = challenges.take(`auth:${interactionUid}`);
+      const pending = await challenges.take(`auth:${interactionUid}`);
       if (!pending) {
         respondJson(ctx.res, 400, {
           error: 'invalid_request',
@@ -287,13 +329,13 @@ export function mountWebauthnRoutes(
         userName: 'New Citrate user',
         userDisplayName: 'New Citrate user',
       });
-      challenges.put(`signup:${interactionUid}`, opts.challenge, pendingUserId);
+      await challenges.put(`signup:${interactionUid}`, opts.challenge, pendingUserId);
       respondJson(ctx.res, 200, opts);
       return;
     }
 
     if (ctx.path === '/auth/webauthn/signup-verify') {
-      const pending = challenges.take(`signup:${interactionUid}`);
+      const pending = await challenges.take(`signup:${interactionUid}`);
       if (!pending || !pending.userId) {
         respondJson(ctx.res, 400, {
           error: 'invalid_request',
@@ -404,13 +446,13 @@ export function mountWebauthnRoutes(
         userName: accountId,
         excludeCredentialIds: existing.map((c) => c.credentialId),
       });
-      challenges.put(`reg:${interactionUid}`, opts.challenge, accountId);
+      await challenges.put(`reg:${interactionUid}`, opts.challenge, accountId);
       respondJson(ctx.res, 200, opts);
       return;
     }
 
     if (ctx.path === '/auth/webauthn/register-verify') {
-      const pending = challenges.take(`reg:${interactionUid}`);
+      const pending = await challenges.take(`reg:${interactionUid}`);
       if (!pending || pending.userId !== accountId) {
         respondJson(ctx.res, 400, {
           error: 'invalid_request',

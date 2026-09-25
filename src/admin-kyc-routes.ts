@@ -13,7 +13,8 @@
  *   POST /unlock/request           {caseId, reason} dual-control step 1
  *   POST /unlock/approve           {unlockId} dual-control step 2 → decrypt once
  *   POST /delete                   {sub} delete/tombstone a user (D3)
- *   GET  /dsar?sub=                export everything held about a subject
+ *   POST /dsar/request             {sub, reason} DSAR dual-control step 1 (PBA-L3a-006)
+ *   POST /dsar/approve             {requestId} step 2 by a DIFFERENT admin → export once
  *   GET  /audit?caseId=            audit log + chain-verification status
  */
 
@@ -31,9 +32,10 @@ import type { CaseStatus } from './kyc-cases-pg.js';
 import {
   adjudicateCase,
   approveUnlock,
+  approveDsar,
   deleteUser,
-  dsarExport,
   listCases,
+  requestDsar,
   requestUnlock,
 } from './admin-kyc-actions.js';
 
@@ -49,13 +51,14 @@ export const ADMIN_STATE_CHANGING_ROUTES: readonly string[] = [
   '/admin/kyc/unlock/request',
   '/admin/kyc/unlock/approve',
   '/admin/kyc/delete',
+  '/admin/kyc/dsar/request',
+  '/admin/kyc/dsar/approve',
 ];
 
 /** Read-only JSON routes: same-origin only and the strict admin cookie required. */
 export const ADMIN_READ_ROUTES: readonly string[] = [
   '/admin/kyc/cases',
   '/admin/kyc/case',
-  '/admin/kyc/dsar',
   '/admin/kyc/audit',
 ];
 
@@ -158,6 +161,12 @@ export function mountAdminKycRoutes(provider: Provider): void {
   }
   provider.use(async (ctx, next) => {
     if (!ctx.path.startsWith('/admin/kyc')) return next();
+    // Never frameable (R2 verifier nit on PBA-L3a-001): a same-site sibling page
+    // (any *.citrate.ai XSS) could otherwise frame the console, and both the Lax
+    // and the Strict admin cookie flow to a same-site frame → clickjacking of the
+    // approve button. Set on every /admin/kyc response, allowed or not.
+    ctx.res.setHeader('x-frame-options', 'DENY');
+    ctx.res.setHeader('content-security-policy', "frame-ancestors 'none'");
     const p = getKycProvider();
     const ih = p instanceof InhouseKycProvider ? p : null;
     const audit = getKycAuditLog();
@@ -305,11 +314,6 @@ export function mountAdminKycRoutes(provider: Provider): void {
         evidence,
       });
     }
-    if (ctx.method === 'GET' && ctx.path === '/admin/kyc/dsar') {
-      const sub = str(ctx.query['sub']);
-      if (!sub) return sendJson(ctx.res, 400, { error: 'sub_required' });
-      return sendJson(ctx.res, 200, await dsarExport(store, audit, { actor, sub, getDek }));
-    }
     if (ctx.method === 'GET' && ctx.path === '/admin/kyc/audit') {
       const caseId = str(ctx.query['caseId']);
       const [entries, chain] = await Promise.all([audit.list({ caseId }), audit.verifyChain()]);
@@ -337,13 +341,18 @@ export function mountAdminKycRoutes(provider: Provider): void {
         }
         return sendJson(ctx.res, 400, r);
       }
-      if (ctx.path === '/admin/kyc/unlock/request' || ctx.path === '/admin/kyc/unlock/approve') {
+      if (
+        ctx.path === '/admin/kyc/unlock/request' ||
+        ctx.path === '/admin/kyc/unlock/approve' ||
+        ctx.path === '/admin/kyc/dsar/request' ||
+        ctx.path === '/admin/kyc/dsar/approve'
+      ) {
         // R-2: dual-control requires ≥2 DISTINCT admins provisioned, else approver≠requester
         // can never be satisfied. Fail CLOSED rather than silently non-functional.
         if (admins.length < 2) {
           return sendJson(ctx.res, 409, {
             error: 'dual_control_unavailable',
-            reason: 'Subpoena/dispute unlock requires ≥2 distinct admins in KYC_ADMIN_SUBS (two-person rule). Provision a second admin first.',
+            reason: 'Subpoena/dispute unlock and DSAR export require ≥2 distinct admins in KYC_ADMIN_SUBS (two-person rule). Provision a second admin first.',
           });
         }
       }
@@ -357,6 +366,18 @@ export function mountAdminKycRoutes(provider: Provider): void {
         const unlockId = str(body['unlockId']);
         if (!unlockId) return sendJson(ctx.res, 400, { error: 'unlockId_required' });
         const r = await approveUnlock(store, audit, { approver: actor, unlockId, getDek });
+        return sendJson(ctx.res, r.ok ? 200 : 400, r);
+      }
+      if (ctx.path === '/admin/kyc/dsar/request') {
+        const sub = str(body['sub']);
+        const reason = str(body['reason']);
+        if (!sub || !reason) return sendJson(ctx.res, 400, { error: 'sub + reason required' });
+        return sendJson(ctx.res, 200, await requestDsar(store, audit, { actor, sub, reason }));
+      }
+      if (ctx.path === '/admin/kyc/dsar/approve') {
+        const requestId = str(body['requestId']);
+        if (!requestId) return sendJson(ctx.res, 400, { error: 'requestId_required' });
+        const r = await approveDsar(store, audit, { approver: actor, requestId, getDek });
         return sendJson(ctx.res, r.ok ? 200 : 400, r);
       }
       if (ctx.path === '/admin/kyc/delete') {

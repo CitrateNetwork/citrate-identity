@@ -39,10 +39,10 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
 }
 
 /** Bearer access token → accountId (sub), or null. Mirrors identity-registry's resolveSub. */
-async function resolveSub(
+async function resolveToken(
   provider: Provider,
   req: IncomingMessage,
-): Promise<string | null> {
+): Promise<{ sub: string; clientId: string } | null> {
   const auth = req.headers['authorization'];
   if (typeof auth !== 'string') return null;
   const m = /^Bearer\s+(.+)$/i.exec(auth.trim());
@@ -50,11 +50,19 @@ async function resolveSub(
   try {
     const token = await provider.AccessToken.find(m[1].trim());
     if (!token || token.isExpired) return null;
-    return typeof token.accountId === 'string' ? token.accountId : null;
+    if (typeof token.accountId !== 'string' || typeof token.clientId !== 'string') return null;
+    return { sub: token.accountId, clientId: token.clientId };
   } catch {
     return null;
   }
 }
+
+/**
+ * PBA-L3a-005 variant: only the desktop apps mint hand-offs. A hand-off opens
+ * /kyc/start or /account AS the token's subject in whichever browser follows
+ * it, so a leaked token from any other RP must not be able to produce one.
+ */
+export const KYC_HANDOFF_CLIENT_IDS: ReadonlySet<string> = new Set(['citrate-core', 'citrate-gui-native']);
 
 async function readJson(req: IncomingMessage, maxBytes = 16 * 1024): Promise<Record<string, unknown>> {
   const chunks: Buffer[] = [];
@@ -128,11 +136,20 @@ export function mountKycHandoffRoute(provider: Provider, store: HandoffStore): v
       return;
     }
 
-    const sub = await resolveSub(provider, ctx.req);
+    const caller = await resolveToken(provider, ctx.req);
+    const sub = caller?.sub;
     if (!sub) {
       sendJson(ctx.res, 401, {
         error: 'unauthorized',
         reason: 'a valid Bearer access token is required to mint a hand-off',
+      });
+      return;
+    }
+
+    if (!KYC_HANDOFF_CLIENT_IDS.has(caller!.clientId)) {
+      sendJson(ctx.res, 403, {
+        error: 'client_not_permitted',
+        reason: 'only the Citrate desktop app may mint a verification hand-off',
       });
       return;
     }

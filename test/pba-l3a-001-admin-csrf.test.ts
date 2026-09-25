@@ -31,6 +31,8 @@ const ROUTES = [
   '/admin/kyc/unlock/request',
   '/admin/kyc/unlock/approve',
   '/admin/kyc/delete',
+  '/admin/kyc/dsar/request',
+  '/admin/kyc/dsar/approve',
 ];
 
 const admin = privateKeyToAccount(`0x${'c3'.repeat(32)}` as Hex);
@@ -75,10 +77,34 @@ async function pendingCase(): Promise<string> {
   return c.caseId;
 }
 
+/**
+ * Every /admin/kyc/... path literal in a source text: single-, double- or
+ * back-quoted, any path characters (hyphens, digits, template placeholders).
+ * The old `[a-z/]+` scan silently skipped such paths (R2 verifier nit).
+ */
+export function scanAdminPaths(src: string): Set<string> {
+  return new Set([...src.matchAll(/['"`](\/admin\/kyc\/[^'"`\s?#]+)['"`]/g)].map((m) => m[1]!));
+}
+
 describe('PBA-L3a-001 admin console CSRF', () => {
+  it('the route scan sees hyphenated, numeric, template and double-quoted paths', () => {
+    const planted = [
+      "if (ctx.path === '/admin/kyc/re-verify') {}",
+      'if (ctx.path === "/admin/kyc/v2/export") {}',
+      'const p = `/admin/kyc/${id}/purge`;',
+      "if (ctx.path === '/admin/kyc/case_2') {}",
+    ].join('\n');
+    expect([...scanAdminPaths(planted)].sort()).toEqual(['/admin/kyc/${id}/purge', '/admin/kyc/case_2', '/admin/kyc/re-verify', '/admin/kyc/v2/export']);
+    // …and a planted unguarded hyphenated route would fail the tripwire below.
+    const guarded = (adminRoutes as { ADMIN_STATE_CHANGING_ROUTES?: readonly string[] }).ADMIN_STATE_CHANGING_ROUTES ?? [];
+    const readOnly = (adminRoutes as { ADMIN_READ_ROUTES?: readonly string[] }).ADMIN_READ_ROUTES ?? [];
+    expect([...guarded, ...readOnly]).not.toContain('/admin/kyc/re-verify');
+  });
+
   it('tripwire: every /admin/kyc/* path in the route source is guarded and covered here', () => {
     const src = readFileSync(new URL('../src/admin-kyc-routes.ts', import.meta.url), 'utf8');
-    const declared = new Set([...src.matchAll(/'(\/admin\/kyc\/[a-z/]+)'/g)].map((m) => m[1]));
+    const declared = scanAdminPaths(src);
+    expect(declared.size).toBeGreaterThanOrEqual(6);
     const guarded = (adminRoutes as { ADMIN_STATE_CHANGING_ROUTES?: readonly string[] }).ADMIN_STATE_CHANGING_ROUTES ?? [];
     const readOnly = (adminRoutes as { ADMIN_READ_ROUTES?: readonly string[] }).ADMIN_READ_ROUTES ?? [];
     for (const p of declared) {
@@ -147,6 +173,33 @@ describe('PBA-L3a-001 admin console CSRF', () => {
     h.cookie = h.cookie.split('; ').filter((c) => !c.startsWith('_kyc_admin=')).join('; ');
     const r = await fetch(`${baseUrl}/admin/kyc/adjudicate`, { method: 'POST', headers: h, body: JSON.stringify({ caseId, decision: 'verified', reason: 'x' }) });
     expect(r.status).toBe(403);
+  });
+
+  it('the same admin\'s CSRF token from a DIFFERENT session is refused (token is session-bound)', async () => {
+    const jar2 = new Jar();
+    await siweLogin(baseUrl, admin, jar2);
+    const csrf2 = await openConsole(baseUrl, jar2);
+    expect(csrf2).not.toBe(csrf);
+    const caseId = await pendingCase();
+    // session 1's cookies + session 2's token (and the reverse) both fail
+    for (const [j, t] of [[jar, csrf2], [jar2, csrf]] as const) {
+      const r = await fetch(`${baseUrl}/admin/kyc/adjudicate`, { method: 'POST', headers: sameOriginJson(baseUrl, j, t), body: JSON.stringify({ caseId, decision: 'verified', reason: 'x' }) });
+      expect(r.status).toBe(403);
+    }
+    expect((await store.getCase(caseId))?.status).not.toBe('verified');
+    // each session with its own token still works
+    const ok = await fetch(`${baseUrl}/admin/kyc/adjudicate`, { method: 'POST', headers: sameOriginJson(baseUrl, jar2, csrf2), body: JSON.stringify({ caseId, decision: 'verified', reason: 'x' }) });
+    expect(ok.status).toBe(200);
+  });
+
+  it('every admin console response forbids framing (clickjacking)', async () => {
+    const page = await fetch(`${baseUrl}/admin/kyc`, { headers: { cookie: jar.header(), accept: 'text/html' } });
+    const api = await fetch(`${baseUrl}/admin/kyc/cases`, { headers: { cookie: jar.header(), 'sec-fetch-site': 'same-origin' } });
+    const denied = await fetch(`${baseUrl}/admin/kyc/cases`);
+    for (const r of [page, api, denied]) {
+      expect(r.headers.get('x-frame-options')).toBe('DENY');
+      expect(r.headers.get('content-security-policy')).toContain("frame-ancestors 'none'");
+    }
   });
 
   it('a cross-origin credentialed GET of the case list is refused', async () => {

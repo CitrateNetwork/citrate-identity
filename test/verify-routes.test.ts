@@ -55,15 +55,20 @@ afterAll(async () => {
   await new Promise<void>((res, rej) => server.close((e) => (e ? rej(e) : res())));
 });
 
+// PBA-L3a-009: /kyc/start binds the capture token to the starting browser via the
+// `_kyc_capture` cookie; this suite plays that browser.
+const BIND = 'test-browser-binding-secret';
+const BROWSER = { cookie: `_kyc_capture=${BIND}` };
+
 /** Open a case + mint a capture token, as /kyc/start would. */
 async function newSession(sub: string): Promise<{ caseId: string; token: string; dek: Buffer }> {
   const { applicantId } = await provider.createApplicant({ externalUserId: sub, levelHint: 'basic-individual' });
-  const s = await provider.mintClientSession({ applicantId, externalUserId: sub, ttlSec: 600 });
+  const s = await provider.mintClientSession({ applicantId, externalUserId: sub, ttlSec: 600, browserBinding: BIND });
   const dek = (await provider.getCaseDek(applicantId))!;
   return { caseId: applicantId, token: s.token, dek };
 }
 const post = (path: string, body: unknown) =>
-  fetch(`${baseUrl}${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body), redirect: 'manual' });
+  fetch(`${baseUrl}${path}`, { method: 'POST', headers: { 'content-type': 'application/json', ...BROWSER }, body: JSON.stringify(body), redirect: 'manual' });
 
 describe('/verify capture flow (VERI-S2)', () => {
   it('GET /verify serves the capture UI', async () => {
@@ -82,7 +87,7 @@ describe('/verify capture flow (VERI-S2)', () => {
 
   it('GET /verify/dek returns the case DEK for the valid session', async () => {
     const { token, dek } = await newSession('sub-dek');
-    const r = await fetch(`${baseUrl}/verify/dek?session=${encodeURIComponent(token)}`);
+    const r = await fetch(`${baseUrl}/verify/dek?session=${encodeURIComponent(token)}`, { headers: BROWSER });
     expect(r.status).toBe(200);
     const j = (await r.json()) as { dek: string };
     expect(Buffer.from(j.dek, 'base64').equals(dek)).toBe(true);
@@ -117,7 +122,7 @@ describe('/verify capture flow (VERI-S2)', () => {
     expect(ev.find((e) => e.kind === 'document')?.tier).toBe(3);
 
     // Status reports capture complete (the desktop poll signal).
-    const st = (await (await fetch(`${baseUrl}/verify/status?session=${encodeURIComponent(token)}`)).json()) as { captureComplete: boolean; status: string };
+    const st = (await (await fetch(`${baseUrl}/verify/status?session=${encodeURIComponent(token)}`, { headers: BROWSER })).json()) as { captureComplete: boolean; status: string };
     expect(st.captureComplete).toBe(true);
     expect(st.status).toBe('pending'); // decision is VERI-S3's job
   });
@@ -138,7 +143,7 @@ describe('/verify capture flow (VERI-S2)', () => {
     // The handed-off token authenticates for the SAME case.
     const claims = provider.verifyCaptureToken(j.token);
     expect(claims?.caseId).toBe(caseId);
-    // And it works against the live routes.
+    // And it works against the live routes — from the phone, which has no cookie.
     expect((await fetch(`${baseUrl}/verify/dek?session=${encodeURIComponent(j.token)}`)).status).toBe(200);
   });
 });

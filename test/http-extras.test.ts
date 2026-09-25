@@ -2,7 +2,11 @@ import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createProvider } from '../src/server.js';
-import { EXPLORER_ORIGIN, DASHBOARD_ORIGIN } from '../src/config.js';
+import { EXPLORER_ORIGIN as EXPLORER_ORIGIN_OPT, DASHBOARD_ORIGIN as DASHBOARD_ORIGIN_OPT } from '../src/config.js';
+
+// Test env is not production, so the dev defaults are always defined here.
+const EXPLORER_ORIGIN = EXPLORER_ORIGIN_OPT!;
+const DASHBOARD_ORIGIN = DASHBOARD_ORIGIN_OPT!;
 
 /**
  * Deploy hardening: the operational HTTP extras mounted ahead of panva's router

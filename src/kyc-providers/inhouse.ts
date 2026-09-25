@@ -27,7 +27,7 @@
  * `pending` (fail-closed), never a fake `verified`.
  */
 
-import { createHmac, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 
 import { KycCaseStore } from '../kyc-cases-pg.js';
 import { newDek, unwrapDek, wrapDek } from '../kyc-crypto.js';
@@ -63,6 +63,22 @@ export interface CaptureTokenClaims {
   caseId: string;
   sub: string;
   exp: number; // unix seconds
+  /**
+   * PBA-L3a-009: sha256 (base64url) of the browser-binding secret /kyc/start set
+   * as the `_kyc_capture` cookie. A desktop capture token only works in that
+   * browser, so a capture link cannot be handed to someone else.
+   */
+  bh?: string;
+  /** 'handoff' = phone token minted by the bound browser for the QR hop. */
+  k?: 'handoff';
+}
+
+/** PBA-L3a-009: the cookie carrying the capture browser-binding secret. */
+export const CAPTURE_BINDING_COOKIE = '_kyc_capture';
+
+/** Hash a browser-binding secret for embedding in the signed capture token. */
+export function captureBindingHash(secret: string): string {
+  return createHash('sha256').update(`kyc-capture:${secret}`).digest('base64url');
 }
 
 /** Shape of the internal decision webhook the S3 engine posts to /kyc/webhook. */
@@ -127,6 +143,8 @@ export class InhouseKycProvider implements KycProvider {
     externalUserId: string;
     ttlSec: number;
     returnTo?: string;
+    /** PBA-L3a-009: the `_kyc_capture` cookie secret of the starting browser. */
+    browserBinding?: string;
   }): Promise<{ token: string; expiresAt: number; redirectUrl?: string }> {
     const c = await this.store.getCase(input.applicantId);
     if (!c) throw new Error(`inhouse: unknown caseId ${input.applicantId}`);
@@ -134,7 +152,12 @@ export class InhouseKycProvider implements KycProvider {
       throw new Error('inhouse: caseId does not belong to this user');
     }
     const exp = Math.floor(Date.now() / 1000) + Math.max(1, input.ttlSec);
-    const token = this.signCaptureToken({ caseId: c.caseId, sub: input.externalUserId, exp });
+    const token = this.signCaptureToken({
+      caseId: c.caseId,
+      sub: input.externalUserId,
+      exp,
+      ...(input.browserBinding ? { bh: captureBindingHash(input.browserBinding) } : {}),
+    });
     // Move the case to `pending` — a capture session exists.
     if (c.status === 'created') await this.store.setStatus(c.caseId, 'pending');
     const q = new URLSearchParams({ session: token });
@@ -236,7 +259,8 @@ export class InhouseKycProvider implements KycProvider {
    */
   mintCaptureToken(caseId: string, sub: string, ttlSec: number): { token: string; expiresAt: number } {
     const exp = Math.floor(Date.now() / 1000) + Math.max(1, ttlSec);
-    return { token: this.signCaptureToken({ caseId, sub, exp }), expiresAt: exp };
+    // PBA-L3a-009: marked as a hand-off token (the phone has no binding cookie).
+    return { token: this.signCaptureToken({ caseId, sub, exp, k: 'handoff' }), expiresAt: exp };
   }
 
   /**

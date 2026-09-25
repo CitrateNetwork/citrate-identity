@@ -277,14 +277,28 @@ export function mountIdentityRegistryRoutes(
     const tail = match[2] ? decodeURIComponent(match[2]) : undefined;
 
     // Every route requires a Bearer token for the SAME sub — fail closed.
-    const caller = await resolveSub(provider, ctx);
-    if (!caller) {
+    const token = await resolveToken(provider, ctx);
+    if (!token) {
       respond(ctx, 401, { error: 'unauthorized', reason: 'access token required' });
       return;
     }
+    const caller = token.accountId;
     if (caller !== sub) {
       respond(ctx, 403, { error: 'forbidden', reason: 'token subject does not match :sub' });
       return;
+    }
+    // PBA-L3a-005: changing which wallets speak for this identity (and which one
+    // is the pay-to address) is a wallet-app action. Any other RP's token (a
+    // leaked explorer/docs token) may still LIST, but never mutate.
+    if (ctx.method !== 'GET') {
+      if (!WALLET_LINK_CLIENT_IDS.has(token.clientId)) {
+        respond(ctx, 403, { error: 'client_not_permitted', reason: 'only Citrate wallet apps may change linked wallets' });
+        return;
+      }
+      if (!token.scopes.has('wallet')) {
+        respond(ctx, 403, { error: 'insufficient_scope', reason: 'the wallet scope is required to change linked wallets' });
+        return;
+      }
     }
 
     // POST /identity/:sub/wallets/challenge → one-time nonce
@@ -457,8 +471,21 @@ async function readJson(ctx: Ctx): Promise<Record<string, unknown> | null> {
   }
 }
 
-/** Bearer token → accountId (sub), or null. Same shape as the aa routes. */
-async function resolveSub(provider: Provider, ctx: Ctx): Promise<string | null> {
+/**
+ * PBA-L3a-005: the Citrate wallet apps that may change a member's linked
+ * wallets (the desktop app, the native wallet, the wallet extension).
+ */
+export const WALLET_LINK_CLIENT_IDS: ReadonlySet<string> = new Set([
+  'citrate-core',
+  'citrate-gui-native',
+  'citrate-wallet-extension',
+]);
+
+/** Bearer token → { accountId, clientId, scopes }, or null. */
+async function resolveToken(
+  provider: Provider,
+  ctx: Ctx,
+): Promise<{ accountId: string; clientId: string; scopes: Set<string> } | null> {
   const auth = ctx.headers.authorization;
   if (typeof auth !== 'string') return null;
   const m = /^Bearer\s+(.+)$/i.exec(auth.trim());
@@ -466,7 +493,9 @@ async function resolveSub(provider: Provider, ctx: Ctx): Promise<string | null> 
   try {
     const token = await provider.AccessToken.find(m[1].trim());
     if (!token || token.isExpired) return null;
-    return typeof token.accountId === 'string' ? token.accountId : null;
+    if (typeof token.accountId !== 'string' || typeof token.clientId !== 'string') return null;
+    const scopes = new Set(String(token.scope ?? '').split(' ').filter((x) => x.length > 0));
+    return { accountId: token.accountId, clientId: token.clientId, scopes };
   } catch {
     return null;
   }

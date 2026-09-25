@@ -67,7 +67,8 @@ export interface OAuth2ProviderConfig {
  * is trusted ONLY when the caller passes it (it already applied the provider's
  * verified-ownership rule). Look-up order mirrors resolveGoogleUser:
  *   1. by (provider, providerSub) — a returning user, always trusted.
- *   2. else, if a VERIFIED email is present, link onto that existing email account.
+ *   2. else, if a VERIFIED email is present AND the existing email account is
+ *      itself verified, link onto it (PBA-L3a-010);
  *   3. else create, binding the email only when verified.
  */
 export async function resolveFederatedUser(
@@ -79,8 +80,14 @@ export async function resolveFederatedUser(
   if (!providerSub) return undefined;
 
   let user = await store.findByFederated(provider, providerSub);
+  // PBA-L3a-010: both sides verified, or no link (see resolveGoogleUser).
+  let emailTakenUnverified = false;
   if (!user && email) {
     user = await store.findByEmail(email);
+    if (user && !user.emailVerified) {
+      emailTakenUnverified = true;
+      user = undefined;
+    }
     if (user) {
       try {
         await store.linkFederated(user.id, provider, providerSub);
@@ -94,7 +101,7 @@ export async function resolveFederatedUser(
     user = await store.createWithFederated({
       provider,
       providerSub,
-      ...(email !== undefined ? { email } : {}),
+      ...(email !== undefined && !emailTakenUnverified ? { email } : {}),
     });
   }
   return user;
@@ -124,7 +131,7 @@ export function mountOAuth2Provider(
   cfg: OAuth2ProviderConfig,
 ): void {
   const states: StateStore = cfg.redis
-    ? new RedisStateStore(cfg.redis)
+    ? new RedisStateStore(cfg.redis, `oauth_state:${cfg.name}:`)
     : new InMemoryStateStore();
   const startPath = `/auth/${cfg.name}/start`;
   const callbackPath = `/auth/${cfg.name}/callback`;

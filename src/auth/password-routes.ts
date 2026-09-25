@@ -35,6 +35,7 @@ import { hashPassword, verifyPassword, PasswordError } from './password.js';
 import { getUserStore } from './stores.js';
 import { predictedWalletForAccount } from '../aa/wallet-claims.js';
 import { getEmailVerificationStore, CODE_TTL_MS } from './email-verification-pg.js';
+import { getAccountEpochStore } from './account-epoch.js';
 import { sendVerificationCode } from '../email-send.js';
 import {
   clientIp,
@@ -167,13 +168,17 @@ function tooManyRequests(res: ServerResponse): void {
  */
 export function mountPasswordRoutes(provider: Provider, options: PasswordRouteOptions = {}): void {
   const limiter = options.rateLimiter ?? new InMemoryRateLimiter();
-  /** Charge one hit to every key; false as soon as any budget is spent. */
+  /**
+   * Charge the budgets in order and STOP at the first refusal, so a request
+   * refused by a narrower key (per IP, per account+IP) never consumes the
+   * account-wide budget. That is what keeps one source from locking the
+   * victim's account out (R2 verifier nit).
+   */
   const allow = async (checks: Array<[string, number]>): Promise<boolean> => {
-    let ok = true;
     for (const [key, limit] of checks) {
-      if (!(await limiter.hit(key, limit, LOGIN_WINDOW_MS))) ok = false;
+      if (!(await limiter.hit(key, limit, LOGIN_WINDOW_MS))) return false;
     }
-    return ok;
+    return true;
   };
   provider.use(async (ctx: Ctx, next: Next) => {
     if (ctx.method !== 'POST') return next();
@@ -239,6 +244,7 @@ export function mountPasswordRoutes(provider: Provider, options: PasswordRouteOp
       if (
         !(await allow([
           [`pw-verify:ip:${ip}`, LOGIN_LIMITS.verifyPerIp],
+          [`pw-verify:acct-ip:${account}|${ip}`, LOGIN_LIMITS.verifyPerAccountIp],
           [`pw-verify:acct:${account}`, LOGIN_LIMITS.verifyPerAccount],
         ]))
       ) {
@@ -273,6 +279,9 @@ export function mountPasswordRoutes(provider: Provider, options: PasswordRouteOp
       } else if (passwordHash) {
         // Existing account: attach/replace the password (email-proven reset).
         await store.rotatePasswordHash(user.id, passwordHash);
+        // PBA-L3a-008: a reset ends every earlier session and refresh token of
+        // the account (the new session below is minted in this same second).
+        await getAccountEpochStore().bump(user.id);
       }
       await store.markEmailVerified(user.id);
       await store.setLastSigningMethod(user.id, 'email-pw');
@@ -328,6 +337,7 @@ export function mountPasswordRoutes(provider: Provider, options: PasswordRouteOp
     if (
       !(await allow([
         [`pw-login:ip:${ip}`, LOGIN_LIMITS.loginPerIp],
+        [`pw-login:acct-ip:${account}|${ip}`, LOGIN_LIMITS.loginPerAccountIp],
         [`pw-login:acct:${account}`, LOGIN_LIMITS.loginPerAccount],
       ]))
     ) {

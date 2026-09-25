@@ -27,6 +27,28 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type Provider from 'oidc-provider';
 import { getSessionBus, type SessionEvent } from './session-bus.js';
+import { getAccountEpochStore } from './auth/account-epoch.js';
+
+/** `{"everywhere": true}` JSON body (or `?everywhere=1`). Never throws. */
+async function wantsEverywhere(req: IncomingMessage): Promise<boolean> {
+  try {
+    const q = new URL(req.url ?? '/', 'http://x').searchParams.get('everywhere');
+    if (q === '1' || q === 'true') return true;
+    const ct = String(req.headers['content-type'] ?? '');
+    if (!ct.toLowerCase().startsWith('application/json')) return false;
+    const chunks: Buffer[] = [];
+    let size = 0;
+    for await (const c of req) {
+      size += (c as Buffer).length;
+      if (size > 4096) return false;
+      chunks.push(c as Buffer);
+    }
+    const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { everywhere?: unknown };
+    return body?.everywhere === true;
+  } catch {
+    return false;
+  }
+}
 
 export interface LogoutRouteOptions {
   /**
@@ -237,10 +259,30 @@ export function mountLogoutRoutes(
       //    /userinfo with this token 401s — "invalidates a token immediately".
       await at.destroy();
 
+      // 2b) PBA-L3a-008: revoke the whole GRANT behind it — its refresh tokens
+      //     (rotating or not), other access tokens and unredeemed codes — and the
+      //     grant record, so logging out cannot be undone with a stored refresh
+      //     token.
+      if (at.grantId) {
+        await provider.RefreshToken.revokeByGrantId(at.grantId);
+        try {
+          const grant = await provider.Grant.find(at.grantId);
+          if (grant) await grant.destroy();
+        } catch {
+          // already gone — logout is idempotent
+        }
+      }
+
+      // 2c) `{"everywhere": true}`: end every session and grant of the account.
+      const everywhere = await wantsEverywhere(ctx.req);
+      // Everything up to and INCLUDING this second (the caller is logging out
+      // too, so no same-second session needs to survive).
+      if (everywhere) await getAccountEpochStore().bump(sub, Math.floor(Date.now() / 1000) + 1);
+
       // 3) PUBLISH the logout on the session bus so the OTHER apps cascade.
       getSessionBus().publish(sub, { type: 'logout', sid, at: Date.now() });
 
-      sendJson(ctx.res, 200, { ok: true, sub, sid });
+      sendJson(ctx.res, 200, { ok: true, sub, sid, ...(everywhere ? { everywhere: true } : {}) });
       return;
     }
 
