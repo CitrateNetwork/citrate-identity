@@ -2,8 +2,8 @@
 
 The **isolated signing path** for the membership money flow. core-membership's grant
 orchestrator runs on Vercel and MUST NOT hold the vault/SBT owner key (@rule8); it
-POSTs grant/mint requests here, and this worker — holding the deterministic
-**treasury/grant signer** key on an operator host — signs the `onlyOwner` calls,
+POSTs grant/mint requests here. This worker holds the deterministic
+**treasury/grant signer** key on an operator host, signs the `onlyOwner` calls,
 broadcasts to chain 40204, and returns tx hashes.
 
 ## Why it's isolated

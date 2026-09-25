@@ -10,10 +10,10 @@ set -uo pipefail
 ROOT="${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 git -C "$ROOT" rev-parse --git-dir >/dev/null 2>&1 || { echo "FAIL - not a git repository: $ROOT"; exit 2; }
 
-PATTERN='/home/[a-z]+/|ssh root@|keccak256\(DEPLOYER_PRIVATE_KEY|bash -x trace|0x61E324cF|0x3e0c2B1c|0x0aceb7B4|0x149E85A3|0x9aFFF274'
-hits=$(git -C "$ROOT" grep -I -n -i -E "$PATTERN" -- \
-    'services/**/README.md' 'services/**/*.sh' 'README.md' 'docs/**/*.md' \
-    ':!scripts/check-public-runbook.sh' 2>/dev/null)
+PATTERN='/home/[a-z]+/|/Users/[A-Za-z]+/|ssh +root@|keccak256\( *DEPLOYER|DEPLOYER_PRIVATE_KEY *(\|\||\+\+|‖)|bash -x trace|0x61E324cF|0x3e0c2B1c|0x0aceb7B4|0x149E85A3|0x9aFFF274'
+# Every tracked text file (docs, service code comments, Dockerfiles, package metadata).
+hits=$(git -C "$ROOT" grep -I -n -i -E "$PATTERN" -- . \
+    ':!scripts/check-public-runbook.sh' ':!**/node_modules/**' ':!scripts/vendor/**' ':!**/package-lock.json' 2>/dev/null)
 if [[ -n "$hits" ]]; then
     echo "FAIL - operator topology or stale money-contract addresses in public docs:"
     echo "$hits" | sed 's/^/       /'
