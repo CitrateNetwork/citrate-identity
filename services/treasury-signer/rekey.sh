@@ -1,32 +1,23 @@
 #!/usr/bin/env bash
 # rekey.sh — rotate the treasury-signer to a new grant signer + new pinned
-# contracts, run ON THE DROPLET. Used at reroll PHASE 3.5 after the new
-# CitrateMemberSBT + MembershipStakeVault are deployed (they must already have
-# code on-chain, or /health broadcasts will later revert onlyOwner).
+# contracts, run on the signer host after a re-roll deploys the new
+# CitrateMemberSBT + MembershipStakeVault (they must already have code on-chain,
+# or /health broadcasts will later revert onlyOwner).
 #
-# WHY A REKEY IS NEEDED: every operator key is
-#   keccak256(DEPLOYER_PRIVATE_KEY ‖ label)
-# so the deployer-key leak transitively compromised the OLD grant signer
-# (0x9aFFF274…). The reroll rotates the deployer, so the grant signer becomes
-# 0xF42a19194fee89E71dC4b8631a71a9CeCf42B483 — the owner baked into the new
-# SBT/vault CREATE2 addresses (DeployCoreMembership.FROZEN_OWNER). This rekey is
-# PURELY an off-chain credential swap: it changes NO on-chain address, NO genesis,
-# NO CREATE2 projection, NO node sync — the service is a downstream *consumer* of
-# the addresses the build already froze.
+# This is an off-chain credential swap only: it changes no on-chain address, no
+# genesis and no node state. Take NEW_VAULT / NEW_SBT from the address book
+# (citrate-chain/contracts/addresses/40204.json, keys MembershipStakeVault and
+# CitrateMemberSBT) and confirm both have code and owner() == the new signer
+# before running. Key provenance and transfer are in the private operator runbook.
 #
 # SECURITY: the private key is read from STDIN only — never passed on argv, never
 # echoed, never written to a log. The env-file is chmod 600 and patched in place
 # atomically.
 #
-# Usage (on the droplet):
-#   NEW_VAULT=0x61E324cFd6B7Cb106AC0AD1dF163bdFef2b74268 \
-#   NEW_SBT=0x3e0c2B1cD29a615E4eA2E263C8e7df3Aef243E42 \
+# Usage (on the signer host):
+#   NEW_VAULT=<MembershipStakeVault from the book> \
+#   NEW_SBT=<CitrateMemberSBT from the book> \
 #     bash rekey.sh < /secure/path/to/new_grant_signer_privkey.hex
-#
-# Secure key transfer from the DGX (key never hits a terminal/log):
-#   grep -m1 '^GRANT_SIGNER_PRIVATE_KEY=' /home/saul/Projects/Citrate-Labs/.env.testnet \
-#     | cut -d= -f2 | ssh root@<droplet> \
-#       'NEW_VAULT=0x61E3… NEW_SBT=0x3e0c… bash /opt/citrate-treasury-signer/rekey.sh'
 set -euo pipefail
 
 ENV_FILE="${TREASURY_ENV_FILE:-/etc/citrate-treasury-signer.env}"
