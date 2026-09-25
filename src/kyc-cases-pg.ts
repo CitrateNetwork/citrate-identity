@@ -250,12 +250,18 @@ export class KycCaseStore {
    * (PBA-L3a-006 variant: the old read-check-then-write let N concurrent
    * approvals all decrypt.)
    */
-  async claimUnlockRequest(unlockId: string, approvedBy: string, now: number = Date.now()): Promise<string | undefined> {
+  async claimUnlockRequest(
+    unlockId: string,
+    approvedBy: string,
+    now: number = Date.now(),
+    maxAgeMs: number = Number.MAX_SAFE_INTEGER,
+  ): Promise<string | undefined> {
+    // created_at >= now - maxAge: an expired request can never be claimed.
     const res = await this.pool.query(
       `UPDATE kyc_unlock_requests SET approved_by = $2, consumed_at = $3
-        WHERE unlock_id = $1 AND consumed_at IS NULL AND requested_by <> $2
+        WHERE unlock_id = $1 AND consumed_at IS NULL AND requested_by <> $2 AND created_at >= $4
         RETURNING case_id`,
-      [unlockId, approvedBy, now],
+      [unlockId, approvedBy, now, now - maxAgeMs],
     );
     const r = res.rows[0] as Record<string, unknown> | undefined;
     return r ? String(r.case_id) : undefined;
@@ -288,12 +294,17 @@ export class KycCaseStore {
   }
 
   /** Atomic single-use approval by a DISTINCT admin (same rule as {@link claimUnlockRequest}). */
-  async claimDsarRequest(requestId: string, approvedBy: string, now: number = Date.now()): Promise<DsarRequest | undefined> {
+  async claimDsarRequest(
+    requestId: string,
+    approvedBy: string,
+    now: number = Date.now(),
+    maxAgeMs: number = Number.MAX_SAFE_INTEGER,
+  ): Promise<DsarRequest | undefined> {
     const res = await this.pool.query(
       `UPDATE kyc_dsar_requests SET approved_by = $2, consumed_at = $3
-        WHERE request_id = $1 AND consumed_at IS NULL AND requested_by <> $2
+        WHERE request_id = $1 AND consumed_at IS NULL AND requested_by <> $2 AND created_at >= $4
         RETURNING request_id, sub, requested_by, reason, created_at`,
-      [requestId, approvedBy, now],
+      [requestId, approvedBy, now, now - maxAgeMs],
     );
     const r = res.rows[0] as Record<string, unknown> | undefined;
     if (!r) return undefined;

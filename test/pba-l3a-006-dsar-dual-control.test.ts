@@ -177,3 +177,37 @@ describe('PBA-L3a-006 with a single provisioned admin', () => {
     }
   });
 });
+
+describe('PBA-L3a-006 verifier nit: dual-control requests expire', () => {
+  const getDek = async (id: string) => { const k = await store.getCase(id); return k ? unwrapDek(k.wrappedDek, master) : null; };
+  const old = Date.now() - 25 * 60 * 60 * 1000;
+  it('a DSAR request older than the TTL cannot be approved', async () => {
+    const r = await actions.requestDsar(store, audit, { actor: 'admin-A', sub: 'sub-dsar', reason: 'old' });
+    await (store as unknown as { pool: { query(t: string, p: unknown[]): Promise<unknown> } }).pool.query('UPDATE kyc_dsar_requests SET created_at = $2 WHERE request_id = $1', [r.requestId, old]);
+    expect(await actions.approveDsar(store, audit, { approver: 'admin-B', requestId: r.requestId, getDek })).toEqual({ ok: false, error: 'dsar_expired' });
+    const fresh = await actions.requestDsar(store, audit, { actor: 'admin-A', sub: 'sub-dsar', reason: 'new' });
+    expect((await actions.approveDsar(store, audit, { approver: 'admin-B', requestId: fresh.requestId, getDek })).ok).toBe(true);
+  });
+  it('an unlock request older than the TTL cannot be approved', async () => {
+    const dek = newDek();
+    const c = await store.createCase('sub-unlock-ttl', wrapDek(dek, master));
+    await store.setIdentityCiphertext(c.caseId, sealField(JSON.stringify({ name: 'Old' }), dek));
+    const r = await actions.requestUnlock(store, audit, { actor: 'admin-A', caseId: c.caseId, reason: 'old' });
+    const unlockId = r.ok ? r.unlockId : '';
+    await (store as unknown as { pool: { query(t: string, p: unknown[]): Promise<unknown> } }).pool.query('UPDATE kyc_unlock_requests SET created_at = $2 WHERE unlock_id = $1', [unlockId, old]);
+    expect(await actions.approveUnlock(store, audit, { approver: 'admin-B', unlockId, getDek })).toEqual({ ok: false, error: 'unlock_expired' });
+  });
+  it('the atomic claims themselves refuse an expired request (not just the pre-check)', async () => {
+    const now = Date.now();
+    const d = await store.createDsarRequest('sub-x', 'admin-A', 'r');
+    expect(await store.claimDsarRequest(d.requestId, 'admin-B', now + 2000, 1000)).toBeUndefined();
+    expect(await store.claimDsarRequest(d.requestId, 'admin-B', now, 60_000)).toBeDefined();
+    const u = await store.createUnlockRequest('case-x', 'admin-A', 'r');
+    expect(await store.claimUnlockRequest(u.unlockId, 'admin-B', now + 2000, 1000)).toBeUndefined();
+    expect(await store.claimUnlockRequest(u.unlockId, 'admin-B', now, 60_000)).toBe('case-x');
+  });
+
+  it('the TTL is a day', () => {
+    expect((actions as { DUAL_CONTROL_REQUEST_TTL_MS?: number }).DUAL_CONTROL_REQUEST_TTL_MS).toBe(24 * 60 * 60 * 1000);
+  });
+});
