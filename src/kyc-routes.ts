@@ -35,6 +35,13 @@ import { sendKycApprovedEmail } from './kyc-mailer.js';
 import { getUserStore } from './auth/stores.js';
 import { predictedWalletForAccount } from './aa/wallet-claims.js';
 import type { HandoffStore } from './handoff-store.js';
+import { randomBytes } from 'node:crypto';
+import { CAPTURE_BINDING_COOKIE } from './kyc-providers/inhouse.js';
+
+function toArray(h: number | string | string[] | undefined): string[] {
+  if (h === undefined) return [];
+  return Array.isArray(h) ? h : [String(h)];
+}
 
 export interface KycRouteOptions {
   /**
@@ -719,10 +726,18 @@ export function mountKycStartRoute(
         applicantId = created.applicantId;
         cache.set(accountId, applicantId);
       }
+      // PBA-L3a-009: bind the capture session to THIS browser. The cookie is
+      // scoped to the capture API and lives as long as the capture token.
+      const browserBinding = randomBytes(32).toString('base64url');
+      ctx.res.setHeader('set-cookie', [
+        ...toArray(ctx.res.getHeader('set-cookie')),
+        `${CAPTURE_BINDING_COOKIE}=${browserBinding}; Path=/verify; HttpOnly; Secure; SameSite=Lax; Max-Age=${ttlSec}`,
+      ]);
       const session = await kycProvider.mintClientSession({
         applicantId,
         externalUserId: accountId,
         ttlSec,
+        browserBinding,
         // Native post-verification redirect back to the data room (Sumsub
         // external-link `redirect`). Also stashed in the /kyc/return cookie above.
         ...(returnTo ? { returnTo } : {}),
