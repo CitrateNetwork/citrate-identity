@@ -36,6 +36,7 @@ import { loadAaConfig } from './aa/config.js';
 import { verifyAaStackOnChain, formatAaStackProblems } from './aa/verify-stack.js';
 import { mountStaticAssets } from './static-assets.js';
 import { mountPasswordRoutes } from './auth/password-routes.js';
+import { createRateLimiter, type RateLimiter } from './auth/rate-limit.js';
 import { mountWebauthnRoutes } from './auth/webauthn-routes.js';
 import { mountGoogleRoutes } from './auth/google-routes.js';
 import { mountConfiguredOAuth2Providers } from './auth/oauth2-provider.js';
@@ -143,6 +144,11 @@ export interface CreateProviderOptions {
    * shell environment, and `true` to assert the active-button rendering.
    */
   googleEnabled?: boolean;
+  /**
+   * PBA-L3a-002 / -011: login rate limiter override (tests). Defaults to a
+   * Redis-backed limiter when `redis` is provided, else per-process.
+   */
+  rateLimiter?: RateLimiter;
 }
 
 /**
@@ -324,7 +330,9 @@ export async function createProvider(
   // branded /interaction/:uid page calls. Read/write the user + credential
   // stores wired by initAuthStoresFromEnv (Postgres in prod, in-memory in
   // dev — same posture as the KYC store).
-  mountPasswordRoutes(provider);
+  mountPasswordRoutes(provider, {
+    rateLimiter: options.rateLimiter ?? createRateLimiter(options.redis),
+  });
 
   // IDP-S3: identity ↔ wallet registry. The link proof rides the SAME
   // one-time nonce store SIWE uses (Redis in prod), so a proof can

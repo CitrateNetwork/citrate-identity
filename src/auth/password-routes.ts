@@ -35,6 +35,13 @@ import { getUserStore } from './stores.js';
 import { predictedWalletForAccount } from '../aa/wallet-claims.js';
 import { getEmailVerificationStore, CODE_TTL_MS } from './email-verification-pg.js';
 import { sendVerificationCode } from '../email-send.js';
+import {
+  clientIp,
+  InMemoryRateLimiter,
+  LOGIN_LIMITS,
+  LOGIN_WINDOW_MS,
+  type RateLimiter,
+} from './rate-limit.js';
 
 type Ctx = Parameters<Parameters<Provider['use']>[0]>[0];
 type Next = Parameters<Parameters<Provider['use']>[0]>[1];
@@ -134,11 +141,37 @@ function respondForIssue(
   });
 }
 
+export interface PasswordRouteOptions {
+  /**
+   * PBA-L3a-002 / -011: per-IP + per-account budgets on code verification,
+   * password login and code issuance. Redis-backed in production (shared across
+   * instances); defaults to a per-process limiter.
+   */
+  rateLimiter?: RateLimiter;
+}
+
+function tooManyRequests(res: ServerResponse): void {
+  res.setHeader('retry-after', String(Math.ceil(LOGIN_WINDOW_MS / 1000)));
+  respondJson(res, 429, {
+    error: 'too_many_requests',
+    reason: 'too many attempts — wait a few minutes and try again',
+  });
+}
+
 /**
  * Mount POST /auth/password/{register,login,verify} on the provider's Koa app.
  * Idempotent shape; mount once at boot.
  */
-export function mountPasswordRoutes(provider: Provider): void {
+export function mountPasswordRoutes(provider: Provider, options: PasswordRouteOptions = {}): void {
+  const limiter = options.rateLimiter ?? new InMemoryRateLimiter();
+  /** Charge one hit to every key; false as soon as any budget is spent. */
+  const allow = async (checks: Array<[string, number]>): Promise<boolean> => {
+    let ok = true;
+    for (const [key, limit] of checks) {
+      if (!(await limiter.hit(key, limit, LOGIN_WINDOW_MS))) ok = false;
+    }
+    return ok;
+  };
   provider.use(async (ctx: Ctx, next: Next) => {
     if (ctx.method !== 'POST') return next();
     if (
@@ -185,6 +218,8 @@ export function mountPasswordRoutes(provider: Provider): void {
     }
 
     const store = getUserStore();
+    const ip = clientIp(ctx.req, provider.proxy === true);
+    const account = email.toLowerCase();
 
     // ── /auth/password/verify — consume code → create/verify → session ──────
     if (ctx.path === '/auth/password/verify') {
@@ -194,6 +229,15 @@ export function mountPasswordRoutes(provider: Provider): void {
           error: 'invalid_request',
           reason: 'code must be 6 digits',
         });
+        return;
+      }
+      if (
+        !(await allow([
+          [`pw-verify:ip:${ip}`, LOGIN_LIMITS.verifyPerIp],
+          [`pw-verify:acct:${account}`, LOGIN_LIMITS.verifyPerAccount],
+        ]))
+      ) {
+        tooManyRequests(ctx.res);
         return;
       }
       const { ok, passwordHash } = await getEmailVerificationStore().consume(
@@ -261,6 +305,10 @@ export function mountPasswordRoutes(provider: Provider): void {
 
     // ── /auth/password/register — never creates/sessions; always verify-first ─
     if (ctx.path === '/auth/password/register') {
+      if (!(await allow([[`pw-issue:ip:${ip}`, LOGIN_LIMITS.issuePerIp]]))) {
+        tooManyRequests(ctx.res);
+        return;
+      }
       // No duplicate 409 (that was an account-enumeration oracle). Whether the
       // email is new or already exists, we issue a code and return the same
       // generic shape; only entering the code creates/updates anything.
@@ -269,6 +317,17 @@ export function mountPasswordRoutes(provider: Provider): void {
     }
 
     // ── /auth/password/login ────────────────────────────────────────────────
+    // Charged before the account lookup so the budget is the same whether or
+    // not the email exists (no enumeration via 429 timing).
+    if (
+      !(await allow([
+        [`pw-login:ip:${ip}`, LOGIN_LIMITS.loginPerIp],
+        [`pw-login:acct:${account}`, LOGIN_LIMITS.loginPerAccount],
+      ]))
+    ) {
+      tooManyRequests(ctx.res);
+      return;
+    }
     const user = await store.findByEmail(email);
     if (user && user.emailVerified && user.passwordHash) {
       // The only path that signs in without a fresh code: a VERIFIED account

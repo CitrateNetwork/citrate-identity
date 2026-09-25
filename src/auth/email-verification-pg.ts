@@ -204,36 +204,48 @@ export class PgEmailVerificationStore implements EmailVerificationStore {
     return { code, rateLimited: false };
   }
 
+  /**
+   * PBA-L3a-002: the attempt is CLAIMED atomically before any comparison. The
+   * old read-compare-write let N concurrent guesses all read `attempts = k` and
+   * all be compared (79 comparisons against a cap of 5 through the HTTP route on
+   * real Postgres). Now a single `UPDATE … attempts = attempts + 1 WHERE
+   * attempts < MAX_ATTEMPTS … RETURNING` hands out at most MAX_ATTEMPTS claims
+   * per issued code, whatever the interleaving; only a claim-holder compares.
+   * Success is single-use via a conditional DELETE that exactly one caller wins.
+   */
   async consume(email: string, code: string): Promise<ConsumeResult> {
     const key = normalizeEmail(email);
+    const now = new Date(Date.now()).toISOString();
     const { rows } = await this.pg.query(
-      'SELECT code_hash, password_hash, expires_at, attempts FROM email_verification_codes WHERE email = $1',
-      [key],
+      `UPDATE email_verification_codes SET attempts = attempts + 1
+        WHERE email = $1 AND attempts < $2 AND expires_at > $3
+        RETURNING code_hash, password_hash, attempts`,
+      [key, MAX_ATTEMPTS, now],
     );
-    if (rows.length === 0) return { ok: false };
-    const r = rows[0] as {
-      code_hash: string;
-      password_hash: string | null;
-      expires_at: string | Date;
-      attempts: number;
-    };
-    if (Date.now() > new Date(r.expires_at).getTime() || r.attempts >= MAX_ATTEMPTS) {
-      await this.pg.query('DELETE FROM email_verification_codes WHERE email = $1', [key]);
+    if (rows.length === 0) {
+      // Absent, expired or exhausted. Drop a dead row so it cannot linger.
+      await this.pg.query(
+        'DELETE FROM email_verification_codes WHERE email = $1 AND (attempts >= $2 OR expires_at <= $3)',
+        [key, MAX_ATTEMPTS, now],
+      );
       return { ok: false };
     }
+    const r = rows[0] as { code_hash: string; password_hash: string | null; attempts: number };
     if (!hashesEqual(r.code_hash, hashCode(key, code))) {
-      const attempts = r.attempts + 1;
-      if (attempts >= MAX_ATTEMPTS) {
-        await this.pg.query('DELETE FROM email_verification_codes WHERE email = $1', [key]);
-      } else {
-        await this.pg.query(
-          'UPDATE email_verification_codes SET attempts = $2 WHERE email = $1',
-          [key, attempts],
-        );
+      if (r.attempts >= MAX_ATTEMPTS) {
+        // Last claim spent: invalidate THIS code (a re-issued code is untouched).
+        await this.pg.query('DELETE FROM email_verification_codes WHERE email = $1 AND code_hash = $2', [
+          key,
+          r.code_hash,
+        ]);
       }
       return { ok: false };
     }
-    await this.pg.query('DELETE FROM email_verification_codes WHERE email = $1', [key]); // single-use
+    const won = await this.pg.query(
+      'DELETE FROM email_verification_codes WHERE email = $1 AND code_hash = $2 RETURNING email',
+      [key, r.code_hash],
+    );
+    if (won.rows.length === 0) return { ok: false }; // a concurrent correct submit consumed it
     return {
       ok: true,
       ...(r.password_hash !== null ? { passwordHash: r.password_hash } : {}),
