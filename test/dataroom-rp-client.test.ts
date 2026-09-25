@@ -76,6 +76,6 @@ describe('citrate-dataroom RP client (XR-2 A)', () => {
   });
 
   it('is on the CORS allow-list via DATAROOM_ORIGIN', () => {
-    expect(ALLOWED_CORS_ORIGINS.has(DATAROOM_ORIGIN)).toBe(true);
+    expect(ALLOWED_CORS_ORIGINS.has(DATAROOM_ORIGIN!)).toBe(true);
   });
 });

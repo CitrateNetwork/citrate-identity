@@ -39,6 +39,15 @@ services:
       COMMS_WEB_ORIGIN: ${COMMS_WEB_ORIGIN:-}
       # core-membership money-path RP canonical origin (membership.citrate.ai).
       CORE_MEMBERSHIP_ORIGIN: ${CORE_MEMBERSHIP_ORIGIN:-}
+      # PBA-L3a-007: these RP origins were never passed through, so in production
+      # they silently fell back to http://localhost:* dev defaults (echoed for
+      # credentialed CORS). An unset origin is now DROPPED in production (no CORS,
+      # no origin-derived redirect URI; each client keeps its hardcoded hosted
+      # callback). Set them in .env to enable CORS for those RPs.
+      DATAROOM_ORIGIN: ${DATAROOM_ORIGIN:-}
+      ALF_PORTAL_ORIGIN: ${ALF_PORTAL_ORIGIN:-}
+      BUYER_WEBAPP_ORIGIN: ${BUYER_WEBAPP_ORIGIN:-}
+      RADAR_ORIGIN: ${RADAR_ORIGIN:-}
       STUDIO_ORIGIN: ${STUDIO_ORIGIN:-}
       WALLETCONNECT_PROJECT_ID: ${WALLETCONNECT_PROJECT_ID:-}
       KYC_WEBHOOK_SECRET: ${KYC_WEBHOOK_SECRET}
