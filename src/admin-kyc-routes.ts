@@ -23,8 +23,8 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { getKycProvider } from './kyc-providers/index.js';
 import { InhouseKycProvider } from './kyc-providers/inhouse.js';
 import { renderAdminKycUI } from './admin-kyc-ui.js';
-import { randomBytes, timingSafeEqual } from 'node:crypto';
-import { ISSUER_URL } from './config.js';
+import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
+import { DEV_DEFAULT_COOKIE_KEY, ISSUER_URL } from './config.js';
 import { getKycAuditLog } from './kyc-audit-pg.js';
 import { parseAdminSubs } from './aa/bundler-keys.js';
 import type { CaseStatus } from './kyc-cases-pg.js';
@@ -36,6 +36,76 @@ import {
   listCases,
   requestUnlock,
 } from './admin-kyc-actions.js';
+
+/**
+ * PBA-L3a-001: every state-changing admin route. Each one sits behind the CSRF
+ * guard below (same-origin Origin + Sec-Fetch-Site, `application/json`, the
+ * SameSite=Strict `_kyc_admin` cookie and the session-bound `x-csrf-token`).
+ * The regression test scans this file and fails if a POST path is added here
+ * without being listed (and therefore exercised).
+ */
+export const ADMIN_STATE_CHANGING_ROUTES: readonly string[] = [
+  '/admin/kyc/adjudicate',
+  '/admin/kyc/unlock/request',
+  '/admin/kyc/unlock/approve',
+  '/admin/kyc/delete',
+];
+
+/** Read-only JSON routes: same-origin only and the strict admin cookie required. */
+export const ADMIN_READ_ROUTES: readonly string[] = [
+  '/admin/kyc/cases',
+  '/admin/kyc/case',
+  '/admin/kyc/dsar',
+  '/admin/kyc/audit',
+];
+
+/** SameSite=Strict, console-scoped cookie proving the request came from the console. */
+const ADMIN_COOKIE = '_kyc_admin';
+const ADMIN_COOKIE_MAX_AGE_SEC = 8 * 60 * 60;
+
+/**
+ * HMAC key for the admin cookie + CSRF token. It is the ACTIVE cookie-signing key
+ * (COOKIE_KEYS[0]), which production already requires to be a ≥32-char secret
+ * shared by every instance, so tokens verify on whichever instance serves the POST.
+ */
+function adminBindingKey(): string {
+  const first = (process.env.COOKIE_KEYS ?? '')
+    .split(',')
+    .map((k) => k.trim())
+    .find((k) => k.length > 0);
+  return first ?? DEV_DEFAULT_COOKIE_KEY;
+}
+
+/** Session-bound value: HMAC(key, label || session uid). Distinct labels → distinct values. */
+function adminBinding(label: 'cookie' | 'csrf', sessionKey: string): string {
+  return createHmac('sha256', adminBindingKey()).update(`kyc-admin-${label}:${sessionKey}`).digest('base64url');
+}
+
+function header(req: IncomingMessage, name: string): string | undefined {
+  const v = req.headers[name];
+  const s = Array.isArray(v) ? v[0] : v;
+  return typeof s === 'string' && s.length > 0 ? s : undefined;
+}
+
+/**
+ * Same-origin check for admin API calls. A browser always labels a fetch with
+ * Sec-Fetch-Site; anything but `same-origin` (cross-site, or a same-SITE sibling
+ * such as explorer.citrate.ai) is refused. When Origin is present it must be the
+ * issuer's own origin; `requireOrigin` (POSTs) refuses an absent one too.
+ */
+function isSameOrigin(req: IncomingMessage, issuerOrigin: string, requireOrigin: boolean): boolean {
+  const site = header(req, 'sec-fetch-site');
+  if (site !== undefined && site !== 'same-origin') return false;
+  const origin = header(req, 'origin');
+  if (origin === undefined) return !requireOrigin;
+  return origin === issuerOrigin;
+}
+
+function isJsonContentType(req: IncomingMessage): boolean {
+  const ct = header(req, 'content-type');
+  if (!ct) return false;
+  return ct.split(';')[0]!.trim().toLowerCase() === 'application/json';
+}
 
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
@@ -171,14 +241,52 @@ export function mountAdminKycRoutes(provider: Provider): void {
       return;
     }
     const actor = accountId;
+
+    // --- PBA-L3a-001: CSRF / cross-origin guard -----------------------------
+    // Session key: the panva session's stable uid. The console cookie and the
+    // CSRF token are both HMACs of it, so neither can be forged cross-site nor
+    // replayed into another admin's session.
+    let sessionKey: string | undefined;
+    try {
+      sessionKey = ((await provider.Session.get(ctx)) as { uid?: string } | undefined)?.uid;
+    } catch {
+      sessionKey = undefined;
+    }
+    if (!sessionKey) return sendJson(ctx.res, 403, { error: 'csrf_rejected', reason: 'no admin session' });
+    const issuerOrigin = new URL(provider.issuer).origin;
+    const isConsole = ctx.method === 'GET' && isConsolePath(ctx.path);
+    if (!isConsole) {
+      const csrfReject = (reason: string) => sendJson(ctx.res, 403, { error: 'csrf_rejected', reason });
+      const isPost = ctx.method === 'POST';
+      if (!isSameOrigin(ctx.req, issuerOrigin, isPost)) return csrfReject('admin routes are same-origin only');
+      const cookie = readCookie(ctx.req.headers.cookie, ADMIN_COOKIE);
+      if (!cookie || !timingSafeEqualStr(cookie, adminBinding('cookie', sessionKey))) {
+        return csrfReject('open the admin console first (strict admin cookie missing)');
+      }
+      if (ctx.method !== 'GET') {
+        if (!isJsonContentType(ctx.req)) return csrfReject('content-type must be application/json');
+        const token = header(ctx.req, 'x-csrf-token');
+        if (!token || !timingSafeEqualStr(token, adminBinding('csrf', sessionKey))) {
+          return csrfReject('missing or invalid x-csrf-token');
+        }
+      }
+    }
+
     const store = ih.caseStore;
     const getDek = (id: string) => ih.getCaseDek(id);
     const webhookSecret = process.env.KYC_INHOUSE_WEBHOOK_SECRET ?? '';
 
     // --- GET routes ---
     if (ctx.method === 'GET' && (ctx.path === '/admin/kyc' || ctx.path === '/admin/kyc/')) {
-      ctx.res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
-      ctx.res.end(renderAdminKycUI());
+      ctx.res.writeHead(200, {
+        'content-type': 'text/html; charset=utf-8',
+        'cache-control': 'no-store',
+        // Host-only, console-scoped, never sent on a cross-site request.
+        'set-cookie': [
+          `${ADMIN_COOKIE}=${adminBinding('cookie', sessionKey)}; Path=/admin/kyc; HttpOnly; Secure; SameSite=Strict; Max-Age=${ADMIN_COOKIE_MAX_AGE_SEC}`,
+        ],
+      });
+      ctx.res.end(renderAdminKycUI(adminBinding('csrf', sessionKey)));
       return;
     }
     if (ctx.method === 'GET' && ctx.path === '/admin/kyc/cases') {
@@ -311,6 +419,9 @@ function timingSafeEqualStr(a: string, b: string): boolean {
  * than left implicitly covered.
  */
 export const __testing = {
+  adminBinding,
+  isSameOrigin,
+  isJsonContentType,
   wantsHtml,
   isConsolePath,
   readCookie,
