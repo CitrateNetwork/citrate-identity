@@ -62,7 +62,10 @@ function mount(onCanonicalWalletChange?: (sub: string, addr: string | null) => P
     },
     AccessToken: {
       find: async (t: string) =>
-        t === TOKEN ? { accountId: SUB, isExpired: false } : null,
+        t === TOKEN
+          ? // PBA-L3a-005: a desktop-app (wallet client) token with the wallet scope.
+            { accountId: SUB, clientId: 'citrate-core', scope: 'openid wallet', isExpired: false }
+          : null,
     },
   } as unknown as Provider;
 
