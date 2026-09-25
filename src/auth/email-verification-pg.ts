@@ -9,7 +9,8 @@
  * process-wide singleton swapped at boot by {@link initEmailVerificationStoreFromEnv}.
  *
  * Security properties:
- *   - single-use: a code is deleted the instant it verifies;
+ *   - single-use: a code is tombstoned the instant it verifies (the row, and
+ *     with it the per-email send window, is kept — PBA-L3a-002 residual);
  *   - short TTL (CODE_TTL_MS): expired codes never verify;
  *   - attempt-capped (MAX_ATTEMPTS): brute force invalidates the code;
  *   - resend rate-limited (MAX_SENDS_PER_WINDOW): can't be used to spam an inbox;
@@ -25,6 +26,9 @@ export const CODE_TTL_MS = 10 * 60 * 1000; // 10 minutes
 export const MAX_ATTEMPTS = 5; // verify tries per issued code
 export const MAX_SENDS_PER_WINDOW = 5; // resends per email per window
 export const SEND_WINDOW_MS = 15 * 60 * 1000; // rolling resend window
+
+/** code_hash of a used code: not hex, so it can never equal a real code hash. */
+const CONSUMED_TOMBSTONE = 'consumed';
 
 /** Postgres SQLSTATE for a unique-constraint violation. */
 const UNIQUE_VIOLATION = '23505';
@@ -145,16 +149,17 @@ export class InMemoryEmailVerificationStore implements EmailVerificationStore {
     const key = normalizeEmail(email);
     const row = this.byEmail.get(key);
     if (!row) return { ok: false };
-    if (Date.now() > row.expiresAt || row.attempts >= MAX_ATTEMPTS) {
-      this.byEmail.delete(key);
-      return { ok: false };
-    }
+    // PBA-L3a-002 residual: a dead code (expired, burned or used) keeps its row so
+    // the per-email send window survives; deleting it reset the window and let
+    // burn → re-issue cycles exceed MAX_SENDS_PER_WINDOW.
+    if (Date.now() > row.expiresAt || row.attempts >= MAX_ATTEMPTS) return { ok: false };
     if (!hashesEqual(row.codeHash, hashCode(key, code)) || !bindingMatches(row.binding, binding)) {
       row.attempts += 1;
-      if (row.attempts >= MAX_ATTEMPTS) this.byEmail.delete(key);
       return { ok: false };
     }
-    this.byEmail.delete(key); // single-use
+    // single-use: tombstone the code, keep the window
+    row.attempts = MAX_ATTEMPTS;
+    row.codeHash = CONSUMED_TOMBSTONE;
     return { ok: true, ...(row.passwordHash !== undefined ? { passwordHash: row.passwordHash } : {}) };
   }
 }
@@ -255,7 +260,7 @@ export class PgEmailVerificationStore implements EmailVerificationStore {
    * real Postgres). Now a single `UPDATE … attempts = attempts + 1 WHERE
    * attempts < MAX_ATTEMPTS … RETURNING` hands out at most MAX_ATTEMPTS claims
    * per issued code, whatever the interleaving; only a claim-holder compares.
-   * Success is single-use via a conditional DELETE that exactly one caller wins.
+   * Success is single-use via a conditional UPDATE that exactly one caller wins.
    */
   async consume(email: string, code: string, binding?: string): Promise<ConsumeResult> {
     const key = normalizeEmail(email);
@@ -267,27 +272,23 @@ export class PgEmailVerificationStore implements EmailVerificationStore {
       [key, MAX_ATTEMPTS, now],
     );
     if (rows.length === 0) {
-      // Absent, expired or exhausted. Drop a dead row so it cannot linger.
-      await this.pg.query(
-        'DELETE FROM email_verification_codes WHERE email = $1 AND (attempts >= $2 OR expires_at <= $3)',
-        [key, MAX_ATTEMPTS, now],
-      );
+      // Absent, expired or exhausted. The row is KEPT (PBA-L3a-002 residual): it
+      // carries send_count + window_started_at, and deleting it reset the send
+      // window. issue() overwrites it with the next code.
       return { ok: false };
     }
     const r = rows[0] as { code_hash: string; password_hash: string | null; attempts: number; binding: string | null };
     if (!hashesEqual(r.code_hash, hashCode(key, code)) || !bindingMatches(r.binding, binding)) {
-      if (r.attempts >= MAX_ATTEMPTS) {
-        // Last claim spent: invalidate THIS code (a re-issued code is untouched).
-        await this.pg.query('DELETE FROM email_verification_codes WHERE email = $1 AND code_hash = $2', [
-          key,
-          r.code_hash,
-        ]);
-      }
+      // The claim already counted this attempt; at MAX_ATTEMPTS the code is dead
+      // and no further claim can succeed.
       return { ok: false };
     }
+    // Single use: exactly one concurrent caller tombstones the matching code.
+    // The row (and its send window) stays.
     const won = await this.pg.query(
-      'DELETE FROM email_verification_codes WHERE email = $1 AND code_hash = $2 RETURNING email',
-      [key, r.code_hash],
+      `UPDATE email_verification_codes SET code_hash = $3, attempts = $4
+        WHERE email = $1 AND code_hash = $2 RETURNING email`,
+      [key, r.code_hash, CONSUMED_TOMBSTONE, MAX_ATTEMPTS],
     );
     if (won.rows.length === 0) return { ok: false }; // a concurrent correct submit consumed it
     return {
