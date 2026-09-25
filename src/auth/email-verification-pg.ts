@@ -26,6 +26,9 @@ export const MAX_ATTEMPTS = 5; // verify tries per issued code
 export const MAX_SENDS_PER_WINDOW = 5; // resends per email per window
 export const SEND_WINDOW_MS = 15 * 60 * 1000; // rolling resend window
 
+/** Postgres SQLSTATE for a unique-constraint violation. */
+const UNIQUE_VIOLATION = '23505';
+
 /** The minimal `pg`-compatible surface this store needs. */
 export interface PgLike {
   query(text: string, params?: unknown[]): Promise<{ rows: unknown[] }>;
@@ -162,46 +165,53 @@ export class PgEmailVerificationStore implements EmailVerificationStore {
     await this.pg.query(CREATE_TABLE_SQL);
   }
 
+  /**
+   * PBA-L3a-002 variant: the resend window used to be a read-then-write too, so
+   * 30 concurrent requests issued 30 codes against a budget of 5. Now each step
+   * is a single conditional statement:
+   *   1. UPDATE the existing row only while its window has room (or has expired,
+   *      which restarts the window) — a row-locked read-modify-write in Postgres;
+   *   2. else INSERT the first row;
+   *   3. if that INSERT lost a race to a concurrent first insert (unique
+   *      violation), retry step 1.
+   * No row back from any step → the budget is spent → rate-limited.
+   */
   async issue(email: string, passwordHash?: string): Promise<IssueResult> {
     const key = normalizeEmail(email);
-    const { rows } = await this.pg.query(
-      'SELECT send_count, window_started_at FROM email_verification_codes WHERE email = $1',
-      [key],
-    );
     const now = Date.now();
-    let sendCount = 1;
-    let windowStartedAt = new Date(now);
-    if (rows.length > 0) {
-      const r = rows[0] as { send_count: number; window_started_at: string | Date };
-      const ws = new Date(r.window_started_at).getTime();
-      if (now - ws < SEND_WINDOW_MS) {
-        if (r.send_count >= MAX_SENDS_PER_WINDOW) return { rateLimited: true };
-        sendCount = r.send_count + 1;
-        windowStartedAt = new Date(ws);
-      }
-    }
     const code = genCode();
-    await this.pg.query(
-      `INSERT INTO email_verification_codes
-         (email, code_hash, password_hash, expires_at, attempts, send_count, window_started_at)
-       VALUES ($1, $2, $3, $4, 0, $5, $6)
-       ON CONFLICT (email) DO UPDATE SET
-         code_hash = EXCLUDED.code_hash,
-         password_hash = EXCLUDED.password_hash,
-         expires_at = EXCLUDED.expires_at,
-         attempts = 0,
-         send_count = EXCLUDED.send_count,
-         window_started_at = EXCLUDED.window_started_at`,
-      [
-        key,
-        hashCode(key, code),
-        passwordHash ?? null,
-        new Date(now + CODE_TTL_MS).toISOString(),
-        sendCount,
-        windowStartedAt.toISOString(),
-      ],
-    );
-    return { code, rateLimited: false };
+    const codeHash = hashCode(key, code);
+    const pw = passwordHash ?? null;
+    const expiresAt = new Date(now + CODE_TTL_MS).toISOString();
+    const nowIso = new Date(now).toISOString();
+    const windowFloor = new Date(now - SEND_WINDOW_MS).toISOString();
+    const bump = () =>
+      this.pg.query(
+        `UPDATE email_verification_codes SET
+           code_hash = $2, password_hash = $3, expires_at = $4, attempts = 0,
+           send_count = CASE WHEN window_started_at <= $6 THEN 1 ELSE send_count + 1 END,
+           window_started_at = CASE WHEN window_started_at <= $6 THEN $5 ELSE window_started_at END
+         WHERE email = $1 AND (window_started_at <= $6 OR send_count < $7)
+         RETURNING email`,
+        [key, codeHash, pw, expiresAt, nowIso, windowFloor, MAX_SENDS_PER_WINDOW],
+      );
+    if ((await bump()).rows.length > 0) return { code, rateLimited: false };
+    try {
+      // Plain INSERT (not ON CONFLICT DO NOTHING ... RETURNING, which pg-mem
+      // answers with a row even on conflict): a lost first-insert race surfaces
+      // as a unique violation and falls through to the retry below.
+      await this.pg.query(
+        `INSERT INTO email_verification_codes
+           (email, code_hash, password_hash, expires_at, attempts, send_count, window_started_at)
+         VALUES ($1, $2, $3, $4, 0, 1, $5)`,
+        [key, codeHash, pw, expiresAt, nowIso],
+      );
+      return { code, rateLimited: false };
+    } catch (err) {
+      if ((err as { code?: string }).code !== UNIQUE_VIOLATION) throw err;
+    }
+    if ((await bump()).rows.length > 0) return { code, rateLimited: false };
+    return { rateLimited: true };
   }
 
   /**

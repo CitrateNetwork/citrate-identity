@@ -14,6 +14,8 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import {
   PgEmailVerificationStore,
   MAX_ATTEMPTS,
+  MAX_SENDS_PER_WINDOW,
+  SEND_WINDOW_MS,
   setEmailVerificationStore,
   InMemoryEmailVerificationStore,
   type PgLike,
@@ -113,6 +115,56 @@ describe(`PBA-L3a-002 store: attempt cap holds under concurrency (${process.env.
     const store = await freshStore();
     const { code } = await store.issue('user@example.com');
     expect(await store.consume('user@example.com', code!)).toEqual({ ok: true });
+  });
+
+  it('variant: the resend window holds under concurrency (no more than MAX_SENDS_PER_WINDOW codes issued)', async () => {
+    const store = await freshStore();
+    const results = await Promise.all(Array.from({ length: 30 }, () => store.issue('inbox@example.com', 'h')));
+    expect(results.filter((r) => !r.rateLimited && r.code)).toHaveLength(MAX_SENDS_PER_WINDOW);
+    // And the LAST issued code is the one that verifies.
+    const { rows } = await (db.pool as PgLike).query('SELECT send_count FROM email_verification_codes WHERE email = $1', ['inbox@example.com']);
+    expect((rows[0] as { send_count: number }).send_count).toBe(MAX_SENDS_PER_WINDOW);
+  });
+
+  it('variant: a fresh window resets the send budget', async () => {
+    const store = await freshStore();
+    for (let i = 0; i < MAX_SENDS_PER_WINDOW; i++) expect((await store.issue('w@example.com')).rateLimited).toBe(false);
+    expect((await store.issue('w@example.com')).rateLimited).toBe(true);
+    await (db.pool as PgLike).query('UPDATE email_verification_codes SET window_started_at = $2 WHERE email = $1', [
+      'w@example.com',
+      new Date(Date.now() - SEND_WINDOW_MS - 1000).toISOString(),
+    ]);
+    const again = await store.issue('w@example.com', 'h2');
+    expect(again.rateLimited).toBe(false);
+    const { rows } = await (db.pool as PgLike).query('SELECT send_count FROM email_verification_codes WHERE email = $1', ['w@example.com']);
+    expect((rows[0] as { send_count: number }).send_count).toBe(1);
+    expect(await store.consume('w@example.com', again.code!)).toEqual({ ok: true, passwordHash: 'h2' });
+  });
+
+  it('variant: a non-unique-violation insert error propagates (never masked as rate-limited)', async () => {
+    const boom = Object.assign(new Error('disk full'), { code: '53100' });
+    const pgStub: PgLike = {
+      query: async (t) => {
+        if (/^\s*INSERT/i.test(t)) throw boom;
+        return { rows: [] };
+      },
+    };
+    await expect(new PgEmailVerificationStore(pgStub).issue('e@example.com')).rejects.toBe(boom);
+  });
+
+  it('variant: losing the first-insert race falls back to the window update', async () => {
+    let bumps = 0;
+    const pgStub: PgLike = {
+      query: async (t) => {
+        if (/^\s*INSERT/i.test(t)) throw Object.assign(new Error('dup'), { code: '23505' });
+        bumps += 1;
+        return { rows: bumps === 2 ? [{ email: 'e@example.com' }] : [] };
+      },
+    };
+    const r = await new PgEmailVerificationStore(pgStub).issue('e@example.com');
+    expect(r.rateLimited).toBe(false);
+    expect(r.code).toMatch(/^\d{6}$/);
+    expect(bumps).toBe(2);
   });
 
   it('an expired code is rejected and removed', async () => {
