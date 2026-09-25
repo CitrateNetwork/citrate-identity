@@ -35,6 +35,7 @@ import { hashPassword, verifyPassword, PasswordError } from './password.js';
 import { getUserStore } from './stores.js';
 import { predictedWalletForAccount } from '../aa/wallet-claims.js';
 import { getEmailVerificationStore, CODE_TTL_MS } from './email-verification-pg.js';
+import { getAccountEpochStore } from './account-epoch.js';
 import { sendVerificationCode } from '../email-send.js';
 import {
   clientIp,
@@ -273,6 +274,9 @@ export function mountPasswordRoutes(provider: Provider, options: PasswordRouteOp
       } else if (passwordHash) {
         // Existing account: attach/replace the password (email-proven reset).
         await store.rotatePasswordHash(user.id, passwordHash);
+        // PBA-L3a-008: a reset ends every earlier session and refresh token of
+        // the account (the new session below is minted in this same second).
+        await getAccountEpochStore().bump(user.id);
       }
       await store.markEmailVerified(user.id);
       await store.setLastSigningMethod(user.id, 'email-pw');

@@ -37,6 +37,7 @@ import { verifyAaStackOnChain, formatAaStackProblems } from './aa/verify-stack.j
 import { mountStaticAssets } from './static-assets.js';
 import { mountPasswordRoutes } from './auth/password-routes.js';
 import { createRateLimiter, type RateLimiter } from './auth/rate-limit.js';
+import { initAccountEpochStore, mountSessionEpochGuard } from './auth/account-epoch.js';
 import { mountWebauthnRoutes } from './auth/webauthn-routes.js';
 import { mountGoogleRoutes } from './auth/google-routes.js';
 import { mountConfiguredOAuth2Providers } from './auth/oauth2-provider.js';
@@ -241,6 +242,12 @@ export async function createProvider(
     ...(pingRedis ? { pingRedis } : {}),
     ...(pingDb ? { pingDb } : {}),
   });
+
+  // PBA-L3a-008: account-wide revocation epoch (password reset / log out
+  // everywhere). Shared via Redis when wired; the guard ends stale browser
+  // sessions before any route reads them.
+  initAccountEpochStore(options.redis);
+  mountSessionEpochGuard(provider);
 
   // Hosted OAuth redirect bounce (GET /oauth/callback) for Citrate Core desktop
   // MCP sign-in: providers that reject the http-loopback redirect (Notion) point

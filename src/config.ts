@@ -1,3 +1,4 @@
+import { isRevokedByEpoch, tokenAuthSec } from './auth/account-epoch.js';
 import {
   readFileSync,
   writeFileSync,
@@ -830,7 +831,13 @@ async function linkedWalletsFor(
  * Both the OIDC interaction-resume path and the direct-token path call
  * this, so claims are identical regardless of how the login was driven.
  */
-export const findAccount: FindAccount = (_ctx, sub): Account => {
+export const findAccount: FindAccount = async (_ctx, sub, token): Promise<Account | undefined> => {
+  // PBA-L3a-008: a token (refresh grant, /userinfo, code exchange) issued before
+  // the account's epoch (password reset / log-out-everywhere) resolves to no
+  // account, which panva turns into invalid_grant / invalid_token.
+  if (token && (await isRevokedByEpoch(sub, tokenAuthSec(token as { iiat?: unknown; iat?: unknown })))) {
+    return undefined;
+  }
   const isUuid = UUID_RE.test(sub);
   const accountId = isUuid ? sub : isAddress(sub) ? getAddress(sub) : sub;
   return {
