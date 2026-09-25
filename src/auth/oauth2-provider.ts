@@ -131,7 +131,7 @@ export function mountOAuth2Provider(
   cfg: OAuth2ProviderConfig,
 ): void {
   const states: StateStore = cfg.redis
-    ? new RedisStateStore(cfg.redis)
+    ? new RedisStateStore(cfg.redis, `oauth_state:${cfg.name}:`)
     : new InMemoryStateStore();
   const startPath = `/auth/${cfg.name}/start`;
   const callbackPath = `/auth/${cfg.name}/callback`;

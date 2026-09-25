@@ -38,7 +38,7 @@ import { mountStaticAssets } from './static-assets.js';
 import { mountPasswordRoutes } from './auth/password-routes.js';
 import { createRateLimiter, type RateLimiter } from './auth/rate-limit.js';
 import { initAccountEpochStore, mountSessionEpochGuard } from './auth/account-epoch.js';
-import { mountWebauthnRoutes } from './auth/webauthn-routes.js';
+import { mountWebauthnRoutes, RedisChallengeStore } from './auth/webauthn-routes.js';
 import { mountGoogleRoutes } from './auth/google-routes.js';
 import { mountConfiguredOAuth2Providers } from './auth/oauth2-provider.js';
 import { initAuthStoresFromEnv } from './auth/stores.js';
@@ -387,6 +387,8 @@ export async function createProvider(
       rpName: 'Citrate',
       expectedOrigin: extraOrigins.length > 0 ? [issuer, ...extraOrigins] : issuer,
     },
+    // PBA-L3a-013: challenges shared across instances when Redis is wired.
+    ...(options.redis ? { challengeStore: new RedisChallengeStore(options.redis) } : {}),
   });
 
   // EW-S1 WP-6 slice C — Google federation. Mount the OAuth start +

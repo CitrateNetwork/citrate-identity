@@ -192,11 +192,20 @@ const STATE_PREFIX = 'google_state:';
  * the TTL, so an expired entry is simply absent → `undefined` (fail-closed).
  */
 export class RedisStateStore implements StateStore {
-  constructor(private readonly redis: RedisLike) {}
+  /**
+   * @param prefix key namespace. PBA-L3a-013: each federation provider gets its
+   *   own (Google keeps `google_state:`; GitHub/Discord/X use
+   *   `oauth_state:<name>:`) so a state minted for one provider can never be
+   *   consumed at another provider's callback.
+   */
+  constructor(
+    private readonly redis: RedisLike,
+    private readonly prefix: string = STATE_PREFIX,
+  ) {}
 
   async put(key: string, value: StateValue): Promise<void> {
     await this.redis.set(
-      STATE_PREFIX + key,
+      this.prefix + key,
       JSON.stringify(value),
       'PX',
       STATE_TTL_MS,
@@ -205,7 +214,7 @@ export class RedisStateStore implements StateStore {
   }
 
   async take(key: string): Promise<PendingState | undefined> {
-    const raw = await this.redis.getdel(STATE_PREFIX + key);
+    const raw = await this.redis.getdel(this.prefix + key);
     if (raw === null) return undefined;
     let parsed: StateValue;
     try {
