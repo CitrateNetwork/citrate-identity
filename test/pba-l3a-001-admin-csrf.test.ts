@@ -31,6 +31,8 @@ const ROUTES = [
   '/admin/kyc/unlock/request',
   '/admin/kyc/unlock/approve',
   '/admin/kyc/delete',
+  '/admin/kyc/dsar/request',
+  '/admin/kyc/dsar/approve',
 ];
 
 const admin = privateKeyToAccount(`0x${'c3'.repeat(32)}` as Hex);

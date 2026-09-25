@@ -108,6 +108,20 @@ CREATE TABLE IF NOT EXISTS kyc_unlock_requests (
   consumed_at  bigint
 )`;
 
+/** PBA-L3a-006: dual-control DSAR export requests (request by one admin, approve by another). */
+const CREATE_DSAR_SQL = `
+CREATE TABLE IF NOT EXISTS kyc_dsar_requests (
+  request_id   text   PRIMARY KEY,
+  sub          text   NOT NULL,
+  requested_by text   NOT NULL,
+  reason       text   NOT NULL,
+  approved_by  text,
+  created_at   bigint NOT NULL,
+  consumed_at  bigint
+)`;
+
+const DSAR_EXISTS_SQL = `SELECT 1 FROM information_schema.tables WHERE table_name = 'kyc_dsar_requests' LIMIT 1`;
+
 const CASES_EXISTS_SQL = `SELECT 1 FROM information_schema.tables WHERE table_name = 'kyc_cases' LIMIT 1`;
 const EVIDENCE_EXISTS_SQL = `SELECT 1 FROM information_schema.tables WHERE table_name = 'kyc_evidence' LIMIT 1`;
 const UNLOCK_EXISTS_SQL = `SELECT 1 FROM information_schema.tables WHERE table_name = 'kyc_unlock_requests' LIMIT 1`;
@@ -115,6 +129,16 @@ const UNLOCK_EXISTS_SQL = `SELECT 1 FROM information_schema.tables WHERE table_n
 export interface UnlockRequest {
   unlockId: string;
   caseId: string;
+  requestedBy: string;
+  reason: string;
+  approvedBy?: string;
+  createdAt: number;
+  consumedAt?: number;
+}
+
+export interface DsarRequest {
+  requestId: string;
+  sub: string;
   requestedBy: string;
   reason: string;
   approvedBy?: string;
@@ -188,6 +212,9 @@ export class KycCaseStore {
     if ((await this.pool.query(UNLOCK_EXISTS_SQL)).rows.length === 0) {
       await this.pool.query(CREATE_UNLOCK_SQL);
     }
+    if ((await this.pool.query(DSAR_EXISTS_SQL)).rows.length === 0) {
+      await this.pool.query(CREATE_DSAR_SQL);
+    }
   }
 
   // --- dual-control subpoena unlock (VERI-S4-WP3) ---
@@ -213,6 +240,71 @@ export class KycCaseStore {
       approvedBy: r.approved_by ? String(r.approved_by) : undefined,
       createdAt: num(r.created_at) ?? 0,
       consumedAt: num(r.consumed_at),
+    };
+  }
+
+  /**
+   * Atomically approve + consume an unlock request: succeeds for exactly one
+   * caller, only while unconsumed, and only for an approver who is not the
+   * requester. Returns the case id, or undefined when the claim failed.
+   * (PBA-L3a-006 variant: the old read-check-then-write let N concurrent
+   * approvals all decrypt.)
+   */
+  async claimUnlockRequest(unlockId: string, approvedBy: string, now: number = Date.now()): Promise<string | undefined> {
+    const res = await this.pool.query(
+      `UPDATE kyc_unlock_requests SET approved_by = $2, consumed_at = $3
+        WHERE unlock_id = $1 AND consumed_at IS NULL AND requested_by <> $2
+        RETURNING case_id`,
+      [unlockId, approvedBy, now],
+    );
+    const r = res.rows[0] as Record<string, unknown> | undefined;
+    return r ? String(r.case_id) : undefined;
+  }
+
+  // --- dual-control DSAR export (PBA-L3a-006) ---
+  async createDsarRequest(sub: string, requestedBy: string, reason: string): Promise<DsarRequest> {
+    const now = Date.now();
+    const requestId = `dsar_${randomUUID()}`;
+    await this.pool.query(
+      `INSERT INTO kyc_dsar_requests (request_id, sub, requested_by, reason, created_at) VALUES ($1,$2,$3,$4,$5)`,
+      [requestId, sub, requestedBy, reason, now],
+    );
+    return { requestId, sub, requestedBy, reason, createdAt: now };
+  }
+
+  async getDsarRequest(requestId: string): Promise<DsarRequest | undefined> {
+    const res = await this.pool.query(`SELECT * FROM kyc_dsar_requests WHERE request_id = $1`, [requestId]);
+    const r = res.rows[0] as Record<string, unknown> | undefined;
+    if (!r) return undefined;
+    return {
+      requestId: String(r.request_id),
+      sub: String(r.sub),
+      requestedBy: String(r.requested_by),
+      reason: String(r.reason),
+      approvedBy: r.approved_by ? String(r.approved_by) : undefined,
+      createdAt: num(r.created_at) ?? 0,
+      consumedAt: num(r.consumed_at),
+    };
+  }
+
+  /** Atomic single-use approval by a DISTINCT admin (same rule as {@link claimUnlockRequest}). */
+  async claimDsarRequest(requestId: string, approvedBy: string, now: number = Date.now()): Promise<DsarRequest | undefined> {
+    const res = await this.pool.query(
+      `UPDATE kyc_dsar_requests SET approved_by = $2, consumed_at = $3
+        WHERE request_id = $1 AND consumed_at IS NULL AND requested_by <> $2
+        RETURNING request_id, sub, requested_by, reason, created_at`,
+      [requestId, approvedBy, now],
+    );
+    const r = res.rows[0] as Record<string, unknown> | undefined;
+    if (!r) return undefined;
+    return {
+      requestId: String(r.request_id),
+      sub: String(r.sub),
+      requestedBy: String(r.requested_by),
+      reason: String(r.reason),
+      approvedBy,
+      createdAt: num(r.created_at) ?? 0,
+      consumedAt: now,
     };
   }
 
