@@ -1,10 +1,3 @@
----
-created: 2026-07-15T05:30:00Z
-branch: main
-author: Larry Klosowski (@SaulBuilds) + Claude Fable 5
-status: deployed
----
-
 # citrate-treasury-signer (Phase-D D2.4 / CORE-S5.5, @rule8)
 
 The **droplet signing path** for the membership money flow. core-membership's grant
