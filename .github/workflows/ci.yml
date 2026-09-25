@@ -27,7 +27,7 @@ jobs:
       lint-script: ''
 
   public-runbook:
-    # PBA-L8-007 / PBA-L8-021 tripwire: no ops topology or stale money-contract
+    # Public-claims accuracy tripwire: no ops topology or stale money-contract
     # addresses in public READMEs and service runbooks.
     runs-on: ubuntu-latest
     steps:
