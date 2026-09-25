@@ -8,11 +8,18 @@
  * evergreen header, citric-green accent — matching /verify and the SIWE login.
  */
 
-export function renderAdminKycUI(): string {
+/**
+ * @param csrfToken session-bound token (PBA-L3a-001). Embedded in a meta tag and
+ *   sent as `x-csrf-token` on every state-changing fetch; base64url, so safe in
+ *   an attribute without escaping.
+ */
+export function renderAdminKycUI(csrfToken: string): string {
+  if (!/^[A-Za-z0-9_-]*$/.test(csrfToken)) throw new Error('renderAdminKycUI: csrf token must be base64url');
   return `<!doctype html>
 <html lang="en" data-theme="light"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="theme-color" content="#0f2a1a">
+<meta name="csrf-token" content="${csrfToken}">
 <title>KYC compliance — Citrate</title>
 <style>
 @font-face { font-family:'Geist'; src:url('/fonts/Geist-Regular.woff2') format('woff2'); font-weight:400; font-display:swap; }
@@ -77,6 +84,7 @@ tbody tr:last-child td { border-bottom:0; }
 (() => {
   const rows = document.getElementById('rows'), foot = document.getElementById('foot');
   let filter = 'pending';
+  const CSRF = document.querySelector('meta[name="csrf-token"]').getAttribute('content');
   const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
   const fmt = (t) => { try { return new Date(t).toLocaleString(); } catch { return String(t); } };
   const badge = (s) => '<span class="badge b-' + esc(s) + '">' + esc(s) + '</span>';
@@ -111,7 +119,7 @@ tbody tr:last-child td { border-bottom:0; }
     const reason = decision === 'rejected' ? (prompt('Reason for rejection?') || 'rejected by admin') : 'approved by admin';
     b.disabled = true;
     try {
-      const r = await fetch('/admin/kyc/adjudicate', { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ caseId, decision, reason }) });
+      const r = await fetch('/admin/kyc/adjudicate', { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json', 'x-csrf-token': CSRF }, body: JSON.stringify({ caseId, decision, reason }) });
       const j = await r.json();
       if (!r.ok) { alert('Failed: ' + (j.reason || j.error || r.status)); b.disabled = false; return; }
       load();

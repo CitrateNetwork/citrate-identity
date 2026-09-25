@@ -1349,10 +1349,18 @@ export async function buildConfiguration(
       // *without* the cookie — `provider.interactionDetails` returns
       // `undefined`, the route bails with "no active interaction", sign-in
       // fails. Widening the path to `/` lets the cookie ride every same-
-      // origin request to `auth.citrate.ai`. CSRF defense stays the
-      // standard `HttpOnly` + `Secure` + `SameSite=lax` — `lax` already
-      // blocks cross-origin POST abuse.
-      long: { path: '/' },
+      // origin request to `auth.citrate.ai`.
+      //
+      // PBA-L3a-001: panva's DEFAULT for the long-lived `_session` cookie is
+      // `SameSite=None` (lib/helpers/defaults.js) — this comment used to claim
+      // `lax` while only `path` was overridden, so a cross-site form POST carried
+      // the session. It is now pinned to `lax`: top-level GET navigations from an
+      // RP to /auth and /session/end still carry it (SSO keeps working), while
+      // cross-site POSTs, iframes and subresource requests do not. No Citrate RP
+      // uses iframe silent-auth / check_session, which would need `none`. The
+      // admin console adds its own SameSite=Strict cookie + CSRF token on top
+      // (admin-kyc-routes.ts).
+      long: { path: '/', sameSite: 'lax' },
       short: { path: '/' },
     },
     pkce: {
