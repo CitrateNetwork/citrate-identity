@@ -21,6 +21,13 @@ import type { KycCaseStore, CaseStatus } from './kyc-cases-pg.js';
 import type { KycAuditLog } from './kyc-audit-pg.js';
 import { openField } from './kyc-crypto.js';
 
+/**
+ * R2 verifier nit (PBA-L3a-006): a dual-control request (subpoena unlock or DSAR
+ * export) must be approved within a day, or it is dead and has to be raised
+ * again. A forgotten request can no longer be approved weeks later.
+ */
+export const DUAL_CONTROL_REQUEST_TTL_MS = 24 * 60 * 60 * 1000;
+
 /** Per-case DEK provider (least privilege — the actions never hold the master key). */
 export type GetDek = (caseId: string) => Promise<Buffer | null>;
 
@@ -109,12 +116,13 @@ export async function approveUnlock(
   const req = await store.getUnlockRequest(opts.unlockId);
   if (!req) return { ok: false, error: 'unlock_not_found' };
   if (req.consumedAt) return { ok: false, error: 'unlock_already_used' };
+  if (Date.now() - req.createdAt > DUAL_CONTROL_REQUEST_TTL_MS) return { ok: false, error: 'unlock_expired' };
   if (req.requestedBy === opts.approver) return { ok: false, error: 'dual_control_violation: approver must differ from requester' };
   const c = await store.getCase(req.caseId);
   if (!c) return { ok: false, error: 'case_not_found' };
   // Claim BEFORE decrypting: exactly one concurrent approval wins (the checks
   // above only pick the error message; this is the enforcing step).
-  if (!(await store.claimUnlockRequest(opts.unlockId, opts.approver))) {
+  if (!(await store.claimUnlockRequest(opts.unlockId, opts.approver, Date.now(), DUAL_CONTROL_REQUEST_TTL_MS))) {
     return { ok: false, error: 'unlock_already_used' };
   }
 
@@ -180,10 +188,11 @@ export async function approveDsar(
   const req = await store.getDsarRequest(opts.requestId);
   if (!req) return { ok: false, error: 'dsar_not_found' };
   if (req.consumedAt) return { ok: false, error: 'dsar_already_used' };
+  if (Date.now() - req.createdAt > DUAL_CONTROL_REQUEST_TTL_MS) return { ok: false, error: 'dsar_expired' };
   if (req.requestedBy === opts.approver) {
     return { ok: false, error: 'dual_control_violation: approver must differ from requester' };
   }
-  const claimed = await store.claimDsarRequest(opts.requestId, opts.approver);
+  const claimed = await store.claimDsarRequest(opts.requestId, opts.approver, Date.now(), DUAL_CONTROL_REQUEST_TTL_MS);
   if (!claimed) return { ok: false, error: 'dsar_already_used' };
   return dsarExport(store, audit, {
     actor: opts.approver,

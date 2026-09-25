@@ -98,9 +98,17 @@ export const LOGIN_WINDOW_MS = 15 * 60 * 1000;
 export const LOGIN_LIMITS = {
   /** POST /auth/password/verify: code guesses. */
   verifyPerIp: 30,
+  /**
+   * Per (account, source IP). Charged BEFORE the account-wide budget and
+   * short-circuiting, so one source runs out here and cannot exhaust the
+   * account-wide budget (no single-source lockout of the victim).
+   */
+  verifyPerAccountIp: 5,
+  /** Account-wide: bounds distributed guessing. Tradeoff: ≥3 sources can still lock it (issue: DEFERRED). */
   verifyPerAccount: 15,
   /** POST /auth/password/login: password guesses. */
   loginPerIp: 30,
+  loginPerAccountIp: 4,
   loginPerAccount: 10,
   /** Code issuance (register, or login falling back to verify-first). */
   issuePerIp: 20,

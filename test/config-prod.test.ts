@@ -26,6 +26,17 @@ function safeProdEnv(): ConfigEnv {
     ISSUER_URL: 'https://auth.citrate.ai',
     EXPLORER_ORIGIN: 'https://explorer.citrate.ai',
     DASHBOARD_ORIGIN: 'https://dashboard.citrate.ai',
+    // PBA-L3a-007: a fully-safe production env sets EVERY RP origin (an unset
+    // one is dropped + reported as a warning).
+    MEMRIZZ_ORIGIN: 'https://memrizz.citrate.ai',
+    ATLAS_ORIGIN: 'https://docs.citrate.ai',
+    DATAROOM_ORIGIN: 'https://dataroom.citrate.ai',
+    FEDERATION_ORIGIN: 'https://www.citrate.ai',
+    COMMS_WEB_ORIGIN: 'https://comms.citrate.ai',
+    ALF_PORTAL_ORIGIN: 'https://alf.citrate.ai',
+    BUYER_WEBAPP_ORIGIN: 'https://citrate-buyer-webapp.vercel.app',
+    RADAR_ORIGIN: 'https://citrate-radar.vercel.app',
+    CORE_MEMBERSHIP_ORIGIN: 'https://membership.citrate.ai',
     // TD-2: KYC store must be DB-backed in production, so a safe baseline sets it.
     DATABASE_URL: 'postgres://user:pass@db.internal:5432/citrate_identity',
     // HA: Redis must back the persistent adapter + nonce + bus in production.

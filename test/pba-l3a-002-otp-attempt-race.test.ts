@@ -100,15 +100,14 @@ describe(`PBA-L3a-002 store: attempt cap holds under concurrency (${process.env.
     expect(results).toContainEqual({ ok: false });
   });
 
-  it('the last allowed wrong guess deletes the row immediately (no dead code left behind)', async () => {
+  it('the last allowed wrong guess kills the code but KEEPS the row and its send window (residual fix)', async () => {
     const store = await freshStore();
     const { code } = await store.issue('user@example.com', 'h');
     for (const g of wrongGuesses(code!, MAX_ATTEMPTS - 1)) await store.consume('user@example.com', g);
-    const before = await (db.pool as PgLike).query('SELECT attempts FROM email_verification_codes WHERE email = $1', ['user@example.com']);
-    expect(before.rows).toHaveLength(1);
     expect(await store.consume('user@example.com', wrongGuesses(code!, MAX_ATTEMPTS)[MAX_ATTEMPTS - 1]!)).toEqual({ ok: false });
-    const after = await (db.pool as PgLike).query('SELECT attempts FROM email_verification_codes WHERE email = $1', ['user@example.com']);
-    expect(after.rows).toHaveLength(0);
+    const after = await (db.pool as PgLike).query('SELECT attempts, send_count FROM email_verification_codes WHERE email = $1', ['user@example.com']);
+    expect(after.rows).toEqual([{ attempts: MAX_ATTEMPTS, send_count: 1 }]);
+    expect(await store.consume('user@example.com', code!)).toEqual({ ok: false });
   });
 
   it('a code issued without a password returns ok with no passwordHash key', async () => {
@@ -167,7 +166,7 @@ describe(`PBA-L3a-002 store: attempt cap holds under concurrency (${process.env.
     expect(bumps).toBe(2);
   });
 
-  it('an expired code is rejected and removed', async () => {
+  it('an expired code is rejected; its row (send window) is kept', async () => {
     const store = await freshStore();
     const { code } = await store.issue('user@example.com', 'h');
     await (db.pool as PgLike).query(
@@ -175,8 +174,8 @@ describe(`PBA-L3a-002 store: attempt cap holds under concurrency (${process.env.
       ['user@example.com', new Date(Date.now() - 1000).toISOString()],
     );
     expect((await store.consume('user@example.com', code!)).ok).toBe(false);
-    const { rows } = await (db.pool as PgLike).query('SELECT 1 FROM email_verification_codes WHERE email = $1', ['user@example.com']);
-    expect(rows).toHaveLength(0);
+    const { rows } = await (db.pool as PgLike).query('SELECT send_count FROM email_verification_codes WHERE email = $1', ['user@example.com']);
+    expect(rows).toEqual([{ send_count: 1 }]);
   });
 });
 
@@ -239,7 +238,7 @@ describe('PBA-L3a-002 HTTP: /auth/password/verify burst against the Postgres sto
       redirect: 'manual',
     });
 
-  it('a concurrent wrong-code burst burns the code: the real code no longer signs in, and the row is gone', async () => {
+  it('a concurrent wrong-code burst burns the code: the real code no longer signs in', async () => {
     const jar = await interaction();
     expect((await post(jar, '/auth/password/register', { email: 'victim@example.com', password: 'attacker chosen password 1' })).status).toBe(200);
     const code = lastCode!;
@@ -252,7 +251,7 @@ describe('PBA-L3a-002 HTTP: /auth/password/verify burst against the Postgres sto
     // At most MAX_ATTEMPTS guesses were ever compared against the stored hash.
     expect(counter.hashReads).toBeLessThanOrEqual(MAX_ATTEMPTS);
     const { rows } = await (db.pool as PgLike).query('SELECT attempts FROM email_verification_codes WHERE email = $1', ['victim@example.com']);
-    expect(rows).toHaveLength(0); // cap reached → code invalidated
+    expect(rows).toEqual([{ attempts: MAX_ATTEMPTS }]); // cap reached → code dead, row (send window) kept
     const real = await post(jar, '/auth/password/verify', { email: 'victim@example.com', code }, '192.0.2.200');
     expect(real.status).not.toBe(200);
     expect(await getUserStore().findByEmail('victim@example.com')).toBeUndefined();

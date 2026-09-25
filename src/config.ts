@@ -1,3 +1,4 @@
+import { isRevokedByEpoch, tokenAuthSec } from './auth/account-epoch.js';
 import {
   readFileSync,
   writeFileSync,
@@ -29,6 +30,27 @@ export const ISSUER_URL = process.env.ISSUER_URL ?? 'http://localhost:3000';
 export const PORT = Number(process.env.PORT ?? 3000);
 
 /**
+ * PBA-L3a-007: production never falls back to a dev origin. An RP origin left
+ * unset in production resolves to `undefined`: that RP gets no CORS echo and no
+ * redirect / post-logout URI (fail closed) instead of silently allowing
+ * `http://localhost:*`. Outside production the localhost default keeps dev
+ * working. A blank value (e.g. compose `${X:-}`) counts as unset.
+ */
+const IS_PRODUCTION_ENV =
+  process.env.NODE_ENV === 'production' || process.env.CITRATE_ENV === 'production';
+
+function rpOrigin(value: string | undefined, devDefault: string): string | undefined {
+  const v = value?.trim();
+  if (v) return v;
+  return IS_PRODUCTION_ENV ? undefined : devDefault;
+}
+
+/** `${origin}${path}` as a one-element list, or [] when the origin is unset. */
+function originUris(origin: string | undefined, ...suffixes: string[]): string[] {
+  return origin ? suffixes.map((sfx) => `${origin}${sfx}`) : [];
+}
+
+/**
  * The citrate-explorer relying party's web origin. The explorer completes login
  * by redirecting the browser to `${EXPLORER_ORIGIN}/auth/callback`, so that path
  * — NOT a bare `/callback` and NOT the authority's own origin — is what must be
@@ -36,8 +58,10 @@ export const PORT = Number(process.env.PORT ?? 3000);
  * explorer can point the authority at its own origin. Defaults to the local dev
  * explorer on :3001.
  */
-export const EXPLORER_ORIGIN =
-  process.env.EXPLORER_ORIGIN ?? 'http://localhost:3001';
+export const EXPLORER_ORIGIN: string | undefined = rpOrigin(
+  process.env.EXPLORER_ORIGIN,
+  'http://localhost:3001',
+);
 
 /**
  * The citrate-dashboard relying party's web origin. Mirrors {@link EXPLORER_ORIGIN}:
@@ -45,8 +69,10 @@ export const EXPLORER_ORIGIN =
  * `${DASHBOARD_ORIGIN}/auth/callback`, so that path is what must be registered as
  * a redirect_uri. Defaults to the local dev dashboard on :3002.
  */
-export const DASHBOARD_ORIGIN =
-  process.env.DASHBOARD_ORIGIN ?? 'http://localhost:3002';
+export const DASHBOARD_ORIGIN: string | undefined = rpOrigin(
+  process.env.DASHBOARD_ORIGIN,
+  'http://localhost:3002',
+);
 
 /**
  * The memrizz relying party's web origin (the federated agent-memory webapp,
@@ -55,8 +81,10 @@ export const DASHBOARD_ORIGIN =
  * what must be registered as a redirect_uri (and echoed for CORS). Defaults to the
  * local dev memrizz on :3003; production sets MEMRIZZ_ORIGIN=https://memrizz.citrate.ai.
  */
-export const MEMRIZZ_ORIGIN =
-  process.env.MEMRIZZ_ORIGIN ?? 'http://localhost:3003';
+export const MEMRIZZ_ORIGIN: string | undefined = rpOrigin(
+  process.env.MEMRIZZ_ORIGIN,
+  'http://localhost:3003',
+);
 
 /**
  * The citrate-buyer-webapp relying party's web origin (AUTHSPINE S3-WP1). Mirrors
@@ -65,8 +93,10 @@ export const MEMRIZZ_ORIGIN =
  * redirect_uri. Dev default :3004 (explorer 3001 / dashboard 3002 / memrizz 3003);
  * production sets BUYER_WEBAPP_ORIGIN to the hosted origin.
  */
-export const BUYER_WEBAPP_ORIGIN =
-  process.env.BUYER_WEBAPP_ORIGIN ?? 'http://localhost:3004';
+export const BUYER_WEBAPP_ORIGIN: string | undefined = rpOrigin(
+  process.env.BUYER_WEBAPP_ORIGIN,
+  'http://localhost:3004',
+);
 
 /**
  * The Citrate Atlas docs app's web origin (citrate-docs, deployed at
@@ -76,8 +106,10 @@ export const BUYER_WEBAPP_ORIGIN =
  * web RPs use. Defaults to local dev on :3000; production sets
  * ATLAS_ORIGIN=https://docs.citrate.ai.
  */
-export const ATLAS_ORIGIN =
-  process.env.ATLAS_ORIGIN ?? 'http://localhost:3000';
+export const ATLAS_ORIGIN: string | undefined = rpOrigin(
+  process.env.ATLAS_ORIGIN,
+  'http://localhost:3000',
+);
 
 /**
  * The investor data room's web origin (citrate-dataroom, deployed at
@@ -87,8 +119,10 @@ export const ATLAS_ORIGIN =
  * the other web RPs use, and NOT Atlas's `/api/auth/callback`. Defaults to local
  * dev on :3000; production sets DATAROOM_ORIGIN=https://dataroom.citrate.ai.
  */
-export const DATAROOM_ORIGIN =
-  process.env.DATAROOM_ORIGIN ?? 'http://localhost:3000';
+export const DATAROOM_ORIGIN: string | undefined = rpOrigin(
+  process.env.DATAROOM_ORIGIN,
+  'http://localhost:3000',
+);
 
 /**
  * The American Learning Federation applicant flow's web origin. This lives on the
@@ -98,8 +132,10 @@ export const DATAROOM_ORIGIN =
  * `/access/callback`. Defaults to local dev on :3000; production sets
  * FEDERATION_ORIGIN=https://www.citrate.ai.
  */
-export const FEDERATION_ORIGIN =
-  process.env.FEDERATION_ORIGIN ?? 'http://localhost:3000';
+export const FEDERATION_ORIGIN: string | undefined = rpOrigin(
+  process.env.FEDERATION_ORIGIN,
+  'http://localhost:3000',
+);
 
 /**
  * The citrate-comms web client's origin (citrate-comms/webapp, the trusted-tier
@@ -109,8 +145,10 @@ export const FEDERATION_ORIGIN =
  * so that path is what must be registered as a redirect_uri (and echoed for CORS).
  * Defaults to local dev on :3004; production sets COMMS_WEB_ORIGIN=https://comms.citrate.ai.
  */
-export const COMMS_WEB_ORIGIN =
-  process.env.COMMS_WEB_ORIGIN ?? 'http://localhost:3004';
+export const COMMS_WEB_ORIGIN: string | undefined = rpOrigin(
+  process.env.COMMS_WEB_ORIGIN,
+  'http://localhost:3004',
+);
 
 /**
  * The ALF member-portal web client's origin (citrate-alf-web, the American
@@ -120,16 +158,20 @@ export const COMMS_WEB_ORIGIN =
  * that path is what must be registered as a redirect_uri (and echoed for CORS).
  * Defaults to local dev on :3004; production sets ALF_PORTAL_ORIGIN=https://alf.citrate.ai.
  */
-export const ALF_PORTAL_ORIGIN =
-  process.env.ALF_PORTAL_ORIGIN ?? 'http://localhost:3004';
+export const ALF_PORTAL_ORIGIN: string | undefined = rpOrigin(
+  process.env.ALF_PORTAL_ORIGIN,
+  'http://localhost:3004',
+);
 
 /**
  * citrate-radar relying party origin (RADAR handoff T-1) — the founder
  * reference dApp. Defaults to local dev on :3005; production sets
  * RADAR_ORIGIN to the deployed origin.
  */
-export const RADAR_ORIGIN =
-  process.env.RADAR_ORIGIN ?? 'http://localhost:3005';
+export const RADAR_ORIGIN: string | undefined = rpOrigin(
+  process.env.RADAR_ORIGIN,
+  'http://localhost:3005',
+);
 
 /**
  * core-membership relying party origin (Phase-D handoff B.1) — the
@@ -141,8 +183,10 @@ export const RADAR_ORIGIN =
  * core-membership.vercel.app). This resolved value is both a redirect_uri
  * (below) and a CORS-allowed origin (ALLOWED_CORS_ORIGINS).
  */
-export const CORE_MEMBERSHIP_ORIGIN =
-  process.env.CORE_MEMBERSHIP_ORIGIN ?? 'http://localhost:3000';
+export const CORE_MEMBERSHIP_ORIGIN: string | undefined = rpOrigin(
+  process.env.CORE_MEMBERSHIP_ORIGIN,
+  'http://localhost:3000',
+);
 
 /**
  * Web origin of the citrate-studio relying party, when it runs as a hosted web
@@ -449,6 +493,10 @@ export interface ConfigEnv {
   /** Hosted ALF member-portal origin (alf.citrate.ai). Widens CORS + is the
    * alf-portal-web RP redirect origin; validated for a local host like the others. */
   ALF_PORTAL_ORIGIN?: string;
+  /** Buyer webapp / radar / core-membership RP origins (PBA-L3a-007: validated too). */
+  BUYER_WEBAPP_ORIGIN?: string;
+  RADAR_ORIGIN?: string;
+  CORE_MEMBERSHIP_ORIGIN?: string;
   /**
    * Optional hosted citrate-studio web origin. Only used to widen the CORS
    * allow-list; never required (studio is native-first). Validated for a local
@@ -505,6 +553,33 @@ function isLocalHost(host: string): boolean {
   );
 }
 
+/** True iff `url` parses with the https: scheme. */
+function isHttpsUrl(url: string): boolean {
+  try {
+    return new URL(url).protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * PBA-L3a-007: the RP origin env vars that feed CORS + redirect URIs and are
+ * validated by {@link assertProductionConfig}.
+ */
+export const RP_ORIGIN_ENV_VARS = [
+  'EXPLORER_ORIGIN',
+  'DASHBOARD_ORIGIN',
+  'MEMRIZZ_ORIGIN',
+  'ATLAS_ORIGIN',
+  'DATAROOM_ORIGIN',
+  'FEDERATION_ORIGIN',
+  'COMMS_WEB_ORIGIN',
+  'ALF_PORTAL_ORIGIN',
+  'BUYER_WEBAPP_ORIGIN',
+  'RADAR_ORIGIN',
+  'CORE_MEMBERSHIP_ORIGIN',
+] as const;
+
 /** True iff `url` is parseable and points at a local/loopback host. */
 function isLocalUrl(url: string | undefined): boolean {
   if (!url) return false;
@@ -539,6 +614,8 @@ export function assertProductionConfig(env: ConfigEnv): { warnings: string[] } {
     env.NODE_ENV === 'production' || env.CITRATE_ENV === 'production';
 
   const problems: string[] = [];
+  /** Non-fatal production notices (PBA-L3a-007: unset RP origins). */
+  const notices: string[] = [];
 
   // --- COOKIE_KEYS ---
   const rawCookieKeys = env.COOKIE_KEYS;
@@ -573,53 +650,31 @@ export function assertProductionConfig(env: ConfigEnv): { warnings: string[] } {
     problems.push(`ISSUER_URL points at a local host: ${env.ISSUER_URL}`);
   }
 
-  // --- RP origins ---
-  if (isLocalUrl(env.EXPLORER_ORIGIN)) {
-    problems.push(
-      `EXPLORER_ORIGIN points at a local host: ${env.EXPLORER_ORIGIN}`,
-    );
+  // --- RP origins (PBA-L3a-007) ---
+  // Every RP origin feeds the credentialed-CORS allowlist and that RP's
+  // redirect / post-logout URIs. A SET origin must be https and non-local; an
+  // UNSET one is dropped in production (rpOrigin → undefined: no CORS echo, no
+  // redirect URI) and reported here so the omission is visible at boot.
+  for (const name of RP_ORIGIN_ENV_VARS) {
+    const raw = env[name];
+    const value = raw?.trim();
+    if (!value) {
+      if (isProd) notices.push(`${name} is unset — that RP gets no CORS and no redirect URI (fail closed)`);
+      continue;
+    }
+    if (isLocalUrl(value)) {
+      problems.push(`${name} points at a local host: ${value}`);
+    } else if (!isHttpsUrl(value)) {
+      problems.push(`${name} must be an https origin in production: ${value}`);
+    }
   }
-  if (isLocalUrl(env.DASHBOARD_ORIGIN)) {
-    problems.push(
-      `DASHBOARD_ORIGIN points at a local host: ${env.DASHBOARD_ORIGIN}`,
-    );
-  }
-  if (isLocalUrl(env.MEMRIZZ_ORIGIN)) {
-    problems.push(
-      `MEMRIZZ_ORIGIN points at a local host: ${env.MEMRIZZ_ORIGIN}`,
-    );
-  }
-  if (isLocalUrl(env.ATLAS_ORIGIN)) {
-    problems.push(
-      `ATLAS_ORIGIN points at a local host: ${env.ATLAS_ORIGIN}`,
-    );
-  }
-  if (isLocalUrl(env.DATAROOM_ORIGIN)) {
-    problems.push(
-      `DATAROOM_ORIGIN points at a local host: ${env.DATAROOM_ORIGIN}`,
-    );
-  }
-  if (isLocalUrl(env.FEDERATION_ORIGIN)) {
-    problems.push(
-      `FEDERATION_ORIGIN points at a local host: ${env.FEDERATION_ORIGIN}`,
-    );
-  }
-  if (isLocalUrl(env.COMMS_WEB_ORIGIN)) {
-    problems.push(
-      `COMMS_WEB_ORIGIN points at a local host: ${env.COMMS_WEB_ORIGIN}`,
-    );
-  }
-  if (isLocalUrl(env.ALF_PORTAL_ORIGIN)) {
-    problems.push(
-      `ALF_PORTAL_ORIGIN points at a local host: ${env.ALF_PORTAL_ORIGIN}`,
-    );
-  }
-  // STUDIO_ORIGIN is optional (studio is native-first). Only validate it when
-  // present — an unset value is never a problem, but a local one in prod is.
-  if (env.STUDIO_ORIGIN && isLocalUrl(env.STUDIO_ORIGIN)) {
-    problems.push(
-      `STUDIO_ORIGIN points at a local host: ${env.STUDIO_ORIGIN}`,
-    );
+  // STUDIO_ORIGIN is optional (studio is native-first). Only validated when set.
+  if (env.STUDIO_ORIGIN && env.STUDIO_ORIGIN.trim() !== '') {
+    if (isLocalUrl(env.STUDIO_ORIGIN)) {
+      problems.push(`STUDIO_ORIGIN points at a local host: ${env.STUDIO_ORIGIN}`);
+    } else if (!isHttpsUrl(env.STUDIO_ORIGIN)) {
+      problems.push(`STUDIO_ORIGIN must be an https origin in production: ${env.STUDIO_ORIGIN}`);
+    }
   }
 
   // --- DATABASE_URL (TD-2) ---
@@ -692,7 +747,7 @@ export function assertProductionConfig(env: ConfigEnv): { warnings: string[] } {
     );
   }
 
-  return { warnings: problems };
+  return { warnings: [...problems, ...notices] };
 }
 
 /** Matches a canonical lowercase UUID (the shape `users.id` takes). */
@@ -776,7 +831,13 @@ async function linkedWalletsFor(
  * Both the OIDC interaction-resume path and the direct-token path call
  * this, so claims are identical regardless of how the login was driven.
  */
-export const findAccount: FindAccount = (_ctx, sub): Account => {
+export const findAccount: FindAccount = async (_ctx, sub, token): Promise<Account | undefined> => {
+  // PBA-L3a-008: a token (refresh grant, /userinfo, code exchange) issued before
+  // the account's epoch (password reset / log-out-everywhere) resolves to no
+  // account, which panva turns into invalid_grant / invalid_token.
+  if (token && (await isRevokedByEpoch(sub, tokenAuthSec(token as { iiat?: unknown; iat?: unknown })))) {
+    return undefined;
+  }
   const isUuid = UUID_RE.test(sub);
   const accountId = isUuid ? sub : isAddress(sub) ? getAddress(sub) : sub;
   return {
@@ -900,7 +961,7 @@ export async function buildConfiguration(
           // Web callback for the configured (local/dev) explorer origin. The
           // explorer redirects to `${EXPLORER_ORIGIN}/auth/callback` — this must
           // match byte-for-byte or panva rejects the /auth request.
-          `${EXPLORER_ORIGIN}${CALLBACK_PATH}`,
+          ...originUris(EXPLORER_ORIGIN, CALLBACK_PATH),
           // Hosted production explorer.
           `https://explorer.citrate.ai${CALLBACK_PATH}`,
           // Loopback for native/CLI flows (RFC 8252).
@@ -924,7 +985,7 @@ export async function buildConfiguration(
         grant_types: ['authorization_code', 'refresh_token'],
         response_types: ['code'],
         redirect_uris: [
-          `${RADAR_ORIGIN}${CALLBACK_PATH}`,
+          ...originUris(RADAR_ORIGIN, CALLBACK_PATH),
           `https://citrate-radar.vercel.app${CALLBACK_PATH}`,
           LOOPBACK_REDIRECT,
         ],
@@ -950,7 +1011,7 @@ export async function buildConfiguration(
         grant_types: ['authorization_code', 'refresh_token'],
         response_types: ['code'],
         redirect_uris: [
-          `${CORE_MEMBERSHIP_ORIGIN}${CALLBACK_PATH}`,
+          ...originUris(CORE_MEMBERSHIP_ORIGIN, CALLBACK_PATH),
           // Canonical production domain (DNS CNAME → core-membership.vercel.app).
           // Hardcoded so login works regardless of how CORE_MEMBERSHIP_ORIGIN is
           // set on a given authority instance.
@@ -998,7 +1059,7 @@ export async function buildConfiguration(
         response_types: ['code'],
         redirect_uris: [
           // Web callback for the configured (local/dev) dashboard origin.
-          `${DASHBOARD_ORIGIN}${CALLBACK_PATH}`,
+          ...originUris(DASHBOARD_ORIGIN, CALLBACK_PATH),
           // Hosted production dashboard.
           `https://dashboard.citrate.ai${CALLBACK_PATH}`,
           // Loopback for native/CLI flows (RFC 8252).
@@ -1022,7 +1083,7 @@ export async function buildConfiguration(
         response_types: ['code'],
         redirect_uris: [
           // Web callback for the configured (local/dev) buyer-webapp origin.
-          `${BUYER_WEBAPP_ORIGIN}${CALLBACK_PATH}`,
+          ...originUris(BUYER_WEBAPP_ORIGIN, CALLBACK_PATH),
           // Hosted buyer-webapp (Vercel) — replace/extend when a custom
           // *.citrate.ai domain lands (set BUYER_WEBAPP_ORIGIN to it).
           `https://citrate-buyer-webapp.vercel.app${CALLBACK_PATH}`,
@@ -1030,8 +1091,8 @@ export async function buildConfiguration(
           LOOPBACK_REDIRECT,
         ],
         post_logout_redirect_uris: [
-          BUYER_WEBAPP_ORIGIN,
-          `${BUYER_WEBAPP_ORIGIN}/`,
+          ...originUris(BUYER_WEBAPP_ORIGIN, ''),
+          ...originUris(BUYER_WEBAPP_ORIGIN, '/'),
           'https://citrate-buyer-webapp.vercel.app',
           'https://citrate-buyer-webapp.vercel.app/',
         ],
@@ -1052,7 +1113,7 @@ export async function buildConfiguration(
         response_types: ['code'],
         redirect_uris: [
           // Web callback for the configured (local/dev) memrizz origin.
-          `${MEMRIZZ_ORIGIN}${CALLBACK_PATH}`,
+          ...originUris(MEMRIZZ_ORIGIN, CALLBACK_PATH),
           // Hosted production memrizz.
           `https://memrizz.citrate.ai${CALLBACK_PATH}`,
           // Loopback for native/CLI flows (RFC 8252).
@@ -1062,8 +1123,8 @@ export async function buildConfiguration(
         // browser back on memrizz once the session ends. panva matches these
         // exactly, so register the bare origins (with + without trailing slash).
         post_logout_redirect_uris: [
-          MEMRIZZ_ORIGIN,
-          `${MEMRIZZ_ORIGIN}/`,
+          ...originUris(MEMRIZZ_ORIGIN, ''),
+          ...originUris(MEMRIZZ_ORIGIN, '/'),
           'https://memrizz.citrate.ai',
           'https://memrizz.citrate.ai/',
         ],
@@ -1086,7 +1147,7 @@ export async function buildConfiguration(
         response_types: ['code'],
         redirect_uris: [
           // Web callback for the configured (local/dev) comms-web origin.
-          `${COMMS_WEB_ORIGIN}${CALLBACK_PATH}`,
+          ...originUris(COMMS_WEB_ORIGIN, CALLBACK_PATH),
           // Hosted production comms-web.
           `https://comms.citrate.ai${CALLBACK_PATH}`,
           `https://citrate-comms-web.vercel.app${CALLBACK_PATH}`,
@@ -1094,8 +1155,8 @@ export async function buildConfiguration(
           LOOPBACK_REDIRECT,
         ],
         post_logout_redirect_uris: [
-          COMMS_WEB_ORIGIN,
-          `${COMMS_WEB_ORIGIN}/`,
+          ...originUris(COMMS_WEB_ORIGIN, ''),
+          ...originUris(COMMS_WEB_ORIGIN, '/'),
           'https://comms.citrate.ai',
           'https://comms.citrate.ai/',
         ],
@@ -1115,14 +1176,14 @@ export async function buildConfiguration(
         response_types: ['code'],
         redirect_uris: [
           // Configured (local/dev) Atlas origin.
-          `${ATLAS_ORIGIN}/api/auth/callback`,
+          ...originUris(ATLAS_ORIGIN, '/api/auth/callback'),
           // Hosted production Atlas — custom domain + the Vercel alias.
           'https://docs.citrate.ai/api/auth/callback',
           'https://citrate-atlas.vercel.app/api/auth/callback',
         ],
         post_logout_redirect_uris: [
-          ATLAS_ORIGIN,
-          `${ATLAS_ORIGIN}/`,
+          ...originUris(ATLAS_ORIGIN, ''),
+          ...originUris(ATLAS_ORIGIN, '/'),
           'https://docs.citrate.ai',
           'https://docs.citrate.ai/',
           'https://citrate-atlas.vercel.app',
@@ -1145,14 +1206,14 @@ export async function buildConfiguration(
         response_types: ['code'],
         redirect_uris: [
           // Configured (local/dev) data-room origin.
-          `${DATAROOM_ORIGIN}/access/callback`,
+          ...originUris(DATAROOM_ORIGIN, '/access/callback'),
           // Hosted production data room — custom domain + the Vercel alias.
           'https://dataroom.citrate.ai/access/callback',
           'https://citrate-dataroom.vercel.app/access/callback',
         ],
         post_logout_redirect_uris: [
-          DATAROOM_ORIGIN,
-          `${DATAROOM_ORIGIN}/`,
+          ...originUris(DATAROOM_ORIGIN, ''),
+          ...originUris(DATAROOM_ORIGIN, '/'),
           'https://dataroom.citrate.ai',
           'https://dataroom.citrate.ai/',
           'https://citrate-dataroom.vercel.app',
@@ -1177,15 +1238,15 @@ export async function buildConfiguration(
         response_types: ['code'],
         redirect_uris: [
           // Configured (local/dev) federation origin.
-          `${FEDERATION_ORIGIN}/alf/callback`,
+          ...originUris(FEDERATION_ORIGIN, '/alf/callback'),
           // Hosted production landing — www, apex, and the Vercel alias.
           'https://www.citrate.ai/alf/callback',
           'https://citrate.ai/alf/callback',
           'https://citrate-landing.vercel.app/alf/callback',
         ],
         post_logout_redirect_uris: [
-          FEDERATION_ORIGIN,
-          `${FEDERATION_ORIGIN}/`,
+          ...originUris(FEDERATION_ORIGIN, ''),
+          ...originUris(FEDERATION_ORIGIN, '/'),
           'https://www.citrate.ai',
           'https://www.citrate.ai/',
           'https://citrate.ai',
@@ -1211,7 +1272,7 @@ export async function buildConfiguration(
         response_types: ['code'],
         redirect_uris: [
           // Configured (local/dev) portal origin.
-          `${ALF_PORTAL_ORIGIN}${CALLBACK_PATH}`,
+          ...originUris(ALF_PORTAL_ORIGIN, CALLBACK_PATH),
           // Hosted production portal + the Vercel preview alias.
           `https://alf.citrate.ai${CALLBACK_PATH}`,
           `https://citrate-alf-web.vercel.app${CALLBACK_PATH}`,
@@ -1219,8 +1280,8 @@ export async function buildConfiguration(
           LOOPBACK_REDIRECT,
         ],
         post_logout_redirect_uris: [
-          ALF_PORTAL_ORIGIN,
-          `${ALF_PORTAL_ORIGIN}/`,
+          ...originUris(ALF_PORTAL_ORIGIN, ''),
+          ...originUris(ALF_PORTAL_ORIGIN, '/'),
           'https://alf.citrate.ai',
           'https://alf.citrate.ai/',
         ],
@@ -1417,6 +1478,12 @@ export async function buildConfiguration(
       AuthorizationCode: 10 * 60,
       IdToken: 60 * 60,
       RefreshToken: 14 * 24 * 60 * 60,
+      // PBA-L3a-013: pinned explicitly instead of inheriting library defaults.
+      // A browser SSO session lasts at most as long as a refresh token; a
+      // grant the same; a login/consent interaction one hour.
+      Session: 14 * 24 * 60 * 60,
+      Grant: 14 * 24 * 60 * 60,
+      Interaction: 60 * 60,
     },
   };
 }

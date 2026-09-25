@@ -27,7 +27,13 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import QRCode from 'qrcode';
 
 import { getKycProvider } from './kyc-providers/index.js';
-import { InhouseKycProvider, type CaptureTokenClaims } from './kyc-providers/inhouse.js';
+import { timingSafeEqual } from 'node:crypto';
+import {
+  CAPTURE_BINDING_COOKIE,
+  captureBindingHash,
+  InhouseKycProvider,
+  type CaptureTokenClaims,
+} from './kyc-providers/inhouse.js';
 import { renderCaptureUI } from './verify-ui.js';
 import { buildVerificationEngine } from './kyc-inference-client.js';
 import { getSanctionsScreener } from './kyc-sanctions.js';
@@ -103,6 +109,36 @@ function authToken(provider: InhouseKycProvider, token: string | undefined): Cap
   return provider.verifyCaptureToken(token);
 }
 
+/**
+ * PBA-L3a-009: a DESKTOP capture token must be presented by the browser that
+ * started verification (its `_kyc_capture` cookie hashes to the token's `bh`).
+ * A phone hand-off token (`k: 'handoff'`) is exempt: the bound browser minted it
+ * for the QR hop. A desktop token with no binding is refused.
+ */
+function browserBound(claims: CaptureTokenClaims, req: IncomingMessage): boolean {
+  if (claims.k === 'handoff') return true;
+  if (!claims.bh) return false;
+  const secret = readCookieValue(req.headers.cookie, CAPTURE_BINDING_COOKIE);
+  if (!secret) return false;
+  const a = Buffer.from(captureBindingHash(secret));
+  const b = Buffer.from(claims.bh);
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+
+function readCookieValue(header: string | undefined, name: string): string | undefined {
+  if (!header) return undefined;
+  for (const part of header.split(';')) {
+    const i = part.indexOf('=');
+    if (i > 0 && part.slice(0, i).trim() === name) return part.slice(i + 1).trim();
+  }
+  return undefined;
+}
+
+const NOT_THIS_BROWSER = {
+  error: 'capture_not_bound_to_this_browser',
+  reason: 'open the verification link in the browser that started it (or scan the QR code it shows)',
+};
+
 export function mountVerifyRoutes(provider: Provider): void {
   provider.use(async (ctx, next) => {
     if (!ctx.path.startsWith('/verify')) return next();
@@ -119,6 +155,7 @@ export function mountVerifyRoutes(provider: Provider): void {
     if (ctx.method === 'GET' && ctx.path === '/verify/dek') {
       const claims = authToken(ih, str(ctx.query['session']));
       if (!claims) return sendJson(ctx.res, 401, { error: 'invalid_or_expired_session' });
+      if (!browserBound(claims, ctx.req)) return sendJson(ctx.res, 403, NOT_THIS_BROWSER);
       const dek = await ih.getCaseDek(claims.caseId);
       if (!dek) return sendJson(ctx.res, 404, { error: 'case_not_found' });
       sendJson(ctx.res, 200, { dek: dek.toString('base64'), caseId: claims.caseId });
@@ -129,6 +166,7 @@ export function mountVerifyRoutes(provider: Provider): void {
     if (ctx.method === 'GET' && ctx.path === '/verify/status') {
       const claims = authToken(ih, str(ctx.query['session']));
       if (!claims) return sendJson(ctx.res, 401, { error: 'invalid_or_expired_session' });
+      if (!browserBound(claims, ctx.req)) return sendJson(ctx.res, 403, NOT_THIS_BROWSER);
       const c = await ih.caseStore.getCase(claims.caseId);
       if (!c) return sendJson(ctx.res, 404, { error: 'case_not_found' });
       const evidence = await ih.caseStore.listEvidence(c.caseId);
@@ -143,6 +181,7 @@ export function mountVerifyRoutes(provider: Provider): void {
     if (!body) return sendJson(ctx.res, 400, { error: 'invalid_or_too_large_body' });
     const claims = authToken(ih, str(body['session']));
     if (!claims) return sendJson(ctx.res, 401, { error: 'invalid_or_expired_session' });
+    if (!browserBound(claims, ctx.req)) return sendJson(ctx.res, 403, NOT_THIS_BROWSER);
     const store = ih.caseStore;
 
     // POST /verify/consent — { session, consent:{bipa,terms}, identityCt }
@@ -224,6 +263,8 @@ export function mountVerifyRoutes(provider: Provider): void {
 
     // POST /verify/handoff — mint a fresh phone-scoped token → QR-able mobile URL.
     if (ctx.path === '/verify/handoff') {
+      // Only the bound desktop browser may mint a phone hand-off (no chaining).
+      if (claims.k === 'handoff') return sendJson(ctx.res, 403, NOT_THIS_BROWSER);
       const { token, expiresAt } = ih.mintCaptureToken(claims.caseId, claims.sub, HANDOFF_TTL_SEC);
       const origin = originOf(ctx);
       const mobileUrl = `${origin}/verify?session=${encodeURIComponent(token)}`;

@@ -61,8 +61,24 @@ function selfOrigin(): string {
   return (process.env.ISSUER_URL || 'https://auth.citrate.ai').replace(/\/+$/, '');
 }
 
-/** Validate an optional ?return_to back-link to a Citrate app (https + *.citrate.ai or vercel.app). */
-function validatedBackLink(v: unknown): string | undefined {
+/**
+ * PBA-L3a-013: the Citrate apps hosted on vercel.app. The back-link used to
+ * accept ANY `*.vercel.app` host, so anyone could deploy a look-alike page and
+ * have the account page link to it.
+ */
+export const CITRATE_VERCEL_HOSTS: ReadonlySet<string> = new Set([
+  'citrate-radar.vercel.app',
+  'citrate-buyer-webapp.vercel.app',
+  'core-membership.vercel.app',
+  'citrate-comms-web.vercel.app',
+  'citrate-atlas.vercel.app',
+  'citrate-dataroom.vercel.app',
+  'citrate-landing.vercel.app',
+  'citrate-alf-web.vercel.app',
+]);
+
+/** Validate an optional ?return_to back-link to a Citrate app (https + citrate.ai / a Citrate Vercel project). */
+export function validatedBackLink(v: unknown): string | undefined {
   if (typeof v !== 'string' || !v) return undefined;
   let u: URL;
   try {
@@ -72,7 +88,7 @@ function validatedBackLink(v: unknown): string | undefined {
   }
   if (u.protocol !== 'https:') return undefined;
   const h = u.hostname;
-  return h.endsWith('.citrate.ai') || h.endsWith('.vercel.app') ? v : undefined;
+  return h === 'citrate.ai' || h.endsWith('.citrate.ai') || CITRATE_VERCEL_HOSTS.has(h) ? v : undefined;
 }
 
 const PAGE_CSS = `

@@ -161,6 +161,12 @@ export function mountAdminKycRoutes(provider: Provider): void {
   }
   provider.use(async (ctx, next) => {
     if (!ctx.path.startsWith('/admin/kyc')) return next();
+    // Never frameable (R2 verifier nit on PBA-L3a-001): a same-site sibling page
+    // (any *.citrate.ai XSS) could otherwise frame the console, and both the Lax
+    // and the Strict admin cookie flow to a same-site frame → clickjacking of the
+    // approve button. Set on every /admin/kyc response, allowed or not.
+    ctx.res.setHeader('x-frame-options', 'DENY');
+    ctx.res.setHeader('content-security-policy', "frame-ancestors 'none'");
     const p = getKycProvider();
     const ih = p instanceof InhouseKycProvider ? p : null;
     const audit = getKycAuditLog();

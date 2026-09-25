@@ -76,6 +76,11 @@ function applyCorsHeaders(req: IncomingMessage, res: ServerResponse): boolean {
   return true;
 }
 
+/** PBA-L3a-007: paths that never receive credentialed CORS headers. */
+export function isCorsExcludedPath(path: string): boolean {
+  return path === '/admin' || path.startsWith('/admin/');
+}
+
 /**
  * Mount the CORS + `/health` middleware on the provider's Koa app. Install this
  * FIRST (before the SIWE/KYC/logout routes) so CORS headers are present on those
@@ -90,7 +95,14 @@ export function mountHttpExtras(
 
     // CORS first, so every response we (or panva) emit for an allow-listed RP
     // origin — including /health and the preflight below — carries the headers.
-    applyCorsHeaders(ctx.req, ctx.res);
+    // PBA-L3a-007: never on the operator surfaces. /admin/* is same-origin only;
+    // echoing an RP origin there with credentials would let that RP read (and,
+    // via preflight, write) the admin API with an admin's cookie.
+    if (!isCorsExcludedPath(path)) {
+      applyCorsHeaders(ctx.req, ctx.res);
+    } else {
+      ctx.res.setHeader('Vary', 'Origin');
+    }
     if (method === 'OPTIONS') {
       // Preflight: respond 204 with the CORS headers already set above. A
       // disallowed origin still gets a clean 204, just without the allow-origin
