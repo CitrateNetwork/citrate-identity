@@ -35,7 +35,9 @@ let userinfoEndpoint: string;
 const account = privateKeyToAccount(`0x${'a7'.repeat(32)}` as Hex);
 const secondWallet = privateKeyToAccount(`0x${'b9'.repeat(32)}` as Hex);
 
-const EXPLORER_REDIRECT = 'http://localhost:3001/auth/callback';
+// PBA-L3a-005: wallet linking needs a Citrate wallet client; drive the flow as
+// the desktop app (citrate-core, RFC 8252 loopback redirect).
+const EXPLORER_REDIRECT = 'http://127.0.0.1/auth/callback';
 
 class CookieJar {
   private readonly jar = new Map<string, string>();
@@ -100,7 +102,7 @@ async function loginForAccessToken(): Promise<string> {
   const state = base64url(randomBytes(16));
 
   const authRes = await fetch(
-    `${baseUrl}/auth?response_type=code&client_id=citrate-explorer` +
+    `${baseUrl}/auth?response_type=code&client_id=citrate-core` +
       `&redirect_uri=${encodeURIComponent(EXPLORER_REDIRECT)}` +
       `&scope=${encodeURIComponent('openid wallet')}` +
       `&code_challenge=${codeChallenge}&code_challenge_method=S256` +
@@ -167,7 +169,7 @@ async function loginForAccessToken(): Promise<string> {
     body: new URLSearchParams({
       grant_type: 'authorization_code',
       code,
-      client_id: 'citrate-explorer',
+      client_id: 'citrate-core',
       redirect_uri: EXPLORER_REDIRECT,
       code_verifier: codeVerifier,
     }).toString(),
