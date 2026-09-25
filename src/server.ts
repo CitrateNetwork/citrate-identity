@@ -527,7 +527,13 @@ export async function createProvider(
           '(Set CITRATE_AA_SKIP_ONCHAIN_VERIFY=1 to bypass — UNSAFE, offline use only.)',
       );
     } else {
-      mountAaRoutes(provider, { config: aaCfg, rpcUrl: rpc });
+      mountAaRoutes(provider, {
+        config: aaCfg,
+        rpcUrl: rpc,
+        ...(process.env.CITRATE_AA_GUARDIAN_RECOVERY
+          ? { recoveryModule: process.env.CITRATE_AA_GUARDIAN_RECOVERY as `0x${string}` }
+          : {}),
+      });
     // EW-S1 WP-10 item 31: guardian nominations — stored at signup,
     // installed on-chain with the wallet's first deploy (the SDK appends
     // the served initConfig entry to initialize()). Citrate's own signer
