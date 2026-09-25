@@ -325,3 +325,50 @@ describe('PBA-L3a-004 AA config: canonical validators', () => {
     expect(loadAaConfig({ ...base, CITRATE_AA_ECDSA_VALIDATOR: '0x1234' }).ecdsaValidator).toBeUndefined();
   });
 });
+
+describe('PBA-L3a-004 verifier nit: the permit budget is shared across instances', () => {
+  it('two authority instances on one Redis share the 5-per-hour wallet budget', async () => {
+    const { default: RedisMock } = await import('ioredis-mock');
+    const redis = new RedisMock() as unknown as import('../src/redis.js').RedisLike;
+    const eoa = privateKeyToAccount(`0x${'77'.repeat(32)}` as Hex).address;
+    const boot = async () => {
+      const probe = createServer();
+      await new Promise<void>((r) => probe.listen(0, '127.0.0.1', r));
+      const { port } = probe.address() as AddressInfo;
+      probe.close();
+      const url = `http://127.0.0.1:${port}`;
+      const p = await createProvider(url, { googleEnabled: false });
+      mountAaRoutes(p, { config, rpcUrl: 'http://127.0.0.1:9', redis } as never);
+      const s = createServer(p.callback());
+      await new Promise<void>((r) => s.listen(port, '127.0.0.1', r));
+      const client = await p.Client.find('citrate-radar');
+      const tok = await new p.AccessToken({ accountId: eoa, client: client!, scope: 'openid wallet' } as never).save();
+      return { url, s, tok };
+    };
+    const a = await boot();
+    const b = await boot();
+    try {
+      const statuses: number[] = [];
+      for (let i = 0; i < 8; i++) {
+        const inst = i % 2 === 0 ? a : b;
+        const r = await fetch(`${inst.url}/aa/enroll-validator`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', authorization: `Bearer ${inst.tok}` },
+          body: JSON.stringify({ userId: userIdForEoa(eoa), initData: ecdsaInit(eoa), expiresAt: now() + 600 }),
+        });
+        statuses.push(r.status);
+      }
+      expect(statuses.filter((s) => s === 200)).toHaveLength(5);
+      expect(statuses.slice(5).every((s) => s === 429)).toBe(true);
+    } finally {
+      await new Promise<void>((r) => a.s.close(() => r()));
+      await new Promise<void>((r) => b.s.close(() => r()));
+    }
+  }, 30_000);
+
+  it('server.ts hands the Redis client to the AA routes', async () => {
+    const { readFileSync } = await import('node:fs');
+    const src = readFileSync(new URL('../src/server.ts', import.meta.url), 'utf8');
+    expect(src).toMatch(/mountAaRoutes\(provider, \{[\s\S]{0,400}redis: options\.redis/);
+  });
+});

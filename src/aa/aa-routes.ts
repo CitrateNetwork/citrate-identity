@@ -41,7 +41,8 @@ import { guardianInstallModuleCall } from './install-data.js';
 import { getGuardianStore } from './guardians.js';
 import { getWalletRegistry } from '../identity-registry.js';
 import { getUserStore, getWebAuthnStore } from '../auth/stores.js';
-import { InMemoryRateLimiter, type RateLimiter } from '../auth/rate-limit.js';
+import { createRateLimiter, type RateLimiter } from '../auth/rate-limit.js';
+import type { RedisLike } from '../redis.js';
 
 /**
  * PBA-L3a-004: longest permit lifetime the authority signs. One hour (the
@@ -128,8 +129,14 @@ interface AaRouteOptions {
    * caller's own stored nomination.
    */
   recoveryModule?: Address;
-  /** Permit issuance budget (tests). Defaults to a per-process limiter. */
+  /** Permit issuance budget override (tests). */
   permitLimiter?: RateLimiter;
+  /**
+   * Shared Redis (production). The per-wallet permit budget lives there, so it
+   * holds across every authority instance instead of scaling with their count
+   * (R2 verifier nit). Absent → per-process limiter (dev/test).
+   */
+  redis?: RedisLike;
 }
 
 /**
@@ -138,7 +145,7 @@ interface AaRouteOptions {
  */
 export function mountAaRoutes(provider: Provider, options: AaRouteOptions): void {
   const { config, rpcUrl } = options;
-  const permitLimiter = options.permitLimiter ?? new InMemoryRateLimiter();
+  const permitLimiter = options.permitLimiter ?? createRateLimiter(options.redis);
 
   // The chain client is shared across requests; cheap to construct.
   const chainClient = createPublicClient({

@@ -539,6 +539,8 @@ export async function createProvider(
       mountAaRoutes(provider, {
         config: aaCfg,
         rpcUrl: rpc,
+        // Permit budget shared across instances (R2 verifier nit, PBA-L3a-004).
+        redis: options.redis,
         ...(process.env.CITRATE_AA_GUARDIAN_RECOVERY
           ? { recoveryModule: process.env.CITRATE_AA_GUARDIAN_RECOVERY as `0x${string}` }
           : {}),
