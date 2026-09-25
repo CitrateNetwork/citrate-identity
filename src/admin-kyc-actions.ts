@@ -112,6 +112,11 @@ export async function approveUnlock(
   if (req.requestedBy === opts.approver) return { ok: false, error: 'dual_control_violation: approver must differ from requester' };
   const c = await store.getCase(req.caseId);
   if (!c) return { ok: false, error: 'case_not_found' };
+  // Claim BEFORE decrypting: exactly one concurrent approval wins (the checks
+  // above only pick the error message; this is the enforcing step).
+  if (!(await store.claimUnlockRequest(opts.unlockId, opts.approver))) {
+    return { ok: false, error: 'unlock_already_used' };
+  }
 
   const dek = await opts.getDek(req.caseId);
   if (!dek) return { ok: false, error: 'case_not_found' };
@@ -119,7 +124,6 @@ export async function approveUnlock(
   const evidence = await store.listEvidence(req.caseId);
   const evidenceAvailable = evidence.filter((e) => e.ciphertext).map((e) => e.kind); // biometrics are usually already destroyed
 
-  await store.consumeUnlockRequest(opts.unlockId, opts.approver);
   // Audit the ACCESS — never the plaintext.
   await audit.record({
     actor: opts.approver,
@@ -150,11 +154,54 @@ export async function deleteUser(
   return { ok: true, cases: results };
 }
 
-/** DSAR "export my data": everything held about a subject, decrypted for the export. */
+/**
+ * PBA-L3a-006 step 1: an admin REQUESTS a DSAR export. Nothing is decrypted.
+ */
+export async function requestDsar(
+  store: KycCaseStore,
+  audit: KycAuditLog,
+  opts: { actor: string; sub: string; reason: string },
+): Promise<{ ok: true; requestId: string }> {
+  const req = await store.createDsarRequest(opts.sub, opts.actor, opts.reason);
+  await audit.record({ actor: opts.actor, action: 'dsar.request', detail: { requestId: req.requestId, sub: opts.sub, reason: opts.reason } });
+  return { ok: true, requestId: req.requestId };
+}
+
+/**
+ * PBA-L3a-006 step 2: a DIFFERENT admin approves → the export is produced ONCE.
+ * Same two-person rule as the subpoena unlock; the approval is claimed
+ * atomically before anything is decrypted.
+ */
+export async function approveDsar(
+  store: KycCaseStore,
+  audit: KycAuditLog,
+  opts: { approver: string; requestId: string; getDek: GetDek },
+): Promise<{ ok: true; sub: string; cases: unknown[] } | { ok: false; error: string }> {
+  const req = await store.getDsarRequest(opts.requestId);
+  if (!req) return { ok: false, error: 'dsar_not_found' };
+  if (req.consumedAt) return { ok: false, error: 'dsar_already_used' };
+  if (req.requestedBy === opts.approver) {
+    return { ok: false, error: 'dual_control_violation: approver must differ from requester' };
+  }
+  const claimed = await store.claimDsarRequest(opts.requestId, opts.approver);
+  if (!claimed) return { ok: false, error: 'dsar_already_used' };
+  return dsarExport(store, audit, {
+    actor: opts.approver,
+    sub: claimed.sub,
+    getDek: opts.getDek,
+    detail: { requestId: claimed.requestId, requestedBy: claimed.requestedBy, approvedBy: opts.approver },
+  });
+}
+
+/**
+ * DSAR "export my data": everything held about a subject, decrypted for the
+ * export. NOT routed directly (PBA-L3a-006): the HTTP surface reaches it only
+ * through {@link approveDsar}.
+ */
 export async function dsarExport(
   store: KycCaseStore,
   audit: KycAuditLog,
-  opts: { actor: string; sub: string; getDek: GetDek },
+  opts: { actor: string; sub: string; getDek: GetDek; detail?: Record<string, unknown> },
 ): Promise<{ ok: true; sub: string; cases: unknown[] }> {
   // Gather (non-tombstoned) cases for the sub via the admin list, then decrypt each.
   const summaries = (await listCases(store, undefined)).filter((s) => s.externalUserId === opts.sub);
@@ -177,6 +224,6 @@ export async function dsarExport(
       evidence,
     });
   }
-  await audit.record({ actor: opts.actor, action: 'dsar.export', detail: { sub: opts.sub, caseCount: cases.length } });
+  await audit.record({ actor: opts.actor, action: 'dsar.export', detail: { sub: opts.sub, caseCount: cases.length, ...(opts.detail ?? {}) } });
   return { ok: true, sub: opts.sub, cases };
 }
