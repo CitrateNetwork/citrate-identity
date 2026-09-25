@@ -30,7 +30,9 @@ import {
   InMemoryWebAuthnCredentialStore,
 } from '../src/auth/stores.js';
 
-const EXPLORER_REDIRECT = 'http://localhost:3001/auth/callback';
+// PBA-L3a-005 variant: hand-offs are minted by the desktop app (citrate-core,
+// RFC 8252 loopback redirect).
+const EXPLORER_REDIRECT = 'http://127.0.0.1/auth/callback';
 const b64url = (b: Buffer) =>
   b.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 
@@ -73,7 +75,7 @@ async function signUpAndToken(
   const verifier = b64url(randomBytes(32));
   const challenge = b64url(createHash('sha256').update(verifier).digest());
   const authUrl =
-    `${baseUrl}/auth?response_type=code&client_id=citrate-explorer` +
+    `${baseUrl}/auth?response_type=code&client_id=citrate-core` +
     `&redirect_uri=${encodeURIComponent(EXPLORER_REDIRECT)}` +
     `&scope=${encodeURIComponent('openid profile wallet kyc')}` +
     `&code_challenge=${challenge}&code_challenge_method=S256&state=${b64url(randomBytes(8))}`;
@@ -124,7 +126,7 @@ async function signUpAndToken(
     body: new URLSearchParams({
       grant_type: 'authorization_code',
       code,
-      client_id: 'citrate-explorer',
+      client_id: 'citrate-core',
       redirect_uri: EXPLORER_REDIRECT,
       code_verifier: verifier,
     }).toString(),
