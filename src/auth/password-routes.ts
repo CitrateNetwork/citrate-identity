@@ -27,6 +27,7 @@
  * id_token, here via a Resend one-time code.
  */
 
+import { createHash } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type Provider from 'oidc-provider';
 
@@ -104,10 +105,12 @@ async function finishLogin(
 async function issueAndSend(
   email: string,
   passwordHash: string,
+  binding: string,
 ): Promise<'sent' | 'rate_limited' | 'send_failed'> {
   const { code, rateLimited } = await getEmailVerificationStore().issue(
     email,
     passwordHash,
+    binding,
   );
   if (rateLimited || !code) return 'rate_limited';
   const ok = await sendVerificationCode(email, code, TTL_MINUTES);
@@ -218,6 +221,8 @@ export function mountPasswordRoutes(provider: Provider, options: PasswordRouteOp
     }
 
     const store = getUserStore();
+    // PBA-L3a-003: the code + pending password belong to THIS interaction.
+    const binding = createHash('sha256').update(`email-code:${interaction.uid}`).digest('hex');
     const ip = clientIp(ctx.req, provider.proxy === true);
     const account = email.toLowerCase();
 
@@ -243,6 +248,7 @@ export function mountPasswordRoutes(provider: Provider, options: PasswordRouteOp
       const { ok, passwordHash } = await getEmailVerificationStore().consume(
         email,
         code,
+        binding,
       );
       if (!ok) {
         respondJson(ctx.res, 401, {
@@ -312,7 +318,7 @@ export function mountPasswordRoutes(provider: Provider, options: PasswordRouteOp
       // No duplicate 409 (that was an account-enumeration oracle). Whether the
       // email is new or already exists, we issue a code and return the same
       // generic shape; only entering the code creates/updates anything.
-      respondForIssue(ctx.res, await issueAndSend(email, passwordHash));
+      respondForIssue(ctx.res, await issueAndSend(email, passwordHash, binding));
       return;
     }
 
@@ -354,6 +360,6 @@ export function mountPasswordRoutes(provider: Provider, options: PasswordRouteOp
     // Unverified account, an account with no password, OR an unknown email:
     // all converge on the verify-first flow with an identical response, so the
     // login endpoint is not an existence oracle.
-    respondForIssue(ctx.res, await issueAndSend(email, passwordHash));
+    respondForIssue(ctx.res, await issueAndSend(email, passwordHash, binding));
   });
 }

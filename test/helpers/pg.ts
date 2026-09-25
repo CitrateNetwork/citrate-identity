@@ -5,6 +5,7 @@
  */
 import { newDb } from 'pg-mem';
 import pg from 'pg';
+import { randomBytes } from 'node:crypto';
 
 export interface TestPg {
   pool: { query(text: string, params?: unknown[]): Promise<{ rows: unknown[] }> };
@@ -17,14 +18,25 @@ export const REAL_PG_URL = process.env.IDENTITY_TEST_PG_URL?.trim() || undefined
 
 export function testPg(): TestPg {
   if (REAL_PG_URL) {
-    const pool = new pg.Pool({ connectionString: REAL_PG_URL, max: 20 });
+    // A private schema per instance: vitest runs files in parallel, and two files
+    // dropping/creating the same table in `public` would race each other.
+    const schema = `t_${process.pid}_${randomBytes(4).toString('hex')}`;
+    const pool = new pg.Pool({ connectionString: REAL_PG_URL, max: 20, options: `-c search_path=${schema}` });
+    let created = false;
     return {
       pool,
       real: true,
       async reset(tables) {
+        if (!created) {
+          await pool.query(`CREATE SCHEMA IF NOT EXISTS ${schema}`);
+          created = true;
+        }
         for (const t of tables) await pool.query(`DROP TABLE IF EXISTS ${t}`);
       },
-      close: () => pool.end(),
+      async close() {
+        if (created) await pool.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
+        await pool.end();
+      },
     };
   }
   // pg-mem cannot DROP + re-CREATE a table with a primary key (the pkey index
