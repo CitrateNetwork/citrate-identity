@@ -89,8 +89,18 @@ export async function resolveGoogleUser(
   const trustedEmail = trustedEmailFromIdToken(payload);
 
   let user = await store.findByGoogleSub(googleSub);
+  // PBA-L3a-010: link onto an existing email account only when THAT account's
+  // email is verified too. An unverified row may be a squatter's pre-registration
+  // of the victim's address; linking would hand the victim's Google login to it.
+  // In that case the Google identity gets its own account WITHOUT the email (the
+  // address is taken by the unverified row, which stays untouched).
+  let emailTakenUnverified = false;
   if (!user && trustedEmail) {
     user = await store.findByEmail(trustedEmail);
+    if (user && !user.emailVerified) {
+      emailTakenUnverified = true;
+      user = undefined;
+    }
     if (user) {
       try {
         await store.linkGoogleSub(user.id, googleSub);
@@ -104,7 +114,7 @@ export async function resolveGoogleUser(
   if (!user) {
     user = await store.createWithGoogle({
       googleSub,
-      ...(trustedEmail !== undefined ? { email: trustedEmail } : {}),
+      ...(trustedEmail !== undefined && !emailTakenUnverified ? { email: trustedEmail } : {}),
     });
   }
   return user;

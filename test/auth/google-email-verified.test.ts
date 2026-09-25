@@ -153,6 +153,10 @@ describe('FWA-C6-01: resolveGoogleUser must not take over via unverified email',
 
   it('DOES link the google_sub when email_verified:true (happy path preserved)', async () => {
     const victim = await seedVictimPasswordAccount(store);
+    // PBA-L3a-010: linking by email needs BOTH sides verified. The local account
+    // proved its mailbox (verify-first signup), so the same person proving the
+    // same address through Google links onto it.
+    await store.markEmailVerified(victim.id);
 
     const user = await resolveGoogleUser(
       payload({ email: VICTIM_EMAIL, email_verified: true }),
