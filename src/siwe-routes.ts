@@ -1416,6 +1416,18 @@ async function grantConsent(
   if (details.missingOIDCScope) {
     grant.addOIDCScope(details.missingOIDCScope.join(' '));
   }
+  // Refresh tokens for CLI / headless-agent logins. panva only lists
+  // `offline_access` in `missingOIDCScope` when the RP sent `prompt=consent`
+  // (see oidc-provider check_scope.js); a connector / device-flow login that
+  // doesn't would be granted no `offline_access`, get no refresh token, and
+  // expire at the id_token TTL (~1h), forcing a re-login. For a trusted
+  // first-party client that allows the refresh_token grant, grant it explicitly
+  // so the authorization code carries `offline_access` and a rotating refresh
+  // token is issued. Harmless for RPs that already request it.
+  const consentClient = await provider.Client.find(clientId);
+  if (consentClient?.grantTypeAllowed('refresh_token')) {
+    grant.addOIDCScope('offline_access');
+  }
   if (details.missingOIDCClaims) {
     grant.addOIDCClaims(details.missingOIDCClaims);
   }
