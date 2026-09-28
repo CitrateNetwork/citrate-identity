@@ -17,7 +17,8 @@
  *
  *   2. `/health` (+ `/healthz` alias) — a lightweight liveness/readiness probe
  *      for Caddy / the load balancer / devops `curl`. Returns 200 JSON
- *      `{status:"ok", redis?, db?}`. It pings Redis/PG when those were wired, but
+ *      `{status:"ok", sha, redis?, db?}` (`sha` = the deployed git commit, so a
+ *      deploy can be probed not attested). It pings Redis/PG when those were wired, but
  *      NEVER throws: a probe failure degrades a sub-field to `false`, it does not
  *      500 the endpoint (so the LB sees the process is up even if a dependency is
  *      briefly flapping; deeper checks belong in dependency-specific alerting).
@@ -28,6 +29,21 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type Provider from 'oidc-provider';
 import { isAllowedCorsOrigin } from './config.js';
+
+/**
+ * Deployed git commit, surfaced on `/health` so a deploy can be *probed* rather
+ * than attested (audit rescore #10, dim 8). Resolved once at module load from the
+ * environment, in priority order:
+ *   `GIT_SHA` (what our Dockerfile bakes in) → `VERCEL_GIT_COMMIT_SHA` (if ever
+ *   built on Vercel) → `SOURCE_COMMIT` (Heroku/Buildpack convention).
+ * Falls back to `"unknown"` when none is set (e.g. a local `node dist/server.js`
+ * with no build arg) — the probe still answers 200, it just can't name the commit.
+ */
+const GIT_SHA =
+  process.env.GIT_SHA ||
+  process.env.VERCEL_GIT_COMMIT_SHA ||
+  process.env.SOURCE_COMMIT ||
+  'unknown';
 
 /** Methods RPs use on the cross-origin authority routes. */
 const ALLOWED_METHODS = 'GET, POST, OPTIONS';
@@ -115,8 +131,9 @@ export function mountHttpExtras(
 
     // --- /health (+ /healthz alias) — never throws. ---
     if (method === 'GET' && (path === '/health' || path === '/healthz')) {
-      const body: { status: 'ok'; redis?: boolean; db?: boolean } = {
+      const body: { status: 'ok'; sha: string; redis?: boolean; db?: boolean } = {
         status: 'ok',
+        sha: GIT_SHA,
       };
       if (options.pingRedis) {
         try {

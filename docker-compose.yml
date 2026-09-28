@@ -17,6 +17,11 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        # Deployed git commit, surfaced on /health (audit rescore #10). Build with
+        #   GIT_SHA="$(git rev-parse HEAD)" docker compose up -d --build
+        # Unset → the image reports sha:"unknown".
+        GIT_SHA: ${GIT_SHA:-}
     restart: unless-stopped
     environment:
       NODE_ENV: production
