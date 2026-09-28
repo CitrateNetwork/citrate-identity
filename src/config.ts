@@ -1109,7 +1109,13 @@ export async function buildConfiguration(
         client_id: 'memrizz',
         token_endpoint_auth_method: 'none',
         application_type: 'web',
-        grant_types: ['authorization_code', 'refresh_token'],
+        // device_code added for headless agents (RFC 8628); keeps aud=memrizz so
+        // the mem-gateway OIDC verifier accepts device-obtained id_tokens as-is.
+        grant_types: [
+          'authorization_code',
+          'refresh_token',
+          'urn:ietf:params:oauth:grant-type:device_code',
+        ],
         response_types: ['code'],
         redirect_uris: [
           // Web callback for the configured (local/dev) memrizz origin.
@@ -1464,6 +1470,17 @@ export async function buildConfiguration(
       // devInteractions OFF: panva's built-in dev login page cannot perform a
       // SIWE signature. We serve our own interaction view (see interactions.url).
       devInteractions: { enabled: false },
+      // RFC 8628 Device Authorization Grant — for headless / server-side agents
+      // (e.g. Hermes on citrate-agent-runtime) that cannot open a loopback
+      // browser. The device POSTs /device/auth for a user_code, the human enters
+      // it at the verification URI and completes the SAME SIWE/password login via
+      // our interaction view, and the device polls /token with the device_code.
+      // digits charset so a user can read the code aloud / type it easily.
+      deviceFlow: {
+        enabled: true,
+        charset: 'digits',
+        mask: '****-****',
+      },
     },
     // Put scope-requested claims (notably `wallet_address` / `wallets`) directly
     // in the ID token even when an access token is co-issued. With the default
