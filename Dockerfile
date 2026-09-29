@@ -33,6 +33,13 @@ FROM node:24-alpine AS runtime
 ENV NODE_ENV=production
 WORKDIR /app
 
+# Deployed git commit, baked in so `/health` can report it (audit rescore #10).
+# Pass at build time:  docker build --build-arg GIT_SHA="$(git rev-parse HEAD)" .
+# (docker-compose wires this through from the GIT_SHA env var.) Left empty → the
+# /health handler reports "unknown"; it never fails the build.
+ARG GIT_SHA=""
+ENV GIT_SHA=$GIT_SHA
+
 # Run as the unprivileged `node` user that the base image ships (uid/gid 1000).
 # Create a writable .keys dir owned by that user so a JWKS can be generated/persisted
 # when no key is mounted (mount a volume here in prod to keep it stable across deploys).
