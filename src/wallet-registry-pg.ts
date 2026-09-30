@@ -70,11 +70,40 @@ const ADD_CANONICAL_COLUMN_SQL = `
 
 /**
  * At most ONE explicit canonical per sub, enforced by the DB rather than by a
- * read-then-write race. Partial index: rows with FALSE are unconstrained.
+ * read-then-write race. Rows with FALSE are unconstrained.
+ *
+ * It MUST be a DEFERRABLE constraint, not a plain partial UNIQUE INDEX.
+ * Postgres checks a non-deferrable unique index row by row as an UPDATE runs,
+ * not at the end of the statement. So `setCanonical`'s single clear-and-set
+ * UPDATE fails with a duplicate-key error whenever it reaches the new row
+ * before it has cleared the old canonical row. That happens any time the old
+ * row's live version sits later in the heap, e.g. after it was itself
+ * promoted. It was observed live on 2026-09-30 (sub 5e79ed53): the in-app
+ * payout-wallet switch failed three times in a row.
+ *
+ * `DEFERRABLE INITIALLY IMMEDIATE` moves the check to the end of each
+ * statement. A partial unique index can't be deferrable, hence the
+ * equivalent EXCLUDE (sub WITH =) WHERE (is_canonical).
+ *
+ * Idempotent migration for already-deployed tables: it swaps the old index
+ * for the constraint in one DO block, so no moment exists with neither in
+ * place.
  */
 const CREATE_CANONICAL_UNIQUE_SQL = `
-  CREATE UNIQUE INDEX IF NOT EXISTS linked_wallets_one_canonical_per_sub
-    ON linked_wallets (sub) WHERE is_canonical`;
+  DO $$
+  BEGIN
+    IF NOT EXISTS (
+      SELECT 1 FROM pg_constraint
+       WHERE conname = 'linked_wallets_one_canonical_per_sub'
+         AND conrelid = 'linked_wallets'::regclass
+    ) THEN
+      DROP INDEX IF EXISTS linked_wallets_one_canonical_per_sub;
+      ALTER TABLE linked_wallets
+        ADD CONSTRAINT linked_wallets_one_canonical_per_sub
+        EXCLUDE USING btree (sub WITH =) WHERE (is_canonical)
+        DEFERRABLE INITIALLY IMMEDIATE;
+    END IF;
+  END $$`;
 
 /** Mirrors InMemoryWalletRegistry's cap so behaviour does not change with backing. */
 const MAX_WALLETS_PER_SUB = 10;
@@ -178,9 +207,11 @@ export class PgWalletRegistry implements WalletRegistry {
 
   async setCanonical(sub: string, address: string): Promise<void> {
     const addr = address.toLowerCase();
-    // Clear-then-set in ONE statement so the partial unique index is never
-    // transiently violated and no window exists where a sub has zero or two
-    // canonical rows. `owned` gates on the (sub,address) pair, so this can only
+    // Clear-then-set in ONE statement so no window exists where a sub has zero
+    // or two canonical rows. This is only correct because the one-canonical rule
+    // is a DEFERRABLE constraint checked at end of statement (see
+    // CREATE_CANONICAL_UNIQUE_SQL). Under a plain unique index Postgres checks
+    // per row, and this UPDATE fails whenever the new row is visited first. `owned` gates on the (sub,address) pair, so this can only
     // ever choose among wallets already PROVEN for this identity.
     // RETURNING rather than rowCount: the PgLike seam this class is written
     // against exposes only `{ rows }`, so an affected-row count is not available

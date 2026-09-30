@@ -43,7 +43,8 @@ class FakePg implements PgLike {
       t.startsWith('CREATE TABLE') ||
       t.startsWith('CREATE INDEX') ||
       t.startsWith('CREATE UNIQUE INDEX') ||
-      t.startsWith('ALTER TABLE')
+      t.startsWith('ALTER TABLE') ||
+      t.startsWith('DO $$')
     ) {
       return { rows: [] };
     }
