@@ -39,6 +39,8 @@ class FakePg implements PgLike {
     const t = text.replace(/\s+/g, ' ').trim();
 
     if (t.startsWith('SELECT 1 FROM information_schema.tables')) return { rows: [{ x: 1 }] };
+    // No `users` table in this stand-in: setCanonical takes its registry-only path.
+    if (t.startsWith('SELECT 1 FROM information_schema.columns')) return { rows: [] };
     if (
       t.startsWith('CREATE TABLE') ||
       t.startsWith('CREATE INDEX') ||

@@ -37,6 +37,18 @@ import { WalletRegistryError } from './identity-registry.js';
 /** The slice of `pg.Pool` this store needs (keeps tests off a real driver). */
 export interface PgLike {
   query(text: string, values?: unknown[]): Promise<{ rows: Array<Record<string, unknown>> }>;
+  /**
+   * A dedicated connection, for work that must run in ONE transaction. `pg.Pool`
+   * has it; the in-process test stand-ins don't, and `setCanonical` falls back
+   * to a single atomic statement for them.
+   */
+  connect?(): Promise<PgClientLike>;
+}
+
+/** A checked-out `pg.PoolClient`. */
+export interface PgClientLike {
+  query(text: string, values?: unknown[]): Promise<{ rows: Array<Record<string, unknown>> }>;
+  release(err?: Error | boolean): void;
 }
 
 const TABLE_EXISTS_SQL = `
@@ -104,6 +116,15 @@ const CREATE_CANONICAL_UNIQUE_SQL = `
         DEFERRABLE INITIALLY IMMEDIATE;
     END IF;
   END $$`;
+
+/** Probe: is `users.primary_wallet` in this database? (See `setCanonical`.) */
+const USERS_PRIMARY_WALLET_SQL = `
+  SELECT 1 FROM information_schema.columns
+   WHERE table_schema = 'public' AND table_name = 'users' AND column_name = 'primary_wallet'`;
+
+/** Move the claim with the canonical wallet (same scope as the server hook). */
+const SET_PRIMARY_WALLET_SQL = `
+  UPDATE users SET primary_wallet = $2, updated_at = now() WHERE id::text = $1`;
 
 /** Mirrors InMemoryWalletRegistry's cap so behaviour does not change with backing. */
 const MAX_WALLETS_PER_SUB = 10;
@@ -207,15 +228,18 @@ export class PgWalletRegistry implements WalletRegistry {
 
   async setCanonical(sub: string, address: string): Promise<void> {
     const addr = address.toLowerCase();
-    // Clear-then-set in ONE statement so no window exists where a sub has zero
-    // or two canonical rows. This is only correct because the one-canonical rule
-    // is a DEFERRABLE constraint checked at end of statement (see
-    // CREATE_CANONICAL_UNIQUE_SQL). Under a plain unique index Postgres checks
-    // per row, and this UPDATE fails whenever the new row is visited first. `owned` gates on the (sub,address) pair, so this can only
-    // ever choose among wallets already PROVEN for this identity.
-    // RETURNING rather than rowCount: the PgLike seam this class is written
-    // against exposes only `{ rows }`, so an affected-row count is not available
-    // and "did anything match" has to come back as data.
+    const mirror = await this.hasUsersPrimaryWallet();
+    if (this.pool.connect) {
+      await this.setCanonicalInTransaction(sub, addr, mirror);
+      return;
+    }
+    // No dedicated connection (test stand-ins): clear-then-set in ONE statement.
+    // That is correct only because the one-canonical rule is a DEFERRABLE
+    // constraint checked at end of statement (see CREATE_CANONICAL_UNIQUE_SQL).
+    // Under a plain unique index Postgres checks per row, and this UPDATE fails
+    // whenever the new row is visited first. `EXISTS` gates on the (sub,address)
+    // pair, so it can only ever choose among wallets already PROVEN for this
+    // identity. RETURNING rather than rowCount: PgLike exposes only `{ rows }`.
     const res = await this.pool.query(
       `UPDATE linked_wallets
           SET is_canonical = (address = $2)
@@ -227,6 +251,70 @@ export class PgWalletRegistry implements WalletRegistry {
     if (res.rows.length === 0) {
       throw new WalletRegistryError('wallet is not linked to this identity');
     }
+    if (mirror) await this.pool.query(SET_PRIMARY_WALLET_SQL, [sub, addr]);
+  }
+
+  /**
+   * The production path: ONE transaction that
+   *   1. locks every wallet row of this sub in `seq` order;
+   *   2. clears the old canonical, then sets the new one;
+   *   3. moves `users.primary_wallet` in the same transaction.
+   *
+   * Step 1 is what makes concurrent switches safe. Two multi-row UPDATEs that
+   * reach the same rows in different heap orders deadlock (observed with
+   * concurrent switches, 40P01). Taking the row locks up front in a fixed order
+   * makes them queue instead. Each later switch then re-reads the committed
+   * state, and exactly one canonical is left, whoever wins.
+   *
+   * Step 3 means the claim can never disagree with the registry, even if the
+   * process dies between the writes. `id::text = $1` matches nothing for a
+   * non-UUID sub, the same scope as the server hook. That hook still runs
+   * afterwards and re-writes the identical value.
+   */
+  private async setCanonicalInTransaction(sub: string, addr: string, mirror: boolean): Promise<void> {
+    const client = await this.pool.connect!();
+    let failed: Error | undefined;
+    try {
+      await client.query('BEGIN');
+      const mine = await client.query(
+        'SELECT address FROM linked_wallets WHERE sub = $1 ORDER BY seq FOR UPDATE',
+        [sub],
+      );
+      if (!mine.rows.some((r) => String(r.address) === addr)) {
+        throw new WalletRegistryError('wallet is not linked to this identity');
+      }
+      await client.query(
+        'UPDATE linked_wallets SET is_canonical = FALSE WHERE sub = $1 AND is_canonical AND address <> $2',
+        [sub, addr],
+      );
+      await client.query('UPDATE linked_wallets SET is_canonical = TRUE WHERE sub = $1 AND address = $2', [
+        sub,
+        addr,
+      ]);
+      if (mirror) await client.query(SET_PRIMARY_WALLET_SQL, [sub, addr]);
+      await client.query('COMMIT');
+    } catch (err) {
+      failed = err as Error;
+      await client.query('ROLLBACK').catch(() => undefined);
+      throw err;
+    } finally {
+      // A connection whose ROLLBACK failed must not go back into the pool.
+      client.release(failed && !(failed instanceof WalletRegistryError) ? failed : undefined);
+    }
+  }
+
+  /**
+   * Whether `users.primary_wallet` is in this database, so `setCanonical` can
+   * move it atomically. A positive answer is cached. A negative one is
+   * re-probed, because the user store may create `users` after this registry
+   * connects on a fresh database.
+   */
+  private usersPrimaryWallet = false;
+  private async hasUsersPrimaryWallet(): Promise<boolean> {
+    if (this.usersPrimaryWallet) return true;
+    const probe = await this.pool.query(USERS_PRIMARY_WALLET_SQL);
+    this.usersPrimaryWallet = probe.rows.length > 0;
+    return this.usersPrimaryWallet;
   }
 
   private rowToLinked(row: Record<string, unknown>, canonical: string | null): LinkedWallet {
