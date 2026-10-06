@@ -17,6 +17,7 @@
 # Usage (on the signer host):
 #   NEW_VAULT=<MembershipStakeVault from the book> \
 #   NEW_SBT=<CitrateMemberSBT from the book> \
+#   NEW_SIGNER=<grant-signer address == owner() of both> \
 #     bash rekey.sh < /secure/path/to/new_grant_signer_privkey.hex
 set -euo pipefail
 
@@ -28,6 +29,7 @@ STATE_DIR="${TREASURY_STATE_DIR:-/var/lib/citrate-treasury-signer}"
 
 [ -n "${NEW_VAULT:-}" ] || { echo "NEW_VAULT (new MembershipStakeVault) is required" >&2; exit 2; }
 [ -n "${NEW_SBT:-}" ]   || { echo "NEW_SBT (new CitrateMemberSBT) is required" >&2; exit 2; }
+[ -n "${NEW_SIGNER:-}" ] || { echo "NEW_SIGNER (new grant-signer address, == owner() of vault+SBT) is required" >&2; exit 2; }
 [ -f "$ENV_FILE" ]      || { echo "env-file $ENV_FILE not found" >&2; exit 2; }
 
 # read the new private key from stdin ONLY (never argv/env-echo)
@@ -79,7 +81,9 @@ fi
 sleep 3
 HEALTH="$(curl -s -m5 "http://127.0.0.1:${PORT}/health" || true)"
 echo "[rekey] /health: $HEALTH"
-EXPECT_SIGNER="0xF42a19194fee89E71dC4b8631a71a9CeCf42B483"
+# Expected signer comes from the operator (NEW_SIGNER), never a hard-coded pin: a
+# re-roll rotates the grant signer, and a baked-in address goes stale (r1005).
+EXPECT_SIGNER="$NEW_SIGNER"
 lc() { printf '%s' "$1" | tr 'A-F' 'a-f'; }
 ok=1
 echo "$HEALTH" | grep -qi "$(lc "$EXPECT_SIGNER")" || { echo "[rekey] FAIL: signer != $EXPECT_SIGNER" >&2; ok=0; }
