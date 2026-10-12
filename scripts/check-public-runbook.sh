@@ -23,7 +23,8 @@ if [[ -n "$hits" ]]; then
 fi
 
 # Stale money-contract addresses, by hashed 10-char prefix.
-STALE_HASHES="92ae0c0fb545461a 6d5a791dac330625 720b7e15f122f17f ee0cd300fa884372 7d7b42e09894f3dc"
+# r1005 (2026-10-06): + the 2026-09-29 book SBT / vault / grant signer and the 07-22 signer.
+STALE_HASHES="92ae0c0fb545461a 6d5a791dac330625 720b7e15f122f17f ee0cd300fa884372 7d7b42e09894f3dc ceb37324f0b49812 da38ddbd64f18c83 a7bc3e025f192939 1cd0dc0b332df5ae"
 stale=$(git -C "$ROOT" grep -I -n -o -i -E '0x[0-9a-f]{8}' -- . "${EXCLUDES[@]}" 2>/dev/null | python3 -c '
 import hashlib, sys
 bad = set(sys.argv[1].split())

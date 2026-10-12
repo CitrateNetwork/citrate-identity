@@ -106,7 +106,8 @@ cast call  $VAULT "owner()(address)" --rpc-url https://rpc.citrate.ai
 cast call  $SBT   "owner()(address)" --rpc-url https://rpc.citrate.ai   # both == the new signer
 ```
 
-Then run `rekey.sh` on the signer host with `NEW_VAULT` and `NEW_SBT` set to those values. It reads
+Then run `rekey.sh` on the signer host with `NEW_VAULT` and `NEW_SBT` set to those values and
+`NEW_SIGNER` set to the new grant-signer address (the `owner()` you just checked). It reads
 the new private key on STDIN only (never argv or a log), patches the env file atomically, recreates the
 container (a plain `docker restart` does not re-read `--env-file`), and asserts that `/health` reports
 the new signer and both contracts. Run it only after the new contracts have code and the new signer is
