@@ -106,7 +106,29 @@ async function follow(jar: CookieJar, client: Client, location: string) {
     }
     const res = await fetch(url, { headers: { cookie: jar.header() }, redirect: 'manual' });
     jar.absorb(res);
-    if (res.status === 200) return { code: undefined, signInPage: true };
+    if (res.status === 200) {
+      const html = await res.text();
+      // panva switches accounts by auto-submitting a form that ends the old
+      // browser session, then resumes this request; a browser posts it itself.
+      const form = /<form method="post" action="([^"]+)">([\s\S]*?)<\/form>/.exec(html);
+      if (form) {
+        const fields = new URLSearchParams();
+        for (const m of form[2].matchAll(/<input type="hidden" name="([^"]+)" value="([^"]*)"\/>/g)) {
+          fields.set(m[1], m[2]);
+        }
+        const post = await fetch(form[1], {
+          method: 'POST',
+          headers: { 'content-type': 'application/x-www-form-urlencoded', cookie: jar.header() },
+          body: fields.toString(),
+          redirect: 'manual',
+        });
+        jar.absorb(post);
+        expect([302, 303]).toContain(post.status);
+        location = post.headers.get('location')!;
+        continue;
+      }
+      return { code: undefined, signInPage: true };
+    }
     expect(res.status).toBe(303);
     location = res.headers.get('location')!;
   }
@@ -152,7 +174,7 @@ async function walletOf(client: Client, code: string, codeVerifier: string): Pro
       code_verifier: codeVerifier,
     }).toString(),
   });
-  expect(tokenRes.status).toBe(200);
+  if (tokenRes.status !== 200) throw new Error(`token ${tokenRes.status}: ${await tokenRes.text()}`);
   const { id_token } = (await tokenRes.json()) as { id_token: string };
   return String(decodeJwt(id_token).wallet_address);
 }
