@@ -27,6 +27,7 @@ const REDIRECT = 'http://localhost:3001/auth/callback';
 const b64u = (b: Buffer): string => b.toString('base64url');
 let server: Server;
 let baseUrl: string;
+let provider: Awaited<ReturnType<typeof createProvider>>;
 let lastCode: string | null = null;
 
 beforeAll(async () => {
@@ -35,7 +36,7 @@ beforeAll(async () => {
   const { port } = probe.address() as AddressInfo;
   probe.close();
   baseUrl = `http://127.0.0.1:${port}`;
-  const provider = await createProvider(baseUrl, { googleEnabled: false });
+  provider = await createProvider(baseUrl, { googleEnabled: false });
   server = createServer(provider.callback());
   await new Promise<void>((r) => server.listen(port, '127.0.0.1', r));
 });
@@ -180,6 +181,25 @@ describe('PBA-L3a-008 logout revokes the refresh token', () => {
     const q = await fetch(`${baseUrl}/logout?everywhere=1`, { method: 'POST', headers: { authorization: `Bearer ${d.tokens.access_token}` } });
     expect(await q.json()).toMatchObject({ everywhere: true });
     expect((await refresh(e.tokens.refresh_token)).status).toBe(400);
+  });
+
+  // Each revocation step on its own: either one alone already makes the refresh
+  // grant fail (above), so the stored records are checked directly.
+  it('logout deletes the grant\'s refresh token record', async () => {
+    const { tokens } = await siweTokens(`0x${'b5'.repeat(32)}`);
+    expect(await provider.RefreshToken.find(tokens.refresh_token)).toBeTruthy();
+    expect((await logout(tokens.access_token)).status).toBe(200);
+    expect(await provider.RefreshToken.find(tokens.refresh_token)).toBeUndefined();
+  });
+
+  it('logout deletes the grant record behind the token', async () => {
+    const { tokens } = await siweTokens(`0x${'b6'.repeat(32)}`);
+    const at = await provider.AccessToken.find(tokens.access_token);
+    const grantId = at?.grantId;
+    expect(grantId).toBeTruthy();
+    expect(await provider.Grant.find(grantId!)).toBeTruthy();
+    expect((await logout(tokens.access_token)).status).toBe(200);
+    expect(await provider.Grant.find(grantId!)).toBeUndefined();
   });
 
   it('a plain logout leaves the account\'s other grants alone', async () => {
