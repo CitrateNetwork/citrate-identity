@@ -40,7 +40,7 @@
     "pg-mem": "^3.0.14",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",
-    "vitest": "^5.0.2"
+    "vitest": "^5.0.5"
   },
   "overrides": {
     "http-cache-semantics": ">=4.3.0"
