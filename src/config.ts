@@ -11,7 +11,7 @@ import { randomUUID } from 'node:crypto';
 import { dirname, resolve } from 'node:path';
 import { exportJWK, generateKeyPair, type JWK } from 'jose';
 import { getAddress, isAddress } from 'viem';
-import type { Account, Configuration, FindAccount } from 'oidc-provider';
+import { interactionPolicy, type Account, type Configuration, type FindAccount } from 'oidc-provider';
 import { getKycStore, effectiveVerified, type KycStatus } from './kyc.js';
 import { getUserStore } from './auth/stores.js';
 import { resolveEntitlementClaim, ENTITLEMENT_CLAIM } from './entitlements.js';
@@ -321,6 +321,45 @@ export const TRUSTED_FIRST_PARTY_CLIENT_IDS: ReadonlySet<string> = new Set([
 /** True iff `clientId` is a Citrate-owned trusted first-party RP (TD-8). */
 export function isTrustedFirstPartyClient(clientId: string): boolean {
   return TRUSTED_FIRST_PARTY_CLIENT_IDS.has(clientId);
+}
+
+/**
+ * Desktop clients that sign in through the system browser. Signing out of the
+ * app revokes its token, but the browser keeps its auth.citrate.ai session, so
+ * without a prompt every later sign-in would complete silently as that same
+ * account and the member could never switch. For these clients the sign-in
+ * page is always shown; completing it as any account finishes the request.
+ */
+export const ACCOUNT_CHOICE_CLIENT_IDS: ReadonlySet<string> = new Set([
+  'citrate-core',
+  'citrate-gui-native',
+]);
+
+/**
+ * The interaction policy: panva's base prompts plus one login check that asks
+ * desktop clients to show the sign-in page even when a session exists. Once
+ * this interaction has a login result the check is satisfied, so it cannot loop.
+ */
+export function buildInteractionPolicy(): ReturnType<typeof interactionPolicy.base> {
+  const policy = interactionPolicy.base();
+  const login = policy.get('login');
+  if (!login) throw new Error('interaction policy has no login prompt');
+  login.checks.add(
+    new interactionPolicy.Check(
+      'desktop_account_choice',
+      'The desktop app asks the member to choose the account',
+      (ctx) => {
+        const { oidc } = ctx;
+        if (!oidc.session?.accountId) return interactionPolicy.Check.NO_NEED_TO_PROMPT;
+        if (!oidc.client || !ACCOUNT_CHOICE_CLIENT_IDS.has(oidc.client.clientId)) {
+          return interactionPolicy.Check.NO_NEED_TO_PROMPT;
+        }
+        if (oidc.result?.login) return interactionPolicy.Check.NO_NEED_TO_PROMPT;
+        return interactionPolicy.Check.REQUEST_PROMPT;
+      },
+    ),
+  );
+  return policy;
 }
 
 /** The dev-default cookie key shipped in source — must never run in production. */
@@ -1435,6 +1474,7 @@ export async function buildConfiguration(
       required: () => true,
     },
     interactions: {
+      policy: buildInteractionPolicy(),
       // Replace panva's generic dev login page (which cannot speak SIWE) with
       // our own SIWE interaction view, mounted at /interaction/:uid by
       // mountSiweRoutes. panva 303s the browser here when an /auth request needs
