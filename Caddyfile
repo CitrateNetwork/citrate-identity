@@ -14,17 +14,28 @@
 {$ISSUER_HOST} {
 	encode zstd gzip
 
-	# Forward the real client protocol/host so the app issues correct absolute
-	# (https) discovery/issuer URLs and sets Secure cookies.
-	reverse_proxy identity:3000 {
-		header_up X-Forwarded-Proto {scheme}
-		header_up X-Forwarded-Host {host}
-		header_up X-Real-IP {remote_host}
+	# Treasury signer sidecar (services/treasury-signer), when it runs on the same
+	# host: /_ops/treasury/* -> citrate-treasury-signer:8790. The sidecar serves
+	# its routes at its own root, so handle_path strips the prefix. The sidecar
+	# authenticates every request itself; drop this block on hosts without it.
+	handle_path /_ops/treasury/* {
+		reverse_proxy citrate-treasury-signer:8790
+	}
 
-		# Let the load balancer / Caddy short-circuit on the app's own /health.
-		health_uri /health
-		health_interval 30s
-		health_timeout 5s
+	# Everything else -> the identity OIDC app.
+	handle {
+		# Forward the real client protocol/host so the app issues correct absolute
+		# (https) discovery/issuer URLs and sets Secure cookies.
+		reverse_proxy identity:3000 {
+			header_up X-Forwarded-Proto {scheme}
+			header_up X-Forwarded-Host {host}
+			header_up X-Real-IP {remote_host}
+
+			# Let the load balancer / Caddy short-circuit on the app's own /health.
+			health_uri /health
+			health_interval 30s
+			health_timeout 5s
+		}
 	}
 
 	# Reasonable security headers for an auth surface. HSTS is safe once HTTPS is
