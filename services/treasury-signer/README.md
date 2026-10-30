@@ -56,7 +56,9 @@ gas-only top-up. core-membership validates `vaultTxHash`/`sbtTxHash`/`sbtTokenId
 so `chainId` cannot tell generations apart. Every request carries `expectedGenesis`, the
 caller's pinned block-0 hash (core-membership: `CITRATE_GENESIS_HASH`). The signer
 compares it with `eth_getBlockByNumber("0x0")` on its OWN RPC before it reads any grant
-state, again before every broadcast, and again after every receipt. A flip after a
+state, again before every broadcast, again after every receipt, and once more after all
+grant-state reads before success is recorded (so an all-legs-skipped replay decided on
+another generation's state is refused, not cached). A flip after a
 broadcast cannot be undone: the signer logs `ALARM genesis_changed_after_broadcast`,
 answers 502, and does not record the order done. Missing or malformed is 422, a different hash is
 412, a failed lookup is 503; on any refusal nothing is read or sent, and the log line

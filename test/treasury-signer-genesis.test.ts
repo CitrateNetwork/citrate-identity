@@ -310,6 +310,21 @@ describe("treasury signer: expectedGenesis pin (fail closed)", { timeout: 30_000
     expect(saved.orders[`${R1006}/order-1`]).toBeUndefined(); // released, re-triable
   });
 
+  it("all legs skipped on state read from another generation: rejected before success is recorded", async () => {
+    // The start check sees r1006; the RPC then serves r1005, where this member is
+    // already fully granted (sub bound, bond clone, gas), so every leg skips and
+    // neither send() nor receipt() runs. The success path must still re-check.
+    chain.genesis = (n) => (n === 0 ? R1006 : R1005);
+    await startSigner();
+    const r = await postGrant(grantBody());
+    expect(r.status).toBe(412);
+    expect(r.json.status).toBeUndefined();
+    expect(broadcasts()).toEqual([]);
+    const saved = JSON.parse(readFileSync(join(dir, "state.json"), "utf8"));
+    expect(saved.orders[`${R1006}/order-1`]).toBeUndefined(); // no completed entry
+    expect(signerOut).toMatch(/grant refused: genesis_mismatch/);
+  });
+
   it("a broadcast whose receipt is on the pinned generation completes", async () => {
     chain.subBound = false; chain.acceptBroadcasts = true; // mint; legs 2/3 skip (bond exists, balance high)
     await startSigner();

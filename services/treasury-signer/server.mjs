@@ -37,8 +37,9 @@
  *     recorded on an earlier generation is never replayed on this one (#70 P1-1).
  *   - Chain-generation pin (#70 P1-2): r1005 and r1006 share chainId 40204, so the
  *     caller sends `expectedGenesis` and the signer compares it with the block-0
- *     hash of ITS OWN RPC, at request start, before every broadcast, and after
- *     every receipt (a flip there raises an ALARM log line and fails the request).
+ *     hash of ITS OWN RPC, at request start, before every broadcast, after every
+ *     receipt (a flip there raises an ALARM log line and fails the request), and
+ *     once more after all grant-state reads, before success is recorded.
  *     Missing/malformed → 422, different → 412, lookup failure → 503. Nothing is
  *     read or sent on a refusal. Block 0 is fetched per check, never cached.
  *   - Signs → broadcasts → waits for inclusion → returns the REAL hash. Never a
@@ -266,6 +267,12 @@ async function handleGrant(body) {
       if (rcpt.status !== "success") throw new HttpError(502, `gas top-up reverted in ${hash}`);
       fundTxHash = hash;
     }
+
+    // Re-check the generation AFTER every grant-state read and BEFORE recording success.
+    // When every leg skips, no send()/receipt() check ran, and a skip decided by state
+    // read from another generation (where this member is already granted) would
+    // otherwise be recorded as done under this generation's ledger key.
+    await requireGenesis(expected, orderId);
 
     // "granted" iff a money leg (grant or SBT mint) actually broadcast this call; a
     // gas-only top-up on an otherwise-complete order is still an idempotent replay.
