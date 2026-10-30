@@ -45,10 +45,16 @@ interface ChainDouble {
   genesis: (call: number) => string | null | "error";
   subBound: boolean;
   bondExists: boolean;
+  /** Member EOA balance (wei, hex). Low → the gas top-up leg broadcasts. */
+  balance: string;
+  /** Accept broadcasts and return a successful receipt (default: reject them). */
+  acceptBroadcasts: boolean;
   calls: string[];
   genesisCalls: number;
 }
-const chain: ChainDouble = { genesis: () => R1006, subBound: true, bondExists: true, calls: [], genesisCalls: 0 };
+const HIGH_BALANCE = "0xffffffffffffffffffff";
+const chain: ChainDouble = { genesis: () => R1006, subBound: true, bondExists: true, balance: HIGH_BALANCE, acceptBroadcasts: false, calls: [], genesisCalls: 0 };
+const TX_HASH = "0x" + "cd".repeat(32);
 
 function block(hash: string | null, number: string) {
   return {
@@ -79,13 +85,23 @@ function answer(method: string, params: unknown[]): { result?: unknown; error?: 
       return { error: { code: -32000, message: "unknown call" } };
     }
     case "eth_getCode": return { result: chain.bondExists ? "0x6080" : "0x" };
-    case "eth_getBalance": return { result: "0xffffffffffffffffffff" };
+    case "eth_getBalance": return { result: chain.balance };
+    case "eth_blockNumber": return { result: "0x10" };
+    case "eth_getTransactionReceipt":
+      return {
+        result: {
+          transactionHash: TX_HASH, transactionIndex: "0x0", blockHash: "0x" + "ab".repeat(32), blockNumber: "0x10",
+          from: MEMBER, to: SBT, cumulativeGasUsed: "0x5208", gasUsed: "0x5208", effectiveGasPrice: "0x1",
+          contractAddress: null, logs: [], logsBloom: "0x" + "00".repeat(256), status: "0x1", type: "0x2",
+        },
+      };
     case "eth_chainId": return { result: "0x9d0c" };
     case "eth_getTransactionCount": return { result: "0x0" };
     case "eth_estimateGas": return { result: "0x5208" };
     case "eth_gasPrice": case "eth_maxPriorityFeePerGas": return { result: "0x1" };
     // Never accept a broadcast: a test that reaches here proves a send was attempted.
-    case "eth_sendRawTransaction": return { error: { code: -32000, message: "double rejects broadcasts" } };
+    case "eth_sendRawTransaction":
+      return chain.acceptBroadcasts ? { result: TX_HASH } : { error: { code: -32000, message: "double rejects broadcasts" } };
     default: return { error: { code: -32601, message: `unsupported ${method}` } };
   }
 }
@@ -181,7 +197,8 @@ beforeAll(async () => {
 afterAll(async () => { await new Promise<void>((r) => rpc.close(() => r())); });
 afterEach(async () => {
   await stopSigner();
-  chain.genesis = () => R1006; chain.subBound = true; chain.bondExists = true; chain.calls = []; chain.genesisCalls = 0;
+  chain.genesis = () => R1006; chain.subBound = true; chain.bondExists = true; chain.balance = HIGH_BALANCE; chain.acceptBroadcasts = false;
+  chain.calls = []; chain.genesisCalls = 0;
 });
 
 describe("treasury signer: expectedGenesis pin (fail closed)", { timeout: 30_000 }, () => {
@@ -260,6 +277,46 @@ describe("treasury signer: expectedGenesis pin (fail closed)", { timeout: 30_000
     const r = await postGrant(grantBody());
     expect(r.status).toBe(412);
     expect(broadcasts()).toEqual([]);
+  });
+
+  it("re-checks block 0 before the vault.grant broadcast (leg 2): a flip sends nothing", async () => {
+    chain.subBound = true; chain.bondExists = false; // leg 1 skipped, leg 2 would grant
+    chain.genesis = (n) => (n === 0 ? R1006 : R1005);
+    await startSigner();
+    const r = await postGrant(grantBody());
+    expect(r.status).toBe(412);
+    expect(broadcasts()).toEqual([]);
+  });
+
+  it("re-checks block 0 before the gas top-up broadcast (leg 3): a flip sends nothing", async () => {
+    chain.balance = "0x0"; // legs 1 and 2 skipped, leg 3 would top up
+    chain.genesis = (n) => (n === 0 ? R1006 : R1005);
+    await startSigner();
+    const r = await postGrant(grantBody());
+    expect(r.status).toBe(412);
+    expect(broadcasts()).toEqual([]);
+  });
+
+  it("re-checks block 0 after a receipt: a flip raises an ALARM and the order is not recorded done", async () => {
+    chain.subBound = false; chain.acceptBroadcasts = true; // leg 1 mints and gets a receipt
+    chain.genesis = (n) => (n <= 1 ? R1006 : R1005); // start, pre-send ok; post-receipt flipped
+    await startSigner();
+    const r = await postGrant(grantBody());
+    expect(r.status).toBe(502);
+    expect(r.json.error).toBe("genesis_changed_after_broadcast");
+    expect(broadcasts().length).toBe(1);
+    expect(signerOut).toMatch(/ALARM genesis_changed_after_broadcast/);
+    const saved = JSON.parse(readFileSync(join(dir, "state.json"), "utf8"));
+    expect(saved.orders[`${R1006}/order-1`]).toBeUndefined(); // released, re-triable
+  });
+
+  it("a broadcast whose receipt is on the pinned generation completes", async () => {
+    chain.subBound = false; chain.acceptBroadcasts = true; // mint; legs 2/3 skip (bond exists, balance high)
+    await startSigner();
+    const r = await postGrant(grantBody());
+    expect(r.status).toBe(200);
+    expect(r.json.sbtTxHash).toBe(TX_HASH);
+    expect(r.json.status).toBe("granted");
   });
 
   it("/health reports the signer RPC's block-0 hash, or null when the lookup fails", async () => {

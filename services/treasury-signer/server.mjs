@@ -37,7 +37,8 @@
  *     recorded on an earlier generation is never replayed on this one (#70 P1-1).
  *   - Chain-generation pin (#70 P1-2): r1005 and r1006 share chainId 40204, so the
  *     caller sends `expectedGenesis` and the signer compares it with the block-0
- *     hash of ITS OWN RPC, at request start and again before every broadcast.
+ *     hash of ITS OWN RPC, at request start, before every broadcast, and after
+ *     every receipt (a flip there raises an ALARM log line and fails the request).
  *     Missing/malformed → 422, different → 412, lookup failure → 503. Nothing is
  *     read or sent on a refusal. Block 0 is fetched per check, never cached.
  *   - Signs → broadcasts → waits for inclusion → returns the REAL hash. Never a
@@ -191,6 +192,21 @@ async function handleGrant(body) {
   state.orders[key] = { inflight: true }; saveState(state);
   // Every broadcast re-checks the generation first.
   const send = async (tx) => { await requireGenesis(expected, orderId); return walletClient.sendTransaction(tx); };
+  // ...and re-checks it after the receipt. The pre-send check and the broadcast are
+  // separate RPC calls, and a 40204 tx is valid on either generation, so a flip in
+  // between would land the tx on the wrong chain. That cannot be undone here: raise an
+  // ALARM for the operator and fail the request (502), so the order is not recorded
+  // done and core-membership keeps its may-have-landed marker.
+  const receipt = async (hash) => {
+    const rcpt = await publicClient.waitForTransactionReceipt({ hash });
+    const own = await ownGenesis(orderId);
+    if (own !== expected) {
+      // eslint-disable-next-line no-console
+      console.error(`ALARM genesis_changed_after_broadcast order=${String(orderId).slice(0, 80)} tx=${hash}`);
+      throw new HttpError(502, "genesis_changed_after_broadcast");
+    }
+    return rcpt;
+  };
 
   try {
     const m = getAddress(member);
@@ -203,7 +219,7 @@ async function handleGrant(body) {
     if (!bound) {
       const data = encodeFunctionData({ abi: SBT_ABI, functionName: "mintMember", args: [m, subHash, ts, te] });
       const hash = await send({ to: SBT, data });
-      const rcpt = await publicClient.waitForTransactionReceipt({ hash });
+      const rcpt = await receipt(hash);
       if (rcpt.status !== "success") throw new HttpError(502, `sbt.mintMember reverted in ${hash}`);
       sbtTxHash = hash;
       // real tokenId from the ERC-721 Transfer(from=0x0, to=member) log
@@ -231,7 +247,7 @@ async function handleGrant(body) {
       chargeDailyCap(amount);
       const data = encodeFunctionData({ abi: VAULT_ABI, functionName: "grant", args: [m, amount, memberTokenId] });
       const hash = await send({ to: VAULT, data, value: amount });
-      const rcpt = await publicClient.waitForTransactionReceipt({ hash });
+      const rcpt = await receipt(hash);
       if (rcpt.status !== "success") throw new HttpError(502, `vault.grant reverted in ${hash}`);
       vaultTxHash = hash;
     }
@@ -246,7 +262,7 @@ async function handleGrant(body) {
       const topUp = GAS_HEADROOM - bal;   // top up only the shortfall
       chargeDailyCap(topUp);
       const hash = await send({ to: m, value: topUp });
-      const rcpt = await publicClient.waitForTransactionReceipt({ hash });
+      const rcpt = await receipt(hash);
       if (rcpt.status !== "success") throw new HttpError(502, `gas top-up reverted in ${hash}`);
       fundTxHash = hash;
     }
