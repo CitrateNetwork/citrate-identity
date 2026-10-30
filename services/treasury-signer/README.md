@@ -39,19 +39,31 @@ clamps `amountWei` to the policy grant. It never fabricates a hash — a skipped
 leg returns `null`. The leg order is mint-first because `grant` needs the SBT
 `tokenId` (`ownerOf(memberTokenId) == member`).
 ```
-GET  /health   -> { status, signer, day, spentToday, dailyCap, grantWei, gasHeadroomWei, vault, sbt, model }
+GET  /health   -> { genesis, status, signer, day, spentToday, dailyCap, grantWei, gasHeadroomWei, vault, sbt, model }
 POST /grant   (Authorization: Bearer <TREASURY_SIGNER_TOKEN>)
-  body: { orderId, sub, member, amountWei, termStart, termEnd, chainId, contracts:{vault,sbt} }
+  body: { orderId, sub, member, amountWei, termStart, termEnd, chainId, contracts:{vault,sbt}, expectedGenesis }
     leg 1  sbt.mintMember(member, keccak256(sub), termStart, termEnd) — skipped if isSubBound(subHash)
     leg 2  vault.grant(member, amount, memberTokenId){value:amount}   — deploy+fund the clone; skipped if bondOf(member) has code (BondExists)
     leg 3  gas top-up: native SALT to member EOA for its activate tx  — GAS ONLY, skipped if balance >= GAS_HEADROOM
-  200 -> { orderId, fundTxHash|null, vaultTxHash|null, sbtTxHash|null, sbtTokenId|null, status:"granted"|"already_granted" }
-  401 bad/absent bearer · 403 daily cap · 409 orderId in-flight · 422 validation/allowlist
-  502 broadcast/revert · (503 reserved for not-ready)
+  200 -> { orderId, fundTxHash|null, vaultTxHash|null, sbtTxHash|null, sbtTokenId|null, status:"granted"|"already_granted", genesis }
+  401 bad/absent bearer · 403 daily cap · 409 orderId in-flight · 412 genesis mismatch
+  422 validation/allowlist (incl. missing/malformed expectedGenesis)
+  502 broadcast/revert · 503 genesis lookup failed
 ```
 (`vaultTxHash` = the vault.grant that deploys+funds the clone; `fundTxHash` = the
 gas-only top-up. core-membership validates `vaultTxHash`/`sbtTxHash`/`sbtTokenId`/`status`.)
-Idempotency is layered: a completed `orderId` replays its stored result; an
+**Chain-generation pin.** A reroll keeps chainId 40204 (r1005 and r1006 both answer it),
+so `chainId` cannot tell generations apart. Every request carries `expectedGenesis`, the
+caller's pinned block-0 hash (core-membership: `CITRATE_GENESIS_HASH`). The signer
+compares it with `eth_getBlockByNumber("0x0")` on its OWN RPC before it reads any grant
+state, and again before every broadcast. Missing or malformed is 422, a different hash is
+412, a failed lookup is 503; on any refusal nothing is read or sent, and the log line
+carries only a reason code and the order id. Block 0 is fetched per check, not cached.
+The 200 echoes `genesis`, and core-membership refuses a 200 without the matching echo.
+
+Idempotency is layered: a completed `orderId` replays its stored result **only within the
+same chain generation** (the ledger key is `<genesis>/<orderId>`, so a result recorded on
+an earlier generation is never handed back as a grant on this one); an
 in-flight `orderId` gets 409; and even a fresh `orderId` is a no-op per-leg if the
 clone already exists (`bondOf` has code) / the sub already bound (`already_granted`).
 

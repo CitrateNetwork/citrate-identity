@@ -32,18 +32,26 @@
  *     droplet, never in the repo/Vercel. Bearer auth on every call.
  *   - Hard allowlist: only the two pinned contracts (vault + sbt).
  *   - amountWei CLAMPED to TREASURY_GRANT_WEI (never trust the caller).
- *   - Per-UTC-day SALT cap + orderId idempotency ledger, persisted to disk.
+ *   - Per-UTC-day SALT cap + orderId idempotency ledger, persisted to disk. The
+ *     ledger is keyed by chain generation (`<genesis>/<orderId>`), so a result
+ *     recorded on an earlier generation is never replayed on this one (#70 P1-1).
+ *   - Chain-generation pin (#70 P1-2): r1005 and r1006 share chainId 40204, so the
+ *     caller sends `expectedGenesis` and the signer compares it with the block-0
+ *     hash of ITS OWN RPC, at request start and again before every broadcast.
+ *     Missing/malformed → 422, different → 412, lookup failure → 503. Nothing is
+ *     read or sent on a refusal. Block 0 is fetched per check, never cached.
  *   - Signs → broadcasts → waits for inclusion → returns the REAL hash. Never a
  *     fabricated hash; a skipped leg returns null.
  *
  * HTTP:
  *   GET  /health                         -> { status, signer, day, spentToday, dailyCap, vault, sbt }
  *   POST /grant   (Authorization: Bearer <TREASURY_SIGNER_TOKEN>)
- *     body { orderId, sub, member, amountWei, termStart, termEnd, chainId, contracts:{vault,sbt} }
- *     200  { orderId, fundTxHash|null, vaultTxHash|null, sbtTxHash|null, sbtTokenId|null, status:"granted"|"already_granted" }
+ *     body { orderId, sub, member, amountWei, termStart, termEnd, chainId, contracts:{vault,sbt}, expectedGenesis }
+ *     200  { orderId, fundTxHash|null, vaultTxHash|null, sbtTxHash|null, sbtTokenId|null, status:"granted"|"already_granted", genesis }
  *          (vaultTxHash = the vault.grant that deploys+funds the MemberBond clone;
  *           fundTxHash  = the gas-only top-up to the member EOA for its activate tx.)
- *     401 auth · 403 cap · 409 orderId in-flight · 422 validation/allowlist · 503 not ready · 5xx broadcast
+ *     401 auth · 403 cap · 409 orderId in-flight · 412 genesis mismatch · 422 validation/allowlist
+ *     503 not ready / genesis lookup failed · 5xx broadcast
  */
 import { createServer } from "node:http";
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
@@ -130,8 +138,31 @@ function readBody(req) { return new Promise((resolve, reject) => { let b = "", n
 
 class HttpError extends Error { constructor(code, msg) { super(msg); this.code = code; } }
 
+// ---- chain-generation pin (#70 P1-2) ----------------------------------------
+const GENESIS_RE = /^0x[0-9a-fA-F]{64}$/;
+// Neutral refusal log: a reason code and the order id only (never sub, key, token).
+function refuse(code, reason, orderId) {
+  // eslint-disable-next-line no-console
+  console.warn(`grant refused: ${reason} order=${String(orderId).slice(0, 80)}`);
+  return new HttpError(code, reason);
+}
+// The block-0 hash of THIS signer's RPC, lower-cased. Fetched on every call (no
+// cache): the RPC behind a fixed URL can move to a new generation, as rpc.citrate.ai
+// did at the r1006 cutover.
+async function ownGenesis(orderId) {
+  let hash;
+  try { hash = (await publicClient.getBlock({ blockNumber: 0n })).hash; } catch { throw refuse(503, "genesis_lookup_failed", orderId); }
+  if (typeof hash !== "string" || !GENESIS_RE.test(hash)) throw refuse(503, "genesis_lookup_failed", orderId);
+  return hash.toLowerCase();
+}
+async function requireGenesis(expected, orderId) {
+  const own = await ownGenesis(orderId);
+  if (own !== expected) throw refuse(412, "genesis_mismatch", orderId);
+  return own;
+}
+
 async function handleGrant(body) {
-  const { orderId, sub, member, amountWei, termStart, termEnd, chainId, contracts } = body ?? {};
+  const { orderId, sub, member, amountWei, termStart, termEnd, chainId, contracts, expectedGenesis } = body ?? {};
   // ---- validation (422) ----
   if (!orderId || typeof orderId !== "string") throw new HttpError(422, "orderId required");
   if (!sub || typeof sub !== "string") throw new HttpError(422, "sub required");
@@ -144,12 +175,22 @@ async function handleGrant(body) {
   let amount = GRANT_WEI;
   try { if (amountWei != null) amount = BigInt(amountWei) < GRANT_WEI ? BigInt(amountWei) : GRANT_WEI; } catch { throw new HttpError(422, "amountWei invalid"); }
   if (amount <= 0n) throw new HttpError(422, "amountWei must be > 0");
+  if (typeof expectedGenesis !== "string" || !GENESIS_RE.test(expectedGenesis)) throw refuse(422, "genesis_missing_or_malformed", orderId);
+  const expected = expectedGenesis.toLowerCase();
 
-  // ---- idempotency by orderId (409 in-flight, replay returns prior) ----
-  const prior = state.orders[orderId];
+  // ---- chain-generation pin, BEFORE any ledger replay or grant-state read ----
+  const genesis = await requireGenesis(expected, orderId);
+
+  // ---- idempotency by (generation, orderId) (409 in-flight, replay returns prior) ----
+  // A pre-reroll entry (plain orderId key, or another generation's key) never
+  // matches, so its old tx hashes are never handed back as a grant on this chain.
+  const key = `${genesis}/${orderId}`;
+  const prior = state.orders[key];
   if (prior?.done) return prior.result;
   if (prior?.inflight) throw new HttpError(409, "orderId in-flight");
-  state.orders[orderId] = { inflight: true }; saveState(state);
+  state.orders[key] = { inflight: true }; saveState(state);
+  // Every broadcast re-checks the generation first.
+  const send = async (tx) => { await requireGenesis(expected, orderId); return walletClient.sendTransaction(tx); };
 
   try {
     const m = getAddress(member);
@@ -161,7 +202,7 @@ async function handleGrant(body) {
     const bound = await publicClient.readContract({ address: SBT, abi: SBT_ABI, functionName: "isSubBound", args: [subHash] });
     if (!bound) {
       const data = encodeFunctionData({ abi: SBT_ABI, functionName: "mintMember", args: [m, subHash, ts, te] });
-      const hash = await walletClient.sendTransaction({ to: SBT, data });
+      const hash = await send({ to: SBT, data });
       const rcpt = await publicClient.waitForTransactionReceipt({ hash });
       if (rcpt.status !== "success") throw new HttpError(502, `sbt.mintMember reverted in ${hash}`);
       sbtTxHash = hash;
@@ -189,7 +230,7 @@ async function handleGrant(body) {
       rollDay();
       chargeDailyCap(amount);
       const data = encodeFunctionData({ abi: VAULT_ABI, functionName: "grant", args: [m, amount, memberTokenId] });
-      const hash = await walletClient.sendTransaction({ to: VAULT, data, value: amount });
+      const hash = await send({ to: VAULT, data, value: amount });
       const rcpt = await publicClient.waitForTransactionReceipt({ hash });
       if (rcpt.status !== "success") throw new HttpError(502, `vault.grant reverted in ${hash}`);
       vaultTxHash = hash;
@@ -204,7 +245,7 @@ async function handleGrant(body) {
       rollDay();
       const topUp = GAS_HEADROOM - bal;   // top up only the shortfall
       chargeDailyCap(topUp);
-      const hash = await walletClient.sendTransaction({ to: m, value: topUp });
+      const hash = await send({ to: m, value: topUp });
       const rcpt = await publicClient.waitForTransactionReceipt({ hash });
       if (rcpt.status !== "success") throw new HttpError(502, `gas top-up reverted in ${hash}`);
       fundTxHash = hash;
@@ -212,11 +253,11 @@ async function handleGrant(body) {
 
     // "granted" iff a money leg (grant or SBT mint) actually broadcast this call; a
     // gas-only top-up on an otherwise-complete order is still an idempotent replay.
-    const result = { orderId, fundTxHash, vaultTxHash, sbtTxHash, sbtTokenId, status: (vaultTxHash || sbtTxHash) ? "granted" : "already_granted" };
-    state.orders[orderId] = { done: true, result }; saveState(state);
+    const result = { orderId, fundTxHash, vaultTxHash, sbtTxHash, sbtTokenId, status: (vaultTxHash || sbtTxHash) ? "granted" : "already_granted", genesis };
+    state.orders[key] = { done: true, result }; saveState(state);
     return result;
   } catch (err) {
-    delete state.orders[orderId]; saveState(state); // release so the order stays re-triable
+    delete state.orders[key]; saveState(state); // release so the order stays re-triable
     throw err;
   }
 }
@@ -225,7 +266,11 @@ const server = createServer(async (req, res) => {
   try {
     if (req.method === "GET" && req.url === "/health") {
       rollDay();
-      return json(res, 200, { status: "ok", signer: account.address, day: state.day, spentToday: state.spentToday, dailyCap: String(DAILY_CAP), grantWei: String(GRANT_WEI), gasHeadroomWei: String(GAS_HEADROOM), vault: VAULT, sbt: SBT,
+      // Block-0 hash of this signer's RPC, so an operator can confirm the generation
+      // before pointing core-membership at it. null when the lookup fails.
+      let genesis = null;
+      try { const h = (await publicClient.getBlock({ blockNumber: 0n })).hash; if (typeof h === "string" && GENESIS_RE.test(h)) genesis = h.toLowerCase(); } catch {}
+      return json(res, 200, { genesis, status: "ok", signer: account.address, day: state.day, spentToday: state.spentToday, dailyCap: String(DAILY_CAP), grantWei: String(GRANT_WEI), gasHeadroomWei: String(GAS_HEADROOM), vault: VAULT, sbt: SBT,
       // Bond-clone model: idempotency for the grant leg is the durable on-chain
       // BondExists check (bondOf(member) has code), so there is no weaker fallback
       // mode to surface — the SBT (isSubBound) and bond (code) guards are both durable.
