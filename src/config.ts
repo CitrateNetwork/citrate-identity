@@ -1,3 +1,4 @@
+import { ORCHARD_CLIENTS } from './orchard-clients.js';
 import { isRevokedByEpoch, tokenAuthSec } from './auth/account-epoch.js';
 import {
   readFileSync,
@@ -1266,6 +1267,16 @@ export async function buildConfiguration(
         ],
         scope: 'openid profile wallet kyc offline_access',
       },
+      ...Object.entries(ORCHARD_CLIENTS).map(([client_id, origins]) => ({
+        client_id,
+        token_endpoint_auth_method: 'none' as const,
+        application_type: client_id === 'citrate-orchard-preview' ? 'native' as const : 'web' as const,
+        grant_types: ['authorization_code'],
+        response_types: ['code' as const],
+        redirect_uris: origins.map(origin => `${origin}/auth/callback`),
+        post_logout_redirect_uris: origins.map(origin => `${origin}/`),
+        scope: 'openid profile wallet',
+      })),
       {
         // american-learning-federation — the public cooperative applicant flow on
         // the citrate-landing marketing site, hosted at www.citrate.ai (+ the

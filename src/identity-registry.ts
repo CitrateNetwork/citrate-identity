@@ -25,6 +25,9 @@
  * IDP planset).
  */
 
+import { ORCHARD_CLIENT_IDS, buildOrchardProofMessage } from './orchard-clients.js';
+import { createRateLimiter, type RateLimiter } from './auth/rate-limit.js';
+import { createHash } from 'node:crypto';
 import type Provider from 'oidc-provider';
 import { getAddress, isAddress, verifyMessage } from 'ethers';
 
@@ -219,6 +222,7 @@ export async function verifyWalletLinkProof(args: {
 // ── HTTP routes ───────────────────────────────────────────────────────
 
 export interface IdentityRegistryOptions {
+  rateLimiter?: RateLimiter;
   /** Authority hostname baked into the proof message (e.g. auth.citrate.ai). */
   authority: string;
   chainId: number;
@@ -251,6 +255,7 @@ export function mountIdentityRegistryRoutes(
   options: IdentityRegistryOptions,
 ): void {
   const { authority, chainId, nonceStore, onCanonicalWalletChange } = options;
+  const proofLimiter = options.rateLimiter ?? createRateLimiter();
 
   /**
    * Report the current canonical wallet. Swallows a hook failure: the link/unlink
@@ -269,6 +274,39 @@ export function mountIdentityRegistryRoutes(
       );
     }
   }
+
+  // Orchard proof uses the existing authority nonce/signature primitives but
+  // NEVER mutates the wallet registry or changes the canonical payout address.
+  provider.use(async (ctx: Ctx, next: Next) => {
+    const match = /^\/identity\/([^/]+)\/orchard-proof(?:\/(challenge))?$/.exec(ctx.path);
+    if (!match) return next();
+    ctx.set('Cache-Control', 'no-store');
+    if (ctx.method !== 'POST') { respond(ctx, 405, { error: 'method_not_allowed' }); return; }
+    const token = await resolveToken(provider, ctx);
+    const sub = decodeURIComponent(match[1] ?? '');
+    if (!token) { respond(ctx, 401, { error: 'unauthorized' }); return; }
+    if (token.accountId !== sub || !ORCHARD_CLIENT_IDS.has(token.clientId) || !token.scopes.has('wallet')) {
+      respond(ctx, 403, { error: 'forbidden' }); return;
+    }
+    const limitKey = createHash('sha256').update(`${token.clientId}:${sub}`).digest('hex');
+    if (!await proofLimiter.hit(`orchard-proof:${limitKey}`, 20, 600000)) { respond(ctx, 429, {error: 'rate_limited'}); return; }
+    if (match[2] === 'challenge') {
+      const nonce = await nonceStore.issue();
+      respond(ctx, 200, { nonce, message_template: buildOrchardProofMessage({authority, sub, clientId: token.clientId, address: '0x<wallet>', nonce, chainId}) });
+      return;
+    }
+    const body = await readJson(ctx);
+    const address = typeof body?.address === 'string' ? body.address : '';
+    const signature = typeof body?.signature === 'string' ? body.signature : '';
+    const nonce = typeof body?.nonce === 'string' ? body.nonce : '';
+    if (!isAddress(address) || signature.length > 1024 || !signature || !nonce || nonce.length > 256) {
+      respond(ctx, 400, {error: 'invalid_request'}); return;
+    }
+    if (!await nonceStore.consume(nonce)) { respond(ctx, 401, {error: 'invalid_grant'}); return; }
+    const message = buildOrchardProofMessage({authority, sub, clientId: token.clientId, address, nonce, chainId});
+    if (!await verifyWalletLinkProof({message, signature, address})) { respond(ctx, 401, {error: 'invalid_grant'}); return; }
+    respond(ctx, 200, {verified: true, sub, client_id: token.clientId, expires_at: Math.floor(Date.now()/1000) + 3600});
+  });
 
   provider.use(async (ctx: Ctx, next: Next) => {
     const match = /^\/identity\/([^/]+)\/wallets(?:\/(.+))?$/.exec(ctx.path);
