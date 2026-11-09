@@ -54,13 +54,20 @@
  *           fundTxHash  = the gas-only top-up to the member EOA for its activate tx.)
  *     401 auth · 403 cap · 409 orderId in-flight · 412 genesis mismatch · 422 validation/allowlist
  *     503 not ready / genesis lookup failed · 5xx broadcast
+ *   POST /kyc-attest   (same bearer) — scoped KYC attestation, see handleKycAttest
+ *     body { member, sub, chainId, contracts:{sbt}, expectedGenesis }   (nothing else)
+ *     The signer re-reads identity's stored record (GET <KYC_STATUS_URL>/kyc/status) and
+ *     can send only CitrateMemberSBT.setKycVerified(tokenId, true) for the token bound to
+ *     keccak256(sub) and owned by `member`. Own daily count cap, idempotent, audit JSONL
+ *     with the subject hash only, disabled (503) unless KYC_STATUS_URL + _SECRET are set.
+ *     200  { status:"attested"|"already_attested", txHash|null, tokenId, subHash, genesis }
  */
 import { createServer } from "node:http";
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
-import { dirname } from "node:path";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, openSync, writeSync, fsyncSync, closeSync } from "node:fs";
+import { dirname, join } from "node:path";
 import {
   createWalletClient, createPublicClient, http, defineChain,
-  encodeFunctionData, getAddress, isAddress, keccak256, toHex, toEventSelector, hexToBigInt,
+  encodeFunctionData, getAddress, isAddress, keccak256, toHex, toEventSelector, hexToBigInt, decodeEventLog,
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { timingSafeEqual, createHash } from "node:crypto";
@@ -100,6 +107,38 @@ const ZERO_BYTECODE = "0x";
 const PORT = Number(process.env.PORT ?? "8790");
 const STATE_FILE = process.env.TREASURY_STATE_FILE ?? "/var/lib/citrate-treasury-signer/state.json";
 
+// ---- /kyc-attest config (scoped KYC attestation) ------------------------------
+// The signer re-reads the subject's STORED verification record from identity itself:
+// GET <KYC_STATUS_URL>/kyc/status?sub=<sub>, Authorization: Bearer <KYC_STATUS_SECRET>.
+// Both unset (or an unusable URL) leaves /kyc-attest disabled (503) and /grant as is.
+// The URL must be https, or plain http only to loopback or a single-label in-network
+// host (a compose service name such as `identity`), so the secret never crosses a
+// public network in clear.
+function kycStatusConfig() {
+  const raw = (process.env.KYC_STATUS_URL ?? "").trim();
+  const secret = (process.env.KYC_STATUS_SECRET ?? "").trim();
+  if (!raw || !secret) return { enabled: false, why: "KYC_STATUS_URL / KYC_STATUS_SECRET unset" };
+  let u;
+  try { u = new URL(raw); } catch { return { enabled: false, why: "KYC_STATUS_URL is not a URL" }; }
+  const host = u.hostname.replace(/^\[|\]$/g, "");
+  const local = host === "localhost" || host === "::1" || /^127\.\d+\.\d+\.\d+$/.test(host) || (host.length > 0 && !host.includes(".") && !host.includes(":"));
+  if (!(u.protocol === "https:" || (u.protocol === "http:" && local))) return { enabled: false, why: "KYC_STATUS_URL must be https (http only to loopback or an in-network host)" };
+  if (u.username || u.password || u.search || u.hash) return { enabled: false, why: "KYC_STATUS_URL must be a plain base URL" };
+  return { enabled: true, base: raw.replace(/\/+$/, ""), secret };
+}
+const KYC_STATUS = kycStatusConfig();
+const KYC_STATUS_TIMEOUT_MS = Math.max(100, Number(process.env.KYC_STATUS_TIMEOUT_MS ?? "10000") || 10000);
+// Attestations per UTC day (a count, not SALT: setKycVerified moves no value). An
+// unparsable value is 0, which refuses every attestation (fail closed).
+const KYC_ATTEST_DAILY_CAP = (() => {
+  const v = (process.env.KYC_ATTEST_DAILY_CAP ?? "20").trim();
+  return /^\d{1,6}$/.test(v) ? Number(v) : 0;
+})();
+// Append-only audit trail, next to the state file by default (same volume). Records
+// carry the subject HASH, token id, tx hash, generation and outcome; never the sub,
+// the wallet, a token or a secret.
+const KYC_AUDIT_FILE = process.env.KYC_ATTEST_AUDIT_FILE ?? join(dirname(STATE_FILE), "kyc-attest-audit.jsonl");
+
 const account = privateKeyToAccount((need("TREASURY_SIGNER_KEY").startsWith("0x") ? "" : "0x") + need("TREASURY_SIGNER_KEY"));
 const chain = defineChain({ id: CHAIN_ID, name: "Citrate", nativeCurrency: { name: "SALT", symbol: "SALT", decimals: 18 }, rpcUrls: { default: { http: [RPC_URL] } } });
 const publicClient = createPublicClient({ chain, transport: http(RPC_URL) });
@@ -121,6 +160,17 @@ const SBT_ABI = [
   { type: "function", name: "tokenIdForSub", stateMutability: "view", inputs: [{ name: "subHash", type: "bytes32" }], outputs: [{ name: "", type: "uint256" }] },
 ];
 const TRANSFER_TOPIC = toEventSelector("Transfer(address,address,uint256)");
+// /kyc-attest: the reads it needs and the ONE write it can make. setKycVerified is
+// encoded only with the literal `true` (see attestTx), never from caller input.
+const SBT_KYC_ABI = [
+  { type: "function", name: "getMember", stateMutability: "view", inputs: [{ name: "tokenId", type: "uint256" }], outputs: [{ name: "", type: "tuple", components: [
+    { name: "subHash", type: "bytes32" }, { name: "termStart", type: "uint64" }, { name: "termEnd", type: "uint64" },
+    { name: "quarantined", type: "bool" }, { name: "revoked", type: "bool" }, { name: "kycVerified", type: "bool" },
+  ] }] },
+  { type: "function", name: "ownerOf", stateMutability: "view", inputs: [{ name: "tokenId", type: "uint256" }], outputs: [{ name: "", type: "address" }] },
+  { type: "function", name: "setKycVerified", stateMutability: "nonpayable", inputs: [{ name: "tokenId", type: "uint256" }, { name: "verified", type: "bool" }], outputs: [] },
+  { type: "event", name: "KycVerifiedSet", inputs: [{ name: "tokenId", type: "uint256", indexed: true }, { name: "verified", type: "bool", indexed: false }] },
+];
 
 // ---- persisted daily-cap + orderId idempotency ledger ------------------------
 function loadState() { try { if (existsSync(STATE_FILE)) return JSON.parse(readFileSync(STATE_FILE, "utf8")); } catch {} return { day: "", spentToday: "0", orders: {} }; }
@@ -142,25 +192,50 @@ class HttpError extends Error { constructor(code, msg) { super(msg); this.code =
 
 // ---- chain-generation pin (#70 P1-2) ----------------------------------------
 const GENESIS_RE = /^0x[0-9a-fA-F]{64}$/;
-// Neutral refusal log: a reason code and the order id only (never sub, key, token).
-function refuse(code, reason, orderId) {
+// Neutral refusal log: a reason code and a reference only (never sub, key, token).
+// `ctx` names the route and its reference: /grant logs the order id, /kyc-attest the
+// subject hash. A bare string is an order id (the /grant call sites).
+const logCtx = (ctx) => (typeof ctx === "object" && ctx ? ctx : { what: "grant", key: "order", ref: ctx });
+function refuse(code, reason, ctx) {
+  const c = logCtx(ctx);
   // eslint-disable-next-line no-console
-  console.warn(`grant refused: ${reason} order=${String(orderId).slice(0, 80)}`);
+  console.warn(`${c.what} refused: ${reason} ${c.key}=${String(c.ref).slice(0, 80)}`);
   return new HttpError(code, reason);
 }
 // The block-0 hash of THIS signer's RPC, lower-cased. Fetched on every call (no
 // cache): the RPC behind a fixed URL can move to a new generation, as rpc.citrate.ai
 // did at the r1006 cutover.
-async function ownGenesis(orderId) {
+async function ownGenesis(ctx) {
   let hash;
-  try { hash = (await publicClient.getBlock({ blockNumber: 0n })).hash; } catch { throw refuse(503, "genesis_lookup_failed", orderId); }
-  if (typeof hash !== "string" || !GENESIS_RE.test(hash)) throw refuse(503, "genesis_lookup_failed", orderId);
+  try { hash = (await publicClient.getBlock({ blockNumber: 0n })).hash; } catch { throw refuse(503, "genesis_lookup_failed", ctx); }
+  if (typeof hash !== "string" || !GENESIS_RE.test(hash)) throw refuse(503, "genesis_lookup_failed", ctx);
   return hash.toLowerCase();
 }
-async function requireGenesis(expected, orderId) {
-  const own = await ownGenesis(orderId);
-  if (own !== expected) throw refuse(412, "genesis_mismatch", orderId);
+async function requireGenesis(expected, ctx) {
+  const own = await ownGenesis(ctx);
+  if (own !== expected) throw refuse(412, "genesis_mismatch", ctx);
   return own;
+}
+// Pinned broadcast helpers, shared by /grant and /kyc-attest. Every broadcast re-checks
+// the generation first, and re-checks it after the receipt. The pre-send check and the
+// broadcast are separate RPC calls, and a 40204 tx is valid on either generation, so a
+// flip in between would land the tx on the wrong chain. That cannot be undone here:
+// raise an ALARM for the operator and fail the request (502), so nothing is recorded
+// done and the caller keeps its may-have-landed marker.
+function pinnedSender(expected, ctx) {
+  const c = logCtx(ctx);
+  const send = async (tx) => { await requireGenesis(expected, ctx); return walletClient.sendTransaction(tx); };
+  const receipt = async (hash) => {
+    const rcpt = await publicClient.waitForTransactionReceipt({ hash });
+    const own = await ownGenesis(ctx);
+    if (own !== expected) {
+      // eslint-disable-next-line no-console
+      console.error(`ALARM genesis_changed_after_broadcast ${c.key}=${String(c.ref).slice(0, 80)} tx=${hash}`);
+      throw new HttpError(502, "genesis_changed_after_broadcast");
+    }
+    return rcpt;
+  };
+  return { send, receipt };
 }
 
 async function handleGrant(body) {
@@ -191,23 +266,8 @@ async function handleGrant(body) {
   if (prior?.done) return prior.result;
   if (prior?.inflight) throw new HttpError(409, "orderId in-flight");
   state.orders[key] = { inflight: true }; saveState(state);
-  // Every broadcast re-checks the generation first.
-  const send = async (tx) => { await requireGenesis(expected, orderId); return walletClient.sendTransaction(tx); };
-  // ...and re-checks it after the receipt. The pre-send check and the broadcast are
-  // separate RPC calls, and a 40204 tx is valid on either generation, so a flip in
-  // between would land the tx on the wrong chain. That cannot be undone here: raise an
-  // ALARM for the operator and fail the request (502), so the order is not recorded
-  // done and core-membership keeps its may-have-landed marker.
-  const receipt = async (hash) => {
-    const rcpt = await publicClient.waitForTransactionReceipt({ hash });
-    const own = await ownGenesis(orderId);
-    if (own !== expected) {
-      // eslint-disable-next-line no-console
-      console.error(`ALARM genesis_changed_after_broadcast order=${String(orderId).slice(0, 80)} tx=${hash}`);
-      throw new HttpError(502, "genesis_changed_after_broadcast");
-    }
-    return rcpt;
-  };
+  // Every broadcast re-checks the generation before sending and after the receipt.
+  const { send, receipt } = pinnedSender(expected, orderId);
 
   try {
     const m = getAddress(member);
@@ -285,6 +345,135 @@ async function handleGrant(body) {
   }
 }
 
+// ---- POST /kyc-attest: scoped KYC attestation ---------------------------------
+// After a re-roll the SBTs are re-minted with kycVerified = false, and only the SBT
+// owner (this key) can set it. This route can do exactly one thing: call
+// CitrateMemberSBT.setKycVerified(tokenId, true) on the pinned SBT, for the token
+// bound to keccak256(sub) and owned by `member`, and only when identity's STORED record
+// for `sub` says verified right now. The caller supplies a subject and a wallet; it
+// never supplies a verdict, a token id, a function, a value or calldata.
+const KYC_BODY_KEYS = new Set(["member", "sub", "chainId", "contracts", "expectedGenesis"]);
+const kycInflight = new Set(); // subHash; single process, so in-memory is the lock
+function kycAudit(rec, durable) {
+  const line = JSON.stringify({ ts: new Date().toISOString(), event: "kyc_attest", ...rec });
+  // eslint-disable-next-line no-console
+  console.log(`kyc-attest audit ${line}`);
+  mkdirSync(dirname(KYC_AUDIT_FILE), { recursive: true });
+  const fd = openSync(KYC_AUDIT_FILE, "a", 0o600);
+  try { writeSync(fd, line + "\n"); if (durable) fsyncSync(fd); } finally { closeSync(fd); }
+}
+function kycAuditBestEffort(rec) {
+  // eslint-disable-next-line no-console
+  try { kycAudit(rec, false); } catch (e) { console.error(`kyc-attest audit write failed: ${e?.code ?? "error"}`); }
+}
+function kycCapToday() {
+  const d = utcDay();
+  if (!state.kycAttest || state.kycAttest.day !== d) state.kycAttest = { day: d, count: 0 };
+  return state.kycAttest;
+}
+// The stored record, read by the signer itself. Anything but a 200 that names this
+// subject with kyc_status "verified" refuses: not-verified is 403, unconfirmable 503.
+async function requireStoredKycVerified(sub) {
+  let res, j;
+  try {
+    res = await fetch(`${KYC_STATUS.base}/kyc/status?sub=${encodeURIComponent(sub)}`, {
+      headers: { authorization: `Bearer ${KYC_STATUS.secret}`, accept: "application/json" },
+      redirect: "error", signal: AbortSignal.timeout(KYC_STATUS_TIMEOUT_MS),
+    });
+    if (res.status !== 200) throw new Error(`status ${res.status}`);
+    j = await res.json();
+  } catch { throw new HttpError(503, "kyc_record_lookup_failed"); }
+  if (!j || typeof j !== "object" || j.sub !== sub || typeof j.kyc_status !== "string") throw new HttpError(503, "kyc_record_lookup_failed");
+  if (j.kyc_status !== "verified") throw new HttpError(403, "kyc_record_not_verified");
+}
+// The only transaction this route builds. Arguments: a token id read from the SBT, and
+// the literal `true`.
+const attestTx = (tokenId) => ({ to: SBT, value: 0n, data: encodeFunctionData({ abi: SBT_KYC_ABI, functionName: "setKycVerified", args: [tokenId, true] }) });
+
+async function handleKycAttest(body) {
+  const { member, sub, chainId, contracts, expectedGenesis } = body && typeof body === "object" ? body : {};
+  const subOk = typeof sub === "string" && sub.length > 0 && sub.length <= 256;
+  const subHash = subOk ? keccak256(toHex(sub)) : null;
+  const ctx = { what: "kyc-attest", key: "subHash", ref: subHash };
+  // Every request that passed auth leaves one result record (refusals included).
+  const audit = { subHash, tokenId: null, genesis: null };
+  try {
+    if (!KYC_STATUS.enabled) throw new HttpError(503, "kyc_attest_unconfigured");
+    // ---- validation (422), strict shape ----
+    if (!body || typeof body !== "object" || Array.isArray(body)) throw new HttpError(422, "body must be an object");
+    for (const k of Object.keys(body)) if (!KYC_BODY_KEYS.has(k)) throw new HttpError(422, "unexpected_field");
+    if (!subOk) throw new HttpError(422, "sub required");
+    if (typeof member !== "string" || !isAddress(member, { strict: false })) throw new HttpError(422, "member must be an address");
+    if (Number(chainId) !== CHAIN_ID) throw new HttpError(422, `chainId must be ${CHAIN_ID}`);
+    if (!contracts || typeof contracts !== "object" || Object.keys(contracts).length !== 1 || typeof contracts.sbt !== "string" || !isAddress(contracts.sbt, { strict: false }) || getAddress(contracts.sbt) !== SBT) throw new HttpError(422, "contracts not on allowlist");
+    if (typeof expectedGenesis !== "string" || !GENESIS_RE.test(expectedGenesis)) throw refuse(422, "genesis_missing_or_malformed", ctx);
+    const expected = expectedGenesis.toLowerCase();
+    // ---- chain-generation pin, BEFORE any lookup or read ----
+    audit.genesis = await requireGenesis(expected, ctx);
+    if (kycInflight.has(subHash)) throw new HttpError(409, "kyc_attest_in_flight");
+    kycInflight.add(subHash);
+    try {
+      const result = await attestOne({ m: getAddress(member), sub, subHash, expected, ctx, audit });
+      kycAuditBestEffort({ phase: "result", outcome: result.status, ...audit, txHash: result.txHash });
+      return result;
+    } finally { kycInflight.delete(subHash); }
+  } catch (err) {
+    const e = err instanceof HttpError ? err : new HttpError(502, "chain_error");
+    kycAuditBestEffort({ phase: "result", outcome: "refused", reason: e.message, code: e.code, ...audit });
+    throw e;
+  }
+}
+
+async function attestOne({ m, sub, subHash, expected, ctx, audit }) {
+  // ---- the stored record, re-checked here (never the caller's claim) ----
+  await requireStoredKycVerified(sub);
+  // ---- the token bound to this subject, owned by this wallet, in good standing ----
+  const bound = await publicClient.readContract({ address: SBT, abi: SBT_ABI, functionName: "isSubBound", args: [subHash] });
+  if (!bound) throw new HttpError(422, "sub_not_bound");
+  const tokenId = await publicClient.readContract({ address: SBT, abi: SBT_ABI, functionName: "tokenIdForSub", args: [subHash] });
+  audit.tokenId = tokenId.toString();
+  const rec = await publicClient.readContract({ address: SBT, abi: SBT_KYC_ABI, functionName: "getMember", args: [tokenId] });
+  if (String(rec.subHash).toLowerCase() !== subHash.toLowerCase()) throw new HttpError(502, "sbt_record_inconsistent");
+  if (rec.revoked) throw new HttpError(422, "member_revoked");
+  if (rec.quarantined) throw new HttpError(422, "member_quarantined");
+  const owner = await publicClient.readContract({ address: SBT, abi: SBT_KYC_ABI, functionName: "ownerOf", args: [tokenId] });
+  if (getAddress(owner) !== m) throw new HttpError(422, "member_mismatch");
+
+  if (rec.kycVerified) {
+    // Idempotent: already set, nothing to send. Re-check the generation before
+    // answering, since the reads above may have come from another one.
+    await requireGenesis(expected, ctx);
+    return { status: "already_attested", txHash: null, tokenId: audit.tokenId, subHash, genesis: audit.genesis };
+  }
+
+  // ---- own daily cap (count), charged before the broadcast, persisted ----
+  rollDay();
+  const cap = kycCapToday();
+  if (cap.count + 1 > KYC_ATTEST_DAILY_CAP) throw new HttpError(429, "kyc_attest_daily_cap");
+  cap.count += 1; saveState(state);
+
+  // ---- durable intent record BEFORE the broadcast; no record, no tx ----
+  try { kycAudit({ phase: "intent", ...audit }, true); } catch { throw new HttpError(500, "audit_unavailable"); }
+
+  const { send, receipt } = pinnedSender(expected, ctx);
+  const hash = await send(attestTx(tokenId));
+  audit.txHash = hash;
+  const rcpt = await receipt(hash);
+  if (rcpt.status !== "success") throw new HttpError(502, "set_kyc_reverted");
+  // The receipt must carry KycVerifiedSet(tokenId, true) from the pinned SBT.
+  const ok = rcpt.logs.some((l) => {
+    if (getAddress(l.address) !== SBT) return false;
+    try {
+      const ev = decodeEventLog({ abi: SBT_KYC_ABI, data: l.data, topics: l.topics });
+      return ev.eventName === "KycVerifiedSet" && ev.args.tokenId === tokenId && ev.args.verified === true;
+    } catch { return false; }
+  });
+  if (!ok) throw new HttpError(502, "kyc_event_missing");
+  await requireGenesis(expected, ctx);
+  delete audit.txHash;
+  return { status: "attested", txHash: hash, tokenId: audit.tokenId, subHash, genesis: audit.genesis };
+}
+
 const server = createServer(async (req, res) => {
   try {
     if (req.method === "GET" && req.url === "/health") {
@@ -297,12 +486,20 @@ const server = createServer(async (req, res) => {
       // Bond-clone model: idempotency for the grant leg is the durable on-chain
       // BondExists check (bondOf(member) has code), so there is no weaker fallback
       // mode to surface — the SBT (isSubBound) and bond (code) guards are both durable.
-      model: "bond-clone" });
+      model: "bond-clone",
+      // Scoped KYC attestation: enabled iff identity's /kyc/status is configured.
+      kycAttest: { enabled: KYC_STATUS.enabled, dailyCap: KYC_ATTEST_DAILY_CAP, attestedToday: kycCapToday().count } });
     }
     if (req.method === "POST" && req.url === "/grant") {
       if (!authorized(req.headers["authorization"])) return json(res, 401, { error: "unauthorized" });
       let body; try { body = JSON.parse((await readBody(req)) || "{}"); } catch { return json(res, 422, { error: "invalid json" }); }
       const result = await handleGrant(body);
+      return json(res, 200, result);
+    }
+    if (req.method === "POST" && req.url === "/kyc-attest") {
+      if (!authorized(req.headers["authorization"])) return json(res, 401, { error: "unauthorized" });
+      let body; try { body = JSON.parse((await readBody(req)) || "{}"); } catch { return json(res, 422, { error: "invalid json" }); }
+      const result = await handleKycAttest(body);
       return json(res, 200, result);
     }
     return json(res, 404, { error: "not found" });
@@ -315,5 +512,5 @@ const server = createServer(async (req, res) => {
 // (127.0.0.1:8790:8790) + Caddy TLS + bearer auth.
 server.listen(PORT, "0.0.0.0", () => {
   // eslint-disable-next-line no-console
-  console.log(`citrate-treasury-signer on :${PORT} signer=${account.address} vault=${VAULT} sbt=${SBT} grantWei=${GRANT_WEI} dailyCap=${DAILY_CAP} model=bond-clone`);
+  console.log(`citrate-treasury-signer on :${PORT} signer=${account.address} vault=${VAULT} sbt=${SBT} grantWei=${GRANT_WEI} dailyCap=${DAILY_CAP} model=bond-clone kycAttest=${KYC_STATUS.enabled ? `on cap=${KYC_ATTEST_DAILY_CAP}` : `off (${KYC_STATUS.why})`}`);
 });
