@@ -1,0 +1,8 @@
+# gitleaks fingerprints for test-only literals (commit:file:rule:line). Keep each entry
+# narrow: one commit, one file, one line. Never add a real credential here.
+#
+# test/kyc-status-secrets.test.ts: the fixed strings 'same-secret-0123456789' and
+# 'membership-secret-01234' are fake /kyc/status test secrets (they only exercise
+# the "status secret equals webhook secret" refusal). They authorize nothing anywhere.
+e7432f12f5db07f2291a247d121dfc7b68282a1e:test/kyc-status-secrets.test.ts:generic-api-key:63
+e7432f12f5db07f2291a247d121dfc7b68282a1e:test/kyc-status-secrets.test.ts:generic-api-key:70
