@@ -466,11 +466,57 @@ export function mountKycWebhookRoute(
 /** Options for {@link mountKycStatusRoute}. */
 export interface KycStatusRouteOptions {
   /**
-   * Shared secret a service caller (a relying-party owner with no applicant
-   * token) must present to re-check a subject's KYC. Defaults to
-   * `KYC_STATUS_SECRET`, then `KYC_WEBHOOK_SECRET`. Unset → fail closed.
+   * One status secret (a caller named `default`). Defaults to `KYC_STATUS_SECRET`.
+   * There is NO fallback to `KYC_WEBHOOK_SECRET`: that secret authorizes
+   * `POST /kyc/_set`, which writes records, and a status reader must not hold it.
    */
   statusSecret?: string;
+  /**
+   * Per-caller secrets, `name:secret,name:secret`. Defaults to `KYC_STATUS_SECRETS`.
+   * Each caller (core-membership, the treasury signer, …) holds its own secret, so one
+   * can be revoked by dropping its entry without rotating the others.
+   */
+  statusSecrets?: string;
+  /** The webhook secret to keep apart from. Defaults to `KYC_WEBHOOK_SECRET`. */
+  webhookSecret?: string;
+}
+
+const STATUS_CALLER_RE = /^[a-z0-9][a-z0-9_-]{0,31}$/;
+const MIN_LISTED_SECRET = 16;
+
+/**
+ * Resolve the accepted status secrets. `unconfigured` when there are none; on any
+ * malformed entry, a duplicate name or secret, or a secret equal to the webhook
+ * secret, `misconfigured` (the whole endpoint is off, never half-applied).
+ */
+export function resolveKycStatusSecrets(options: KycStatusRouteOptions = {}):
+  | { ok: true; secrets: { name: string; secret: string }[] }
+  | { ok: false; error: 'kyc_status_unconfigured' | 'kyc_status_misconfigured'; reason: string } {
+  const single = (options.statusSecret ?? process.env.KYC_STATUS_SECRET ?? '').trim();
+  const list = (options.statusSecrets ?? process.env.KYC_STATUS_SECRETS ?? '').trim();
+  const webhook = (options.webhookSecret ?? process.env.KYC_WEBHOOK_SECRET ?? '').trim();
+  const out: { name: string; secret: string }[] = [];
+  const bad = (reason: string) => ({ ok: false as const, error: 'kyc_status_misconfigured' as const, reason });
+  if (list) {
+    for (const raw of list.split(',')) {
+      const entry = raw.trim();
+      const i = entry.indexOf(':');
+      if (i <= 0) return bad('KYC_STATUS_SECRETS entries must be name:secret');
+      const name = entry.slice(0, i).trim();
+      const secret = entry.slice(i + 1).trim();
+      if (!STATUS_CALLER_RE.test(name)) return bad('KYC_STATUS_SECRETS has an invalid caller name');
+      if (secret.length < MIN_LISTED_SECRET) return bad(`KYC_STATUS_SECRETS secrets must be at least ${MIN_LISTED_SECRET} characters`);
+      out.push({ name, secret });
+    }
+  }
+  if (single) out.push({ name: 'default', secret: single });
+  if (out.length === 0) {
+    return { ok: false, error: 'kyc_status_unconfigured', reason: 'KYC_STATUS_SECRET / KYC_STATUS_SECRETS unset; endpoint disabled' };
+  }
+  if (new Set(out.map((e) => e.name)).size !== out.length) return bad('KYC_STATUS_SECRETS has a duplicate caller name');
+  if (new Set(out.map((e) => e.secret)).size !== out.length) return bad('two status callers share a secret');
+  if (webhook && out.some((e) => e.secret === webhook)) return bad('a status secret equals KYC_WEBHOOK_SECRET');
+  return { ok: true, secrets: out };
 }
 
 /** Compute the live, vendor-neutral status string for a stored claim. */
@@ -483,30 +529,33 @@ function liveStatus(claim: KycClaim | undefined): KycStatus | 'none' | 'expired'
 /**
  * Mount `GET /kyc/status?sub=<sub>` — a service-guarded, read-only re-check so a
  * room/RP owner (who holds NO applicant token) can confirm a subject's KYC at
- * grant time (C.3 of the dataroom hand-off). Shared-secret-gated (constant-time),
+ * grant time (C.3 of the dataroom hand-off). Gated by dedicated status secrets
+ * (`KYC_STATUS_SECRET` and/or per-caller `KYC_STATUS_SECRETS`, never the webhook
+ * secret; see {@link resolveKycStatusSecrets}), constant-time,
  * fail-closed when unconfigured. Returns ONLY the closed claim shape — no PII.
  */
 export function mountKycStatusRoute(
   provider: Provider,
   options: KycStatusRouteOptions = {},
 ): void {
-  const expectedSecret =
-    options.statusSecret ??
-    process.env.KYC_STATUS_SECRET ??
-    process.env.KYC_WEBHOOK_SECRET;
+  const resolved = resolveKycStatusSecrets(options);
+  if (!resolved.ok) {
+    // eslint-disable-next-line no-console
+    console.warn(`[kyc] /kyc/status disabled: ${resolved.error}`);
+  }
 
   provider.use(async (ctx, next) => {
     if (ctx.method !== 'GET' || ctx.path !== '/kyc/status') return next();
 
-    if (!expectedSecret) {
-      sendJson(ctx.res, 503, {
-        error: 'kyc_status_unconfigured',
-        reason: 'KYC_STATUS_SECRET / KYC_WEBHOOK_SECRET unset; endpoint disabled',
-      });
+    if (!resolved.ok) {
+      sendJson(ctx.res, 503, { error: resolved.error, reason: resolved.reason });
       return;
     }
     const presented = presentedSecret(ctx.req);
-    if (!presented || !secretMatches(presented, expectedSecret)) {
+    // Check every caller's secret (no early exit), so timing does not tell which matched.
+    let ok = false;
+    if (presented) for (const e of resolved.secrets) if (secretMatches(presented, e.secret)) ok = true;
+    if (!ok) {
       sendJson(ctx.res, 401, { error: 'unauthorized', reason: 'missing or invalid secret' });
       return;
     }

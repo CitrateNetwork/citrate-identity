@@ -95,6 +95,7 @@ again.
 | `POSTGRES_USER`/`POSTGRES_PASSWORD`/`POSTGRES_DB` | **yes** | compose builds `DATABASE_URL` from these. (Or set `DATABASE_URL` directly for an external DB.) |
 | `REDIS_PASSWORD` | **yes** | compose builds `REDIS_URL` from it. (Or set `REDIS_URL` directly.) |
 | `KYC_WEBHOOK_SECRET` | **yes**\* | shared secret for `POST /kyc/_set`,`/kyc/_revoke`; unset = those endpoints disabled |
+| `KYC_STATUS_SECRETS` / `KYC_STATUS_SECRET` | for `GET /kyc/status` | per-caller status secrets `name:secret,…` (one per relying service, e.g. `membership:…,treasury-signer:…`) and/or one `KYC_STATUS_SECRET`. **No fallback to `KYC_WEBHOOK_SECRET`**: unset = `/kyc/status` disabled (503), and a status secret equal to the webhook secret also disables it |
 | `CITRATE_RPC_URL` | optional | chain-40204 RPC; enables EIP-1271 (Safe/contract-wallet) logins. EOA + WalletConnect work without it |
 | `WALLETCONNECT_PROJECT_ID` | optional | enables the login-page QR/mobile connector (not fail-closed) |
 

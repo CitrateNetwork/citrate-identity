@@ -63,7 +63,7 @@
  *     200  { status:"attested"|"already_attested", txHash|null, tokenId, subHash, genesis }
  */
 import { createServer } from "node:http";
-import { readFileSync, writeFileSync, existsSync, mkdirSync, openSync, writeSync, fsyncSync, closeSync } from "node:fs";
+import { readFileSync, existsSync, mkdirSync, openSync, writeSync, fsyncSync, closeSync, renameSync, unlinkSync } from "node:fs";
 import { dirname, join } from "node:path";
 import {
   createWalletClient, createPublicClient, http, defineChain,
@@ -173,9 +173,32 @@ const SBT_KYC_ABI = [
 ];
 
 // ---- persisted daily-cap + orderId idempotency ledger ------------------------
-function loadState() { try { if (existsSync(STATE_FILE)) return JSON.parse(readFileSync(STATE_FILE, "utf8")); } catch {} return { day: "", spentToday: "0", orders: {} }; }
-function saveState(s) { mkdirSync(dirname(STATE_FILE), { recursive: true }); writeFileSync(STATE_FILE, JSON.stringify(s), "utf8"); }
-let state = loadState();
+// The state file holds the caps and the idempotency ledger. A missing file is a fresh
+// signer; an unreadable one REFUSES start-up (silently resetting it would reopen the
+// caps and forget completed orders). Writes are atomic: temp file, fsync, rename.
+function loadState() {
+  if (!existsSync(STATE_FILE)) return { day: "", spentToday: "0", orders: {} };
+  let s;
+  try { s = JSON.parse(readFileSync(STATE_FILE, "utf8")); } catch (e) { throw new Error(`state file unreadable (${e?.name ?? "error"})`); }
+  if (!s || typeof s !== "object" || Array.isArray(s) || typeof s.orders !== "object" || s.orders === null || typeof s.spentToday !== "string" || !/^\d+$/.test(s.spentToday)) {
+    throw new Error("state file unreadable (unexpected shape)");
+  }
+  return s;
+}
+function saveState(s) {
+  mkdirSync(dirname(STATE_FILE), { recursive: true });
+  const tmp = `${STATE_FILE}.tmp-${process.pid}`;
+  const fd = openSync(tmp, "w", 0o600);
+  try { writeSync(fd, JSON.stringify(s)); fsyncSync(fd); } finally { closeSync(fd); }
+  try { renameSync(tmp, STATE_FILE); } catch (e) { try { unlinkSync(tmp); } catch {} throw e; }
+  try { const dfd = openSync(dirname(STATE_FILE), "r"); try { fsyncSync(dfd); } finally { closeSync(dfd); } } catch {} // best effort
+}
+let state;
+try { state = loadState(); } catch (e) {
+  // eslint-disable-next-line no-console
+  console.error(`citrate-treasury-signer: ${e.message}: ${STATE_FILE}. Refusing to start; restore it or move it aside deliberately.`);
+  process.exit(1);
+}
 const utcDay = () => new Date().toISOString().slice(0, 10);
 function rollDay() { const d = utcDay(); if (state.day !== d) { state.day = d; state.spentToday = "0"; saveState(state); } }
 // Charge `wei` against the per-UTC-day cap, or throw 403. Callers roll the day first.
@@ -183,6 +206,26 @@ function chargeDailyCap(wei) {
   const spent = BigInt(state.spentToday);
   if (spent + wei > DAILY_CAP) throw new HttpError(403, `daily cap exceeded: ${spent + wei} > ${DAILY_CAP}`);
   state.spentToday = String(spent + wei); saveState(state);
+  return state.day;
+}
+// Give `wei` back when the send it was charged for never reached the chain (see
+// sendAndConfirm's `broadcast` flag). Only within the same UTC day it was charged.
+function refundDailyCap(wei, day) {
+  if (state.day !== day) return;
+  const spent = BigInt(state.spentToday);
+  state.spentToday = String(spent > wei ? spent - wei : 0n); saveState(state);
+}
+// A charged leg: refund the cap iff the tx was certainly never broadcast.
+async function chargedSend(wei, run) {
+  const day = chargeDailyCap(wei);
+  try { return await run(); } catch (e) { if (e?.broadcast === false) refundDailyCap(wei, day); throw e; }
+}
+// chainId: the integer, or its exact decimal string. Nothing else ("0x9d0c", [40204],
+// " 40204", 40204.5 and true all used to pass Number()).
+function chainIdOk(v) {
+  if (typeof v === "number") return Number.isSafeInteger(v) && v === CHAIN_ID;
+  if (typeof v === "string") return /^[1-9][0-9]{0,15}$/.test(v) && Number(v) === CHAIN_ID;
+  return false;
 }
 
 function json(res, code, obj) { const b = JSON.stringify(obj); res.writeHead(code, { "content-type": "application/json", "content-length": Buffer.byteLength(b) }); res.end(b); }
@@ -216,26 +259,68 @@ async function requireGenesis(expected, ctx) {
   if (own !== expected) throw refuse(412, "genesis_mismatch", ctx);
   return own;
 }
-// Pinned broadcast helpers, shared by /grant and /kyc-attest. Every broadcast re-checks
-// the generation first, and re-checks it after the receipt. The pre-send check and the
+// Every send from the signing key goes through ONE process-wide queue. /grant legs and
+// /kyc-attest share the key; without the queue, two requests read the same pending
+// nonce and one of the sends is lost (or replaces the other). A send holds the queue
+// from its pre-send generation check until its receipt (or the receipt timeout), so the
+// next send always reads a nonce that already counts it.
+let sendQueue = Promise.resolve();
+function withSendLock(fn) {
+  const run = sendQueue.then(fn, fn);
+  sendQueue = run.then(() => {}, () => {});
+  return run;
+}
+const RECEIPT_TIMEOUT_MS = Math.max(1000, Number(process.env.TREASURY_RECEIPT_TIMEOUT_MS ?? "120000") || 120000);
+// Did a failed sendTransaction certainly not reach the node? An explicit RPC rejection
+// or a failure while preparing the tx: yes. A transport error or timeout: unknown, so
+// treated as broadcast (no cap refund, may-have-landed).
+function certainlyNotBroadcast(e) {
+  let ambiguous = false;
+  const visit = (x) => { if (x && (x.name === "HttpRequestError" || x.name === "TimeoutError" || x.name === "SocketClosedError")) ambiguous = true; };
+  if (typeof e?.walk === "function") e.walk((x) => { visit(x); return false; }); else visit(e);
+  visit(e);
+  return !ambiguous;
+}
+const flagBroadcast = (e, broadcast) => { const err = e instanceof Error ? e : new Error(String(e)); err.broadcast = broadcast; return err; };
+
+// Pinned, serialized broadcast, shared by /grant and /kyc-attest. The generation is
+// re-checked before the send and after the receipt. The pre-send check and the
 // broadcast are separate RPC calls, and a 40204 tx is valid on either generation, so a
 // flip in between would land the tx on the wrong chain. That cannot be undone here:
 // raise an ALARM for the operator and fail the request (502), so nothing is recorded
-// done and the caller keeps its may-have-landed marker.
+// done and the caller keeps its may-have-landed marker. The receipt must be for OUR
+// hash: viem resolves with a replacement's receipt when a same-nonce tx replaced ours,
+// and that is a failure (ALARM tx_replaced), never a success.
+// Resolves { hash, rcpt }. A thrown error carries `broadcast`: false only when no tx
+// can have reached the chain (callers refund their cap on that alone).
 function pinnedSender(expected, ctx) {
   const c = logCtx(ctx);
-  const send = async (tx) => { await requireGenesis(expected, ctx); return walletClient.sendTransaction(tx); };
-  const receipt = async (hash) => {
-    const rcpt = await publicClient.waitForTransactionReceipt({ hash });
-    const own = await ownGenesis(ctx);
-    if (own !== expected) {
-      // eslint-disable-next-line no-console
-      console.error(`ALARM genesis_changed_after_broadcast ${c.key}=${String(c.ref).slice(0, 80)} tx=${hash}`);
-      throw new HttpError(502, "genesis_changed_after_broadcast");
-    }
-    return rcpt;
-  };
-  return { send, receipt };
+  const ref = () => `${c.key}=${String(c.ref).slice(0, 80)}`;
+  const sendAndConfirm = (tx) => withSendLock(async () => {
+    let hash;
+    try {
+      await requireGenesis(expected, ctx);
+    } catch (e) { throw flagBroadcast(e, false); }
+    try {
+      hash = await walletClient.sendTransaction(tx);
+    } catch (e) { throw flagBroadcast(e, !certainlyNotBroadcast(e)); }
+    try {
+      const rcpt = await publicClient.waitForTransactionReceipt({ hash, timeout: RECEIPT_TIMEOUT_MS });
+      if (String(rcpt.transactionHash).toLowerCase() !== String(hash).toLowerCase()) {
+        // eslint-disable-next-line no-console
+        console.error(`ALARM tx_replaced ${ref()} tx=${hash} replacement=${rcpt.transactionHash}`);
+        throw new HttpError(502, "tx_replaced");
+      }
+      const own = await ownGenesis(ctx);
+      if (own !== expected) {
+        // eslint-disable-next-line no-console
+        console.error(`ALARM genesis_changed_after_broadcast ${ref()} tx=${hash}`);
+        throw new HttpError(502, "genesis_changed_after_broadcast");
+      }
+      return { hash, rcpt };
+    } catch (e) { const err = flagBroadcast(e, true); err.txHash = hash; throw err; }
+  });
+  return { sendAndConfirm };
 }
 
 async function handleGrant(body) {
@@ -244,7 +329,7 @@ async function handleGrant(body) {
   if (!orderId || typeof orderId !== "string") throw new HttpError(422, "orderId required");
   if (!sub || typeof sub !== "string") throw new HttpError(422, "sub required");
   if (!isAddress(member, { strict: false })) throw new HttpError(422, "member must be an address");
-  if (Number(chainId) !== CHAIN_ID) throw new HttpError(422, `chainId must be ${CHAIN_ID}`);
+  if (!chainIdOk(chainId)) throw new HttpError(422, `chainId must be ${CHAIN_ID}`);
   const ts = BigInt(termStart ?? 0), te = BigInt(termEnd ?? 0);
   if (te <= ts) throw new HttpError(422, "termEnd must be > termStart");
   if (!contracts || getAddress(contracts.vault) !== VAULT || getAddress(contracts.sbt) !== SBT) throw new HttpError(422, "contracts not on allowlist");
@@ -267,7 +352,7 @@ async function handleGrant(body) {
   if (prior?.inflight) throw new HttpError(409, "orderId in-flight");
   state.orders[key] = { inflight: true }; saveState(state);
   // Every broadcast re-checks the generation before sending and after the receipt.
-  const { send, receipt } = pinnedSender(expected, orderId);
+  const { sendAndConfirm } = pinnedSender(expected, orderId);
 
   try {
     const m = getAddress(member);
@@ -279,8 +364,7 @@ async function handleGrant(body) {
     const bound = await publicClient.readContract({ address: SBT, abi: SBT_ABI, functionName: "isSubBound", args: [subHash] });
     if (!bound) {
       const data = encodeFunctionData({ abi: SBT_ABI, functionName: "mintMember", args: [m, subHash, ts, te] });
-      const hash = await send({ to: SBT, data });
-      const rcpt = await receipt(hash);
+      const { hash, rcpt } = await sendAndConfirm({ to: SBT, data });
       if (rcpt.status !== "success") throw new HttpError(502, `sbt.mintMember reverted in ${hash}`);
       sbtTxHash = hash;
       // real tokenId from the ERC-721 Transfer(from=0x0, to=member) log
@@ -305,10 +389,8 @@ async function handleGrant(body) {
     const bondExists = bondCode != null && bondCode !== ZERO_BYTECODE;
     if (!bondExists) {
       rollDay();
-      chargeDailyCap(amount);
       const data = encodeFunctionData({ abi: VAULT_ABI, functionName: "grant", args: [m, amount, memberTokenId] });
-      const hash = await send({ to: VAULT, data, value: amount });
-      const rcpt = await receipt(hash);
+      const { hash, rcpt } = await chargedSend(amount, () => sendAndConfirm({ to: VAULT, data, value: amount }));
       if (rcpt.status !== "success") throw new HttpError(502, `vault.grant reverted in ${hash}`);
       vaultTxHash = hash;
     }
@@ -321,15 +403,13 @@ async function handleGrant(body) {
     if (bal < GAS_HEADROOM) {
       rollDay();
       const topUp = GAS_HEADROOM - bal;   // top up only the shortfall
-      chargeDailyCap(topUp);
-      const hash = await send({ to: m, value: topUp });
-      const rcpt = await receipt(hash);
+      const { hash, rcpt } = await chargedSend(topUp, () => sendAndConfirm({ to: m, value: topUp }));
       if (rcpt.status !== "success") throw new HttpError(502, `gas top-up reverted in ${hash}`);
       fundTxHash = hash;
     }
 
     // Re-check the generation AFTER every grant-state read and BEFORE recording success.
-    // When every leg skips, no send()/receipt() check ran, and a skip decided by state
+    // When every leg skips, no sendAndConfirm() check ran, and a skip decided by state
     // read from another generation (where this member is already granted) would
     // otherwise be recorded as done under this generation's ledger key.
     await requireGenesis(expected, orderId);
@@ -404,7 +484,7 @@ async function handleKycAttest(body) {
     for (const k of Object.keys(body)) if (!KYC_BODY_KEYS.has(k)) throw new HttpError(422, "unexpected_field");
     if (!subOk) throw new HttpError(422, "sub required");
     if (typeof member !== "string" || !isAddress(member, { strict: false })) throw new HttpError(422, "member must be an address");
-    if (Number(chainId) !== CHAIN_ID) throw new HttpError(422, `chainId must be ${CHAIN_ID}`);
+    if (!chainIdOk(chainId)) throw new HttpError(422, `chainId must be ${CHAIN_ID}`);
     if (!contracts || typeof contracts !== "object" || Object.keys(contracts).length !== 1 || typeof contracts.sbt !== "string" || !isAddress(contracts.sbt, { strict: false }) || getAddress(contracts.sbt) !== SBT) throw new HttpError(422, "contracts not on allowlist");
     if (typeof expectedGenesis !== "string" || !GENESIS_RE.test(expectedGenesis)) throw refuse(422, "genesis_missing_or_malformed", ctx);
     const expected = expectedGenesis.toLowerCase();
@@ -451,14 +531,20 @@ async function attestOne({ m, sub, subHash, expected, ctx, audit }) {
   const cap = kycCapToday();
   if (cap.count + 1 > KYC_ATTEST_DAILY_CAP) throw new HttpError(429, "kyc_attest_daily_cap");
   cap.count += 1; saveState(state);
+  // Give the slot back only if no tx can have been sent (same UTC day).
+  const refund = () => { const c = state.kycAttest; if (c && c.day === cap.day && c.count > 0) { c.count -= 1; saveState(state); } };
 
   // ---- durable intent record BEFORE the broadcast; no record, no tx ----
-  try { kycAudit({ phase: "intent", ...audit }, true); } catch { throw new HttpError(500, "audit_unavailable"); }
+  try { kycAudit({ phase: "intent", ...audit }, true); } catch { refund(); throw new HttpError(500, "audit_unavailable"); }
 
-  const { send, receipt } = pinnedSender(expected, ctx);
-  const hash = await send(attestTx(tokenId));
+  const { sendAndConfirm } = pinnedSender(expected, ctx);
+  let hash, rcpt;
+  try { ({ hash, rcpt } = await sendAndConfirm(attestTx(tokenId))); } catch (e) {
+    if (e?.broadcast === false) refund();
+    if (e?.txHash) audit.txHash = e.txHash; // may have landed: keep the hash in the audit
+    throw e;
+  }
   audit.txHash = hash;
-  const rcpt = await receipt(hash);
   if (rcpt.status !== "success") throw new HttpError(502, "set_kyc_reverted");
   // The receipt must carry KycVerifiedSet(tokenId, true) from the pinned SBT.
   const ok = rcpt.logs.some((l) => {
@@ -505,7 +591,10 @@ const server = createServer(async (req, res) => {
     return json(res, 404, { error: "not found" });
   } catch (err) {
     if (err instanceof HttpError) return json(res, err.code, { error: err.message });
-    return json(res, 502, { error: String(err?.message ?? err) });
+    // Never hand back a raw RPC/viem message (it can carry call arguments and endpoints).
+    // eslint-disable-next-line no-console
+    console.error(`request failed: chain_error (${err?.name ?? "Error"})`);
+    return json(res, 502, { error: "chain_error" });
   }
 });
 // Bind 0.0.0.0 INSIDE the container; host isolation is the Docker port map

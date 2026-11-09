@@ -67,6 +67,10 @@ answers 502, and does not record the order done. Missing or malformed is 422, a 
 carries only a reason code and the order id. Block 0 is fetched per check, not cached.
 The 200 echoes `genesis`, and core-membership refuses a 200 without the matching echo.
 
+**State file.** The caps and ledger live in `TREASURY_STATE_FILE`, written atomically
+(temp file, fsync, rename). A missing file is a fresh signer. An unreadable one makes
+the signer **refuse to start** rather than reset its caps and forget completed orders.
+
 Idempotency is layered: a completed `orderId` replays its stored result **only within the
 same chain generation** (the ledger key is `<genesis>/<orderId>`, so a result recorded on
 an earlier generation is never handed back as a grant on this one); an
@@ -101,7 +105,17 @@ In order, the signer:
    The generation is re-checked before the broadcast and after the receipt (`ALARM` on a
    flip), and the receipt must carry `KycVerifiedSet(tokenId, true)` from the pinned SBT.
 
-The cap is charged before the broadcast, so a refusal after that point uses up a slot
+**One key, one queue.** `/grant`'s legs and `/kyc-attest` sign with the same key. Every
+send waits in one process-wide queue, which it holds from its pre-send generation check
+until its receipt, so two requests never read the same nonce. The receipt must be for
+the signer's own hash; when a same-nonce tx replaced it, the request fails with
+`ALARM tx_replaced` and 502 (never `granted` or `attested`), even if the replacement
+mined.
+
+**Caps and refunds.** The cap is charged before the broadcast and refunded only when the
+tx certainly never reached the chain (the pre-send generation check refused, or the RPC
+explicitly rejected it). A transport error or timeout during the send keeps the charge,
+since the tx may have landed. Otherwise a refusal after the charge uses up a slot
 without sending. That errs on the safe side, as `/grant` does.
 
 **Audit.** Each authorized request appends one JSON line to `KYC_ATTEST_AUDIT_FILE`
@@ -123,7 +137,8 @@ the wallet, a token or a secret. Error responses don't echo them either.
 | `TREASURY_DAILY_CAP_WEI` | per-UTC-day SALT ceiling (default 96k SALT = 3 grants) |
 | `PORT` | default 8790 (bound to 127.0.0.1; Caddy terminates TLS) |
 | `KYC_STATUS_URL` | OPTIONAL. Base URL of the identity authority whose `GET /kyc/status` the signer re-checks, e.g. the public issuer `https://auth.citrate.ai`. Must be https; plain http only to loopback or a single-label in-network host (a compose service name). Unset, or with no secret, `/kyc-attest` answers 503 and `/grant` is unaffected. |
-| `KYC_STATUS_SECRET` | OPTIONAL. The bearer identity's `/kyc/status` accepts: identity's `KYC_STATUS_SECRET` (or `KYC_WEBHOOK_SECRET` when that is unset). |
+| `KYC_STATUS_SECRET` | OPTIONAL. The signer's **own** status secret: the value of its entry in identity's `KYC_STATUS_SECRETS` (e.g. `treasury-signer:<secret>`), distinct from core-membership's. It must never be identity's `KYC_WEBHOOK_SECRET`, which also authorizes `POST /kyc/_set` (a record write); identity refuses to serve `/kyc/status` when the two match and no longer falls back to the webhook secret. |
+| `TREASURY_RECEIPT_TIMEOUT_MS` | how long one send waits for its receipt (default 120000). Sends are serialized, so this also bounds how long a stuck tx holds the queue. |
 | `KYC_ATTEST_DAILY_CAP` | attestations per UTC day (a count; default 20). An unparsable value is 0, which refuses all. Persisted in the state file. |
 | `KYC_STATUS_TIMEOUT_MS` | identity lookup timeout (default 10000) |
 | `KYC_ATTEST_AUDIT_FILE` | append-only audit JSONL (default: `kyc-attest-audit.jsonl` next to the state file) |

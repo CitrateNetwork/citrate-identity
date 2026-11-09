@@ -56,9 +56,12 @@ services:
       STUDIO_ORIGIN: ${STUDIO_ORIGIN:-}
       WALLETCONNECT_PROJECT_ID: ${WALLETCONNECT_PROJECT_ID:-}
       KYC_WEBHOOK_SECRET: ${KYC_WEBHOOK_SECRET}
-      # Optional dedicated secret for the server-side /kyc/status re-check; falls
-      # back to KYC_WEBHOOK_SECRET when unset (endpoint disabled if both unset).
+      # Dedicated secret for the server-side /kyc/status re-check. NO fallback to
+      # KYC_WEBHOOK_SECRET: with neither this nor KYC_STATUS_SECRETS set, the
+      # endpoint is disabled (503), and core-membership's grant re-check fails closed.
       KYC_STATUS_SECRET: ${KYC_STATUS_SECRET:-}
+      # Per-caller status secrets, "name:secret,name:secret" (see .env.production.example).
+      KYC_STATUS_SECRETS: ${KYC_STATUS_SECRETS:-}
       # Operator alert recipients when a KYC case parks in needs-review
       # (comma-separated). MUST be listed here: this service has an explicit
       # `environment:` map and NO env_file, so a var added only to .env never
