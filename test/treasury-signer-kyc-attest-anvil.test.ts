@@ -79,6 +79,13 @@ const members = {
   pending: { sub: "anvil-sub-pending", wallet: privateKeyToAccount(generatePrivateKey()).address },
   quarantined: { sub: "anvil-sub-q", wallet: privateKeyToAccount(generatePrivateKey()).address },
   revoked: { sub: "anvil-sub-r", wallet: privateKeyToAccount(generatePrivateKey()).address },
+  replaced: { sub: "anvil-sub-x", wallet: privateKeyToAccount(generatePrivateKey()).address },
+};
+const rpcCall = async (method: string, params: unknown[]) => {
+  const r = await fetch(rpcUrl, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }) });
+  const j = (await r.json()) as { result?: any; error?: { message: string } };
+  if (j.error) throw new Error(`${method}: ${j.error.message}`);
+  return j.result;
 };
 const tokenOf = async (sub: string) => pub.readContract({ address: sbt, abi: SBT_ABI, functionName: "tokenIdForSub", args: [keccak256(toHex(sub))] });
 const flagOf = async (sub: string) => pub.readContract({ address: sbt, abi: SBT_ABI, functionName: "isKycVerified", args: [await tokenOf(sub)] });
@@ -112,7 +119,7 @@ describe.skipIf(!HAVE_ANVIL)("POST /kyc-attest on anvil with the real CitrateMem
     for (const m of Object.values(members)) await ownerWrite("mintMember", [m.wallet, keccak256(toHex(m.sub)), 1n, 4_000_000_000n]);
     await ownerWrite("quarantine", [await tokenOf(members.quarantined.sub)]);
     await ownerWrite("revoke", [await tokenOf(members.revoked.sub)]);
-    for (const m of [members.a, members.b, members.quarantined, members.revoked]) kycStatus.set(m.sub, "verified");
+    for (const m of [members.a, members.b, members.quarantined, members.revoked, members.replaced]) kycStatus.set(m.sub, "verified");
     kycStatus.set(members.pending.sub, "pending");
 
     kycSrv = createServer((req, res) => {
@@ -215,5 +222,32 @@ describe.skipIf(!HAVE_ANVIL)("POST /kyc-attest on anvil with the real CitrateMem
     expect(await flagOf(members.b.sub)).toBe(true);
     const h = (await (await fetch(`${signerUrl}/health`)).json()) as { kycAttest: { attestedToday: number } };
     expect(h.kycAttest.attestedToday).toBe(2);
+  });
+
+  it("a signer tx replaced in the pool (same nonce) is reported as a failure, never as attested", async () => {
+    await rpcCall("evm_setAutomine", [false]);
+    try {
+      const pending = attest({ member: members.replaced.wallet, sub: members.replaced.sub });
+      let tx: { nonce: string; maxFeePerGas: string; maxPriorityFeePerGas: string } | undefined;
+      await waitFor(async () => {
+        const pool = await rpcCall("txpool_content", []);
+        const mine = Object.entries(pool.pending ?? {}).find(([from]) => from.toLowerCase() === owner.address.toLowerCase());
+        tx = mine ? (Object.values(mine[1] as object)[0] as typeof tx) : undefined;
+        return !!tx;
+      }, "signer tx in the pool");
+      await new Promise((r) => setTimeout(r, 1500)); // let the signer start watching it
+      // Same nonce, higher fee, a 0-value self-send: the pool replaces the signer's tx.
+      await wallet.sendTransaction({
+        account: owner, chain, to: owner.address, value: 0n, nonce: Number(BigInt(tx!.nonce)),
+        maxFeePerGas: BigInt(tx!.maxFeePerGas) * 3n, maxPriorityFeePerGas: BigInt(tx!.maxPriorityFeePerGas) * 3n + 1n,
+      });
+      await rpcCall("evm_mine", []);
+      const r = await pending;
+      expect(r.status).toBe(502);
+      expect(r.json.error).toBe("tx_replaced");
+      expect(await flagOf(members.replaced.sub)).toBe(false);
+    } finally {
+      await rpcCall("evm_setAutomine", [true]);
+    }
   });
 });

@@ -24,7 +24,7 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { spawn, type ChildProcess } from "node:child_process";
 import { createServer, type Server } from "node:http";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -77,39 +77,90 @@ interface ChainDouble {
   acceptBroadcasts: boolean;
   receiptStatus: "0x1" | "0x0";
   emitEvent: boolean;
+  /** Delay (ms) before a broadcast is accepted and counted in the pending nonce. */
+  sendDelayMs: number;
+  /** The next broadcast is replaced (same sender + nonce) by REPLACEMENT_HASH, which mines instead. */
+  replaceNext: boolean;
+  /** Bond clone code for /grant's leg 2 ("0x" = no clone yet). */
+  bondCode: string;
+  /** vault.bondOf reverts (an unexpected chain error on /grant). */
+  vaultRevert: boolean;
   calls: string[];
   ethCalls: string[]; // selectors of eth_call reads
-  raw: Hex[]; // broadcast raw transactions
+  raw: Hex[]; // broadcast raw transactions (accepted)
+  nonce: number; // pending nonce the double reports
+  receipts: Map<string, { status: "0x1" | "0x0"; logs: unknown[] }>;
+  pending: Map<string, Hex>; // replaced (never mined) hash -> raw
   genesisCalls: number;
 }
-const chain: ChainDouble = {
-  genesis: () => R1007, members: new Map(), acceptBroadcasts: true, receiptStatus: "0x1", emitEvent: true,
-  calls: [], ethCalls: [], raw: [], genesisCalls: 0,
-};
-const TX_HASH = "0x" + "cd".repeat(32);
+const chain = {} as ChainDouble;
+const SENDER = "0x" + "99".repeat(20); // the double reports one sender for every tx
+const REPLACEMENT_HASH = "0x" + "ee".repeat(32);
 function resetChain() {
-  chain.genesis = () => R1007; chain.acceptBroadcasts = true; chain.receiptStatus = "0x1"; chain.emitEvent = true;
-  chain.calls = []; chain.ethCalls = []; chain.raw = []; chain.genesisCalls = 0;
+  Object.assign(chain, {
+    genesis: () => R1007, acceptBroadcasts: true, receiptStatus: "0x1", emitEvent: true, sendDelayMs: 0, replaceNext: false,
+    bondCode: "0x6080", vaultRevert: false, calls: [], ethCalls: [], raw: [], nonce: 0, receipts: new Map(), pending: new Map(), genesisCalls: 0,
+  });
   chain.members = new Map([
     [subHash(SUB).toLowerCase(), { tokenId: 7n, owner: MEMBER, quarantined: false, revoked: false, kycVerified: false }],
     [subHash(SUB_B).toLowerCase(), { tokenId: 8n, owner: MEMBER_B, quarantined: false, revoked: false, kycVerified: false }],
   ]);
 }
 resetChain();
+const lastHash = () => keccak256(chain.raw[chain.raw.length - 1]!);
+const nonces = () => chain.raw.map((r) => parseTransaction(r).nonce);
 
-function block(hash: string | null, number: string) {
+function block(hash: string | null, number: string, transactions: unknown[] = []) {
   return {
     hash, number, parentHash: "0x" + "00".repeat(32), nonce: "0x0000000000000000", sha3Uncles: "0x" + "00".repeat(32),
     logsBloom: "0x" + "00".repeat(256), transactionsRoot: "0x" + "00".repeat(32), stateRoot: "0x" + "00".repeat(32),
     receiptsRoot: "0x" + "00".repeat(32), miner: "0x" + "00".repeat(20), difficulty: "0x0", totalDifficulty: "0x0",
-    extraData: "0x", size: "0x0", gasLimit: "0x1c9c380", gasUsed: "0x0", timestamp: "0x1", transactions: [], uncles: [],
+    extraData: "0x", size: "0x0", gasLimit: "0x1c9c380", gasUsed: "0x0", timestamp: "0x1", transactions, uncles: [],
     baseFeePerGas: "0x1", mixHash: "0x" + "00".repeat(32),
+  };
+}
+function rpcTx(hash: string, raw: Hex, blockNumber: string | null, over: Record<string, unknown> = {}) {
+  const t = parseTransaction(raw);
+  return {
+    hash, from: SENDER, to: t.to ?? null, nonce: toHex(t.nonce ?? 0), value: toHex(t.value ?? 0n), input: t.data ?? "0x",
+    gas: toHex(t.gas ?? 21000n), maxFeePerGas: toHex(t.maxFeePerGas ?? 1n), maxPriorityFeePerGas: toHex(t.maxPriorityFeePerGas ?? 1n),
+    type: "0x2", chainId: "0x9d0c", accessList: [], v: "0x0", r: "0x1", s: "0x1", yParity: "0x0",
+    blockHash: blockNumber ? "0x" + "ab".repeat(32) : null, blockNumber, transactionIndex: blockNumber ? "0x0" : null, ...over,
   };
 }
 const rowByToken = (id: bigint) => [...chain.members.entries()].find(([, r]) => r.tokenId === id);
 const revert = { error: { code: 3, message: "execution reverted" } };
+const MINT_ABI = [{ type: "function", name: "mintMember", stateMutability: "nonpayable", inputs: [{ name: "to", type: "address" }, { name: "subHash", type: "bytes32" }, { name: "termStart", type: "uint64" }, { name: "termEnd", type: "uint64" }], outputs: [{ name: "", type: "uint256" }] }] as const;
 
-function answer(method: string, params: unknown[]): { result?: unknown; error?: { code: number; message: string } } {
+/** Apply an accepted tx to the double's state and build its receipt logs, as the contract would. */
+function apply(raw: Hex): unknown[] {
+  const tx = parseTransaction(raw);
+  const data = tx.data ?? "0x";
+  if (data.startsWith(SEL.setKycVerified)) {
+    const { args } = decodeFunctionData({ abi: SET_KYC_ABI, data });
+    if (chain.receiptStatus === "0x1") { const hit = rowByToken(args[0]); if (hit) hit[1].kycVerified = args[1]; }
+    return chain.emitEvent ? [{
+      address: SBT, topics: [KYC_SET_TOPIC, encodeAbiParameters([{ type: "uint256" }], [args[0]])],
+      data: encodeAbiParameters([{ type: "bool" }], [args[1]]),
+    }] : [];
+  }
+  if (data.startsWith(toFunctionSelector("mintMember(address,bytes32,uint64,uint64)"))) {
+    const { args } = decodeFunctionData({ abi: MINT_ABI, data });
+    if (chain.receiptStatus === "0x1") chain.members.set(args[1].toLowerCase(), { tokenId: 20n + BigInt(chain.members.size), owner: args[0], quarantined: false, revoked: false, kycVerified: false });
+  }
+  return [];
+}
+function receiptOf(hash: string, r: { status: "0x1" | "0x0"; logs: unknown[] }) {
+  return {
+    transactionHash: hash, transactionIndex: "0x0", blockHash: "0x" + "ab".repeat(32), blockNumber: "0x10",
+    from: SENDER, to: SBT, cumulativeGasUsed: "0x5208", gasUsed: "0x5208", effectiveGasPrice: "0x1",
+    contractAddress: null, logsBloom: "0x" + "00".repeat(256), status: r.status, type: "0x2",
+    logs: r.logs.map((l, i) => ({ ...(l as object), blockHash: "0x" + "ab".repeat(32), blockNumber: "0x10", transactionHash: hash, transactionIndex: "0x0", logIndex: toHex(i), removed: false })),
+  };
+}
+
+type Answer = { result?: unknown; error?: { code: number; message: string } };
+async function answer(method: string, params: unknown[]): Promise<Answer> {
   chain.calls.push(method);
   switch (method) {
     case "eth_getBlockByNumber": {
@@ -118,14 +169,20 @@ function answer(method: string, params: unknown[]): { result?: unknown; error?: 
         if (g === "error") return { error: { code: -32000, message: "upstream unavailable" } };
         return { result: block(g, "0x0") };
       }
-      return { result: block("0x" + "ab".repeat(32), "0x10") };
+      // The block that mined a replacement carries it (viem scans it for same sender + nonce).
+      const txs = params[1] === true ? [...chain.pending.values()].map((raw) => rpcTx(REPLACEMENT_HASH, raw, "0x10", { to: SENDER, value: "0x0", input: "0x" })) : [];
+      return { result: block("0x" + "ab".repeat(32), "0x10", txs) };
     }
     case "eth_call": {
       const p = params[0] as { to?: string; data?: string; input?: string };
       const data = String(p.data ?? p.input);
       chain.ethCalls.push(data.slice(0, 10));
-      if (String(p.to).toLowerCase() !== SBT.toLowerCase()) return revert;
       const arg = "0x" + data.slice(10, 74);
+      if (String(p.to).toLowerCase() === VAULT.toLowerCase() && data.startsWith(toFunctionSelector("bondOf(address)"))) {
+        if (chain.vaultRevert) return { error: { code: 3, message: `execution reverted: bondOf(${MEMBER}) internal detail` } };
+        return { result: encodeAbiParameters([{ type: "address" }], ["0x3333333333333333333333333333333333333333"]) };
+      }
+      if (String(p.to).toLowerCase() !== SBT.toLowerCase()) return revert;
       if (data.startsWith(SEL.isSubBound)) return { result: encodeAbiParameters([{ type: "bool" }], [chain.members.has(arg.toLowerCase())]) };
       if (data.startsWith(SEL.tokenIdForSub)) {
         const r = chain.members.get(arg.toLowerCase());
@@ -144,43 +201,42 @@ function answer(method: string, params: unknown[]): { result?: unknown; error?: 
       }
       return revert;
     }
-    case "eth_getCode": return { result: "0x6080" };
+    case "eth_getCode": return { result: chain.bondCode };
     case "eth_getBalance": return { result: "0xffffffffffffffffffff" };
     case "eth_blockNumber": return { result: "0x10" };
+    case "eth_getTransactionByHash": {
+      const h = String(params[0]).toLowerCase();
+      const raw = chain.pending.get(h) ?? chain.raw.find((r) => keccak256(r).toLowerCase() === h);
+      if (!raw) return { result: null };
+      return { result: rpcTx(h, raw, chain.pending.has(h) ? null : "0x10") };
+    }
     case "eth_getTransactionReceipt": {
-      const last = chain.raw[chain.raw.length - 1];
-      let logs: unknown[] = [];
-      if (last && chain.emitEvent) {
-        const tx = parseTransaction(last);
-        const { args } = decodeFunctionData({ abi: SET_KYC_ABI, data: tx.data! });
-        logs = [{
-          address: SBT, topics: [KYC_SET_TOPIC, encodeAbiParameters([{ type: "uint256" }], [args[0]])],
-          data: encodeAbiParameters([{ type: "bool" }], [args[1]]), blockHash: "0x" + "ab".repeat(32), blockNumber: "0x10",
-          transactionHash: TX_HASH, transactionIndex: "0x0", logIndex: "0x0", removed: false,
-        }];
-      }
-      return {
-        result: {
-          transactionHash: TX_HASH, transactionIndex: "0x0", blockHash: "0x" + "ab".repeat(32), blockNumber: "0x10",
-          from: MEMBER, to: SBT, cumulativeGasUsed: "0x5208", gasUsed: "0x5208", effectiveGasPrice: "0x1",
-          contractAddress: null, logs, logsBloom: "0x" + "00".repeat(256), status: chain.receiptStatus, type: "0x2",
-        },
-      };
+      const h = String(params[0]).toLowerCase();
+      const r = chain.receipts.get(h);
+      return { result: r ? receiptOf(h, r) : null };
     }
     case "eth_chainId": return { result: "0x9d0c" };
-    case "eth_getTransactionCount": return { result: "0x0" };
+    case "eth_getTransactionCount": return { result: toHex(chain.nonce) };
     case "eth_estimateGas": return { result: "0x5208" };
     case "eth_gasPrice": case "eth_maxPriorityFeePerGas": return { result: "0x1" };
-    case "eth_sendRawTransaction":
+    case "eth_sendRawTransaction": {
+      if (chain.sendDelayMs) await new Promise((r) => setTimeout(r, chain.sendDelayMs));
       if (!chain.acceptBroadcasts) return { error: { code: -32000, message: "double rejects broadcasts" } };
-      chain.raw.push(params[0] as Hex);
-      if (chain.receiptStatus === "0x1") { // apply it, as the contract would
-        const tx = parseTransaction(params[0] as Hex);
-        const { args } = decodeFunctionData({ abi: SET_KYC_ABI, data: tx.data! });
-        const hit = rowByToken(args[0]);
-        if (hit) hit[1].kycVerified = args[1];
+      const raw = params[0] as Hex;
+      const h = keccak256(raw).toLowerCase();
+      chain.raw.push(raw);
+      chain.nonce += 1;
+      if (chain.replaceNext) {
+        // Our tx never mines; a same-nonce replacement (a 0-value self-send) mines instead,
+        // and its receipt even looks like a success.
+        chain.replaceNext = false;
+        chain.pending.set(h, raw);
+        chain.receipts.set(REPLACEMENT_HASH, { status: "0x1", logs: apply(raw) });
+      } else {
+        chain.receipts.set(h, { status: chain.receiptStatus, logs: apply(raw) });
       }
-      return { result: TX_HASH };
+      return { result: h };
+    }
     default: return { error: { code: -32601, message: `unsupported ${method}` } };
   }
 }
@@ -276,10 +332,12 @@ beforeAll(async () => {
     req.on("data", (c) => { b += c; });
     req.on("end", () => {
       const msg = JSON.parse(b);
-      const one = (m: { id: unknown; method: string; params?: unknown[] }) => ({ jsonrpc: "2.0", id: m.id, ...answer(m.method, m.params ?? []) });
-      const out = Array.isArray(msg) ? msg.map(one) : one(msg);
-      res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify(out));
+      const one = async (m: { id: unknown; method: string; params?: unknown[] }) => ({ jsonrpc: "2.0", id: m.id, ...(await answer(m.method, m.params ?? [])) });
+      void (async () => {
+        const out = Array.isArray(msg) ? await Promise.all(msg.map(one)) : await one(msg);
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify(out));
+      })();
     });
   });
   await new Promise<void>((r) => rpc.listen(0, "127.0.0.1", () => r()));
@@ -313,7 +371,7 @@ describe("POST /kyc-attest: the one transaction it can send", { timeout: 30_000 
     await startSigner();
     const r = await attest();
     expect(r.status).toBe(200);
-    expect(r.json).toMatchObject({ status: "attested", txHash: TX_HASH, tokenId: "7", subHash: subHash(SUB), genesis: R1007 });
+    expect(r.json).toMatchObject({ status: "attested", txHash: lastHash(), tokenId: "7", subHash: subHash(SUB), genesis: R1007 });
     expect(broadcasts()).toBe(1);
     const tx = parseTransaction(chain.raw[0]!);
     expect(tx.to?.toLowerCase()).toBe(SBT.toLowerCase());
@@ -633,7 +691,7 @@ describe("POST /kyc-attest: idempotency, cap and audit", { timeout: 30_000 }, ()
     expect(intent).toMatchObject({ subHash: subHash(SUB), tokenId: "7", genesis: R1007 });
     const results = recs.filter((r) => r.phase === "result");
     expect(results.map((r) => r.outcome)).toEqual(["attested", "refused"]);
-    expect(results[0]).toMatchObject({ txHash: TX_HASH, subHash: subHash(SUB) });
+    expect(results[0]).toMatchObject({ txHash: keccak256(chain.raw[0]!), subHash: subHash(SUB) });
     expect(results[1]).toMatchObject({ reason: "kyc_record_not_verified", subHash: subHash(SUB_B) });
     const text = readFileSync(join(dir, "kyc-attest-audit.jsonl"), "utf8") + signerOut;
     for (const secret of [SUB, SUB_B, MEMBER.toLowerCase(), MEMBER_B.toLowerCase(), TOKEN, KYC_SECRET]) {
@@ -655,5 +713,138 @@ describe("POST /kyc-attest: idempotency, cap and audit", { timeout: 30_000 }, ()
     expect(r.status).toBe(422);
     const h = (await (await fetch(`${signerUrl}/health`)).json()) as Record<string, any>;
     expect(h.kycAttest.attestedToday).toBe(0);
+  });
+});
+
+// ---- shared signing key, state file and caps (security review of #44) ------------
+const GRANT_SUB = "grant-sub-private";
+function grantBody(over: Record<string, unknown> = {}) {
+  return {
+    orderId: "order-1", sub: GRANT_SUB, member: MEMBER, amountWei: String(32_000n * 10n ** 18n),
+    termStart: 1_700_000_000, termEnd: 1_800_000_000, chainId: 40204, contracts: { vault: VAULT, sbt: SBT },
+    expectedGenesis: R1007, ...over,
+  };
+}
+const health = async () => (await (await fetch(`${signerUrl}/health`)).json()) as Record<string, any>;
+
+describe("treasury signer: one signing key, serialized sends", { timeout: 60_000 }, () => {
+  it("a concurrent /grant mint and /kyc-attest get distinct nonces", async () => {
+    chain.sendDelayMs = 600; // a broadcast is slow to land, so an unserialized second send reads the same nonce
+    await startSigner();
+    const [g, a] = await Promise.all([post("/grant", grantBody()), attest()]);
+    expect(g.status).toBe(200);
+    expect(a.status).toBe(200);
+    expect(nonces().length).toBe(2);
+    expect(new Set(nonces()).size).toBe(2);
+  });
+
+  it("two concurrent attestations for different members get distinct nonces", async () => {
+    chain.sendDelayMs = 600;
+    await startSigner();
+    const [a, b] = await Promise.all([attest(), attest({ member: MEMBER_B, sub: SUB_B })]);
+    expect([a.status, b.status]).toEqual([200, 200]);
+    expect(new Set(nonces()).size).toBe(2);
+  });
+
+  it("a replaced attestation tx is a failure, not 'attested', even though the replacement mined", async () => {
+    chain.replaceNext = true;
+    await startSigner();
+    const r = await attest();
+    expect(r.status).toBe(502);
+    expect(r.json.error).toBe("tx_replaced");
+    expect(r.json.status).toBeUndefined();
+    expect(signerOut).toMatch(/ALARM tx_replaced/);
+    expect(auditRecords().filter((x) => x.phase === "result").map((x) => x.outcome)).toEqual(["refused"]);
+    // The tx was broadcast, so the cap slot is NOT refunded.
+    expect((await health()).kycAttest.attestedToday).toBe(1);
+  });
+
+  it("a replaced /grant mint is never recorded as granted", async () => {
+    chain.replaceNext = true;
+    await startSigner();
+    const r = await post("/grant", grantBody());
+    expect(r.status).toBe(502);
+    expect(r.json.error).toBe("tx_replaced");
+    const saved = JSON.parse(readFileSync(join(dir, "state.json"), "utf8"));
+    expect(saved.orders[`${R1007}/order-1`]).toBeUndefined();
+  });
+});
+
+describe("treasury signer: state file and cap refunds", { timeout: 60_000 }, () => {
+  async function spawnOnState(content: string): Promise<{ code: number | null; out: string }> {
+    dir = mkdtempSync(join(tmpdir(), "signer-state-"));
+    writeFileSync(join(dir, "state.json"), content);
+    let out = "";
+    const p = spawn(process.execPath, [SERVER], {
+      env: {
+        PATH: process.env.PATH ?? "", CITRATE_RPC_URL: rpcUrl, CITRATE_CHAIN_ID: "40204",
+        MEMBERSHIP_STAKE_VAULT_ADDRESS: VAULT, CITRATE_MEMBER_SBT_ADDRESS: SBT,
+        TREASURY_SIGNER_TOKEN: TOKEN, TREASURY_SIGNER_KEY: generatePrivateKey(),
+        TREASURY_STATE_FILE: join(dir, "state.json"), PORT: String(await freePort()),
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    p.stdout!.on("data", (c) => { out += String(c); });
+    p.stderr!.on("data", (c) => { out += String(c); });
+    const code = await new Promise<number | null>((r) => {
+      p.once("exit", (c) => r(c));
+      setTimeout(() => { if (out.includes("citrate-treasury-signer on")) { p.kill("SIGTERM"); } }, 3000);
+    });
+    return { code, out };
+  }
+
+  it.each([["truncated JSON", '{"day":"2026-11-09","spentToday":"32'], ["empty file", ""], ["not an object", "[1,2]"]])(
+    "refuses to start on an unreadable state file (%s) instead of resetting the caps and ledger", async (_l, content) => {
+      const { code, out } = await spawnOnState(content);
+      expect(code).not.toBe(0);
+      expect(code).not.toBeNull();
+      expect(out).not.toContain("citrate-treasury-signer on");
+      expect(out).toMatch(/state file unreadable/);
+    });
+
+  it("writes the state file atomically (no temp file left behind, always parseable)", async () => {
+    await startSigner();
+    expect((await attest()).status).toBe(200);
+    const files = readdirSync(dir).sort();
+    expect(files).toEqual(["kyc-attest-audit.jsonl", "state.json"]);
+    expect(JSON.parse(readFileSync(join(dir, "state.json"), "utf8")).kycAttest.count).toBe(1);
+  });
+
+  it("refunds the KYC cap when the broadcast never happened", async () => {
+    chain.acceptBroadcasts = false;
+    await startSigner({ KYC_ATTEST_DAILY_CAP: "1" });
+    expect((await attest()).status).toBe(502);
+    expect((await health()).kycAttest.attestedToday).toBe(0);
+    chain.acceptBroadcasts = true;
+    expect((await attest()).status).toBe(200);
+  });
+
+  it("refunds the /grant SALT cap when the vault.grant broadcast never happened", async () => {
+    chain.acceptBroadcasts = false; chain.bondCode = "0x"; // leg 1 skipped (SUB is bound), leg 2 would grant
+    await startSigner();
+    const r = await post("/grant", grantBody({ sub: SUB }));
+    expect(r.status).toBe(502);
+    expect((await health()).spentToday).toBe("0");
+  });
+
+  it("an unexpected /grant chain error is answered as chain_error, without the raw RPC message", async () => {
+    chain.vaultRevert = true;
+    await startSigner();
+    const r = await post("/grant", grantBody({ sub: SUB }));
+    expect(r.status).toBe(502);
+    expect(r.json).toEqual({ error: "chain_error" });
+  });
+
+  it.each([["hex string", "0x9d0c"], ["array", [40204]], ["decimal with fraction", "40204.0"], ["padded", " 40204"], ["fractional number", 40204.5], ["boolean", true]])(
+    "parses chainId strictly (%s is 422 on both routes)", async (_l, chainId) => {
+      await startSigner();
+      expect((await attest({ chainId })).status).toBe(422);
+      expect((await post("/grant", grantBody({ chainId }))).status).toBe(422);
+      expect(broadcasts()).toBe(0);
+    });
+
+  it("accepts chainId as the number or its exact decimal string", async () => {
+    await startSigner();
+    expect((await attest({ chainId: "40204" })).status).toBe(200);
   });
 });
