@@ -14,7 +14,9 @@ broadcasts to chain 40204, and returns tx hashes.
 - Per-UTC-day SALT cap (`TREASURY_DAILY_CAP_WEI`), persisted to
   `/var/lib/citrate-treasury-signer/state.json` (survives restart) → bounded blast radius.
 - The key can only reach a fixed allow-list of `onlyOwner` methods on the two pinned
-  contracts (vault + SBT). No arbitrary calldata, no balance transfer-out.
+  contracts (vault + SBT): `mintMember` and `grant` (via `/grant`) and
+  `setKycVerified(tokenId, true)` (via `/kyc-attest`). No arbitrary calldata, no
+  balance transfer-out.
 
 ## The signer key
 `TREASURY_SIGNER_KEY` is the treasury/grant signer. It owns `MembershipStakeVault` and
@@ -39,7 +41,7 @@ clamps `amountWei` to the policy grant. It never fabricates a hash — a skipped
 leg returns `null`. The leg order is mint-first because `grant` needs the SBT
 `tokenId` (`ownerOf(memberTokenId) == member`).
 ```
-GET  /health   -> { genesis, status, signer, day, spentToday, dailyCap, grantWei, gasHeadroomWei, vault, sbt, model }
+GET  /health   -> { genesis, status, signer, day, spentToday, dailyCap, grantWei, gasHeadroomWei, vault, sbt, model, kycAttest:{enabled,dailyCap,attestedToday} }
 POST /grant   (Authorization: Bearer <TREASURY_SIGNER_TOKEN>)
   body: { orderId, sub, member, amountWei, termStart, termEnd, chainId, contracts:{vault,sbt}, expectedGenesis }
     leg 1  sbt.mintMember(member, keccak256(sub), termStart, termEnd) — skipped if isSubBound(subHash)
@@ -65,11 +67,62 @@ answers 502, and does not record the order done. Missing or malformed is 422, a 
 carries only a reason code and the order id. Block 0 is fetched per check, not cached.
 The 200 echoes `genesis`, and core-membership refuses a 200 without the matching echo.
 
+**State file.** The caps and ledger live in `TREASURY_STATE_FILE`, written atomically
+(temp file, fsync, rename). A missing file is a fresh signer. An unreadable one makes
+the signer **refuse to start** rather than reset its caps and forget completed orders.
+
 Idempotency is layered: a completed `orderId` replays its stored result **only within the
 same chain generation** (the ledger key is `<genesis>/<orderId>`, so a result recorded on
 an earlier generation is never handed back as a grant on this one); an
 in-flight `orderId` gets 409; and even a fresh `orderId` is a no-op per-leg if the
 clone already exists (`bondOf` has code) / the sub already bound (`already_granted`).
+
+## Scoped KYC attestation (`POST /kyc-attest`)
+A re-roll re-mints the member SBTs, and a fresh mint starts with `kycVerified = false`.
+Only the SBT owner (this key) can set it again. `/kyc-attest` restores it from the
+member's **stored** verification record. It does not run KYC and it takes no verdict from
+the caller.
+```
+POST /kyc-attest   (Authorization: Bearer <TREASURY_SIGNER_TOKEN>, the same token as /grant)
+  body: { member, sub, chainId, contracts:{sbt}, expectedGenesis }   (any other field: 422)
+  200 -> { status:"attested"|"already_attested", txHash|null, tokenId, subHash, genesis }
+  401 bad/absent bearer · 403 kyc_record_not_verified · 409 kyc_attest_in_flight
+  412 genesis mismatch · 422 validation, allowlist, sub_not_bound, member_mismatch,
+  member_revoked, member_quarantined · 429 kyc_attest_daily_cap
+  500 audit_unavailable (nothing sent) · 502 broadcast/revert/event missing
+  503 kyc_attest_unconfigured, kyc_record_lookup_failed, genesis lookup failed
+```
+In order, the signer:
+1. checks the body shape and the pinned SBT address, then the generation pin (as `/grant`);
+2. reads `GET <KYC_STATUS_URL>/kyc/status?sub=<sub>` itself, with `KYC_STATUS_SECRET`.
+   Only a 200 that names this subject with `kyc_status: "verified"` continues. Expired,
+   pending, revoked and none are 403. Any failure, timeout or mismatched answer is 503;
+3. reads the SBT: `tokenIdForSub(keccak256(sub))`, `getMember`, `ownerOf`. The token must
+   be owned by `member`, and not revoked or quarantined;
+4. if the flag is already set, answers `already_attested` and sends nothing (no cap);
+5. charges its own per-UTC-day count cap, writes a durable audit "intent" record (if that
+   write fails, nothing is sent), and sends `setKycVerified(tokenId, true)` with value 0.
+   The generation is re-checked before the broadcast and after the receipt (`ALARM` on a
+   flip), and the receipt must carry `KycVerifiedSet(tokenId, true)` from the pinned SBT.
+
+**One key, one queue.** `/grant`'s legs and `/kyc-attest` sign with the same key. Every
+send waits in one process-wide queue, which it holds from its pre-send generation check
+until its receipt, so two requests never read the same nonce. The receipt must be for
+the signer's own hash; when a same-nonce tx replaced it, the request fails with
+`ALARM tx_replaced` and 502 (never `granted` or `attested`), even if the replacement
+mined.
+
+**Caps and refunds.** The cap is charged before the broadcast and refunded only when the
+tx certainly never reached the chain (the pre-send generation check refused, or the RPC
+explicitly rejected it). A transport error or timeout during the send keeps the charge,
+since the tx may have landed. Otherwise a refusal after the charge uses up a slot
+without sending. That errs on the safe side, as `/grant` does.
+
+**Audit.** Each authorized request appends one JSON line to `KYC_ATTEST_AUDIT_FILE`
+(an `intent` line before any broadcast, then a `result` line) and mirrors it to stdout.
+Records hold the subject hash (`keccak256(sub)`, the value the SBT already stores), the
+token id, the tx hash, the generation and the outcome or reason. They never hold the sub,
+the wallet, a token or a secret. Error responses don't echo them either.
 
 ## Env
 | var | meaning |
@@ -83,6 +136,12 @@ clone already exists (`bondOf` has code) / the sub already bound (`already_grant
 | `TREASURY_GAS_HEADROOM_WEI` | gas-only top-up to the member EOA so it can pay for its own `MemberBond.activate` tx (default 0.05 SALT). This is NOT the bond — the 32k lives in the clone. |
 | `TREASURY_DAILY_CAP_WEI` | per-UTC-day SALT ceiling (default 96k SALT = 3 grants) |
 | `PORT` | default 8790 (bound to 127.0.0.1; Caddy terminates TLS) |
+| `KYC_STATUS_URL` | OPTIONAL. Base URL of the identity authority whose `GET /kyc/status` the signer re-checks, e.g. the public issuer `https://auth.citrate.ai`. Must be https; plain http only to loopback or a single-label in-network host (a compose service name). Unset, or with no secret, `/kyc-attest` answers 503 and `/grant` is unaffected. |
+| `KYC_STATUS_SECRET` | OPTIONAL. The signer's **own** status secret: the value of its entry in identity's `KYC_STATUS_SECRETS` (e.g. `treasury-signer:<secret>`), distinct from core-membership's. It must never be identity's `KYC_WEBHOOK_SECRET`, which also authorizes `POST /kyc/_set` (a record write); identity refuses to serve `/kyc/status` when the two match and no longer falls back to the webhook secret. |
+| `TREASURY_RECEIPT_TIMEOUT_MS` | how long one send waits for its receipt (default 120000). Sends are serialized, so this also bounds how long a stuck tx holds the queue. |
+| `KYC_ATTEST_DAILY_CAP` | attestations per UTC day (a count; default 20). An unparsable value is 0, which refuses all. Persisted in the state file. |
+| `KYC_STATUS_TIMEOUT_MS` | identity lookup timeout (default 10000) |
+| `KYC_ATTEST_AUDIT_FILE` | append-only audit JSONL (default: `kyc-attest-audit.jsonl` next to the state file) |
 
 core-membership side: set `TREASURY_SIGNER_URL=https://<host>/v1/sign` (or the base, per
 its client) and the matching bearer token; leave `TREASURY_SIGNER_KEY` UNSET on Vercel.
