@@ -317,6 +317,10 @@ export const TRUSTED_FIRST_PARTY_CLIENT_IDS: ReadonlySet<string> = new Set([
   // citrate-studio. First-party, Citrate-owned end-to-end, so consent is
   // auto-granted like the web RPs.
   'citrate-core',
+  // citrate-account — auth.citrate.ai's own /account/reauth (sign in again
+  // before adding a passkey). Same-origin with the issuer, openid only; its
+  // client is registered in server.ts.
+  'citrate-account',
 ]);
 
 /** True iff `clientId` is a Citrate-owned trusted first-party RP (TD-8). */

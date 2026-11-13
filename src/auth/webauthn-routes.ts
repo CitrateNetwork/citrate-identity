@@ -57,7 +57,7 @@
  * mirror of {@link RedisNonceStore}.
  */
 
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type Provider from 'oidc-provider';
 import type {
@@ -76,7 +76,7 @@ import { getUserStore, getWebAuthnStore } from './stores.js';
 import { predictedWalletForAccount } from '../aa/wallet-claims.js';
 import type { RedisLike } from '../redis.js';
 import { CODE_TTL_MS, getEmailVerificationStore } from './email-verification-pg.js';
-import { sendVerificationCode } from '../email-send.js';
+import { sendPasskeyAddedNotice, sendVerificationCode } from '../email-send.js';
 import {
   clientIp,
   InMemoryRateLimiter,
@@ -89,6 +89,31 @@ import { isCrossSite, isValidAccountActionToken } from '../account-csrf.js';
 /** Minimum email shape (same as the password routes). */
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const CODE_RE = /^[0-9]{6}$/;
+
+/**
+ * Adding a passkey to an account needs a sign-in this recent (seconds). A
+ * passkey is a lasting credential, so a live session cookie alone (an
+ * unattended browser, a stolen cookie) must not be enough to plant one.
+ */
+export const PASSKEY_REAUTH_WINDOW_SEC = 5 * 60;
+
+/** True when the session's last sign-in (`loginTs`, seconds) is within the window. */
+export function isRecentSignIn(loginTs: unknown, nowSec: number = Math.floor(Date.now() / 1000)): boolean {
+  return typeof loginTs === 'number' && Number.isFinite(loginTs) && nowSec - loginTs <= PASSKEY_REAUTH_WINDOW_SEC;
+}
+
+/** The same-origin client /account/reauth signs in through (registered in server.ts). */
+export const ACCOUNT_REAUTH_CLIENT_ID = 'citrate-account';
+export const ACCOUNT_REAUTH_CALLBACK_PATH = '/account/reauth/callback';
+
+/** Tell the owner a passkey was added. Never fails the request; never logs the address. */
+async function notifyPasskeyAdded(user: { email?: string; emailVerified?: boolean }): Promise<void> {
+  if (!user.email || !user.emailVerified) return;
+  if (!(await sendPasskeyAddedNotice(user.email))) {
+    // eslint-disable-next-line no-console
+    console.warn('[citrate-identity] passkey-added notice could not be sent');
+  }
+}
 
 /** The passkey-signup code is bound to its interaction, apart from password codes. */
 function signupBinding(interactionUid: string): string {
@@ -538,6 +563,8 @@ export function mountWebauthnRoutes(
       });
 
       await userStore.setLastSigningMethod(user.id, 'passkey');
+      // A passkey added to an account that already existed: tell its owner.
+      if (pending.existing) await notifyPasskeyAdded(user);
       const redirectTo = await provider.interactionResult(
         ctx.req,
         ctx.res,
@@ -663,7 +690,10 @@ export function mountWebauthnRoutes(
  *
  * Authorised by the browser session (not an interaction), plus the
  * session-bound account-action token and a same-origin check
- * (account-csrf.ts). Only accounts with a user record (email, Google or
+ * (account-csrf.ts), and only within {@link PASSKEY_REAUTH_WINDOW_SEC} of the
+ * session's last sign-in; otherwise 401 reauth_required, and
+ * `GET /account/reauth` signs the member in again (prompt=login) and returns
+ * to /account. The owner's verified email is told about every passkey added. Only accounts with a user record (email, Google or
  * passkey accounts) can hold a passkey; a wallet-only (SIWE) identity has no
  * user row and is refused.
  */
@@ -676,6 +706,42 @@ export function mountAccountPasskeyRoutes(
   const issuerOrigin = new URL(provider.issuer).origin;
 
   provider.use(async (ctx: Ctx, next: Next) => {
+    // GET /account/reauth: sign in again (prompt=login), then back to /account.
+    // The code is never exchanged; the point is the fresh session sign-in.
+    if (ctx.method === 'GET' && ctx.path === '/account/reauth') {
+      const state = randomBytes(32).toString('base64url');
+      const verifier = randomBytes(32).toString('base64url');
+      const authorize = new URL('/auth', provider.issuer);
+      authorize.searchParams.set('client_id', ACCOUNT_REAUTH_CLIENT_ID);
+      authorize.searchParams.set('response_type', 'code');
+      authorize.searchParams.set('scope', 'openid');
+      authorize.searchParams.set('redirect_uri', `${issuerOrigin}${ACCOUNT_REAUTH_CALLBACK_PATH}`);
+      authorize.searchParams.set('prompt', 'login');
+      authorize.searchParams.set('state', state);
+      authorize.searchParams.set('code_challenge', createHash('sha256').update(verifier).digest('base64url'));
+      authorize.searchParams.set('code_challenge_method', 'S256');
+      ctx.res.writeHead(302, {
+        location: authorize.toString(),
+        'cache-control': 'no-store',
+        'set-cookie': `_acct_reauth=${state}; Path=/account; HttpOnly; SameSite=Lax; Max-Age=600${ctx.secure ? '; Secure' : ''}`,
+      });
+      ctx.res.end();
+      return;
+    }
+    if (ctx.method === 'GET' && ctx.path === ACCOUNT_REAUTH_CALLBACK_PATH) {
+      const expected = /(?:^|;\s*)_acct_reauth=([^;]+)/.exec(String(ctx.req.headers.cookie ?? ''))?.[1];
+      const got = typeof ctx.query['state'] === 'string' ? ctx.query['state'] : '';
+      const ok =
+        !!expected && got.length === expected.length && timingSafeEqual(Buffer.from(got), Buffer.from(expected));
+      ctx.res.setHeader('set-cookie', `_acct_reauth=; Path=/account; HttpOnly; SameSite=Lax; Max-Age=0${ctx.secure ? '; Secure' : ''}`);
+      if (!ok) {
+        respondJson(ctx.res, 400, { error: 'invalid_state' });
+        return;
+      }
+      ctx.res.writeHead(302, { location: '/account', 'cache-control': 'no-store' });
+      ctx.res.end();
+      return;
+    }
     if (ctx.method === 'GET' && ctx.path === '/account/passkey.js') {
       ctx.res.writeHead(200, {
         'content-type': 'text/javascript; charset=utf-8',
@@ -692,9 +758,9 @@ export function mountAccountPasskeyRoutes(
       respondJson(ctx.res, 403, { error: 'invalid_request', reason: 'cross_site_forbidden' });
       return;
     }
-    let session: { jti: string; accountId?: string } | undefined;
+    let session: { jti: string; accountId?: string; loginTs?: number } | undefined;
     try {
-      session = (await provider.Session.get(ctx)) as unknown as { jti: string; accountId?: string };
+      session = (await provider.Session.get(ctx)) as unknown as { jti: string; accountId?: string; loginTs?: number };
     } catch {
       session = undefined;
     }
@@ -711,6 +777,15 @@ export function mountAccountPasskeyRoutes(
     }
     if (!isValidAccountActionToken(session.jti, body.csrf)) {
       respondJson(ctx.res, 403, { error: 'invalid_request', reason: 'invalid_csrf_token' });
+      return;
+    }
+    // Both steps: a ceremony begun in the window cannot be finished after it.
+    if (!isRecentSignIn(session.loginTs)) {
+      respondJson(ctx.res, 401, {
+        error: 'reauth_required',
+        reason: 'sign in again to add a passkey',
+        reauth: '/account/reauth',
+      });
       return;
     }
     const accountId = session.accountId;
@@ -771,6 +846,7 @@ export function mountAccountPasskeyRoutes(
       ...(verified.aaguid !== undefined ? { aaguid: verified.aaguid } : {}),
       ...(typeof body.deviceLabel === 'string' ? { deviceLabel: body.deviceLabel.slice(0, 64) } : {}),
     });
+    await notifyPasskeyAdded(user);
     respondJson(ctx.res, 200, { ok: true, credentialId: rec.id });
   });
 }

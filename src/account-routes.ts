@@ -27,6 +27,7 @@ import { getUserStore } from './auth/stores.js';
 import { predictedWalletForAccount } from './aa/wallet-claims.js';
 import type { HandoffStore } from './handoff-store.js';
 import { accountActionToken } from './account-csrf.js';
+import { isRecentSignIn } from './auth/webauthn-routes.js';
 
 function escapeHtml(v: string): string {
   return v
@@ -142,8 +143,10 @@ function renderHub(args: {
   backLink?: string;
   /** Present when this browser's own session can add a passkey to the account. */
   addPasskeyToken?: string;
+  /** The session could add a passkey but must sign in again first. */
+  passkeyNeedsReauth?: boolean;
 }): string {
-  const { email, signingMethod, wallet, kyc, ent, backLink, addPasskeyToken } = args;
+  const { email, signingMethod, wallet, kyc, ent, backLink, addPasskeyToken, passkeyNeedsReauth } = args;
   const kycBadge =
     kyc === 'verified' ? '<span class="badge ok">Verified</span>'
     : kyc === 'pending' ? '<span class="badge warn">In review</span>'
@@ -169,7 +172,7 @@ ${backLink ? `<a class="back" href="${escapeHtml(backLink)}">&larr; Back to the 
   <div class="row"><span class="k">Wallet</span><span class="v mono">${wallet ? escapeHtml(wallet) : '<span class="badge muted">not provisioned</span>'}</span></div>
 </div>
 
-${addPasskeyToken ? renderPasskeyCard(addPasskeyToken) : ''}
+${addPasskeyToken ? renderPasskeyCard(addPasskeyToken) : passkeyNeedsReauth ? renderPasskeyReauthCard() : ''}
 <div class="card"><h2>Identity verification (KYC)</h2>
   <div class="row"><span class="k">Status</span><span class="v">${kycBadge}</span></div>
   ${kycCta}
@@ -187,6 +190,13 @@ function renderPasskeyCard(token: string): string {
   return `<div class="card"><h2>Passkeys</h2>
   <button id="add-passkey" class="btn secondary" type="button" data-csrf="${escapeHtml(token)}">Add a passkey</button>
   <p id="add-passkey-status" class="note" role="status">Add a passkey to sign in to this account with your device instead of a code or password.</p>
+</div>`;
+}
+
+function renderPasskeyReauthCard(): string {
+  return `<div class="card"><h2>Passkeys</h2>
+  <a class="btn secondary" href="/account/reauth">Confirm it's you to add a passkey</a>
+  <p class="note">For your security, adding a passkey needs a sign-in from the last 5 minutes.</p>
 </div>`;
 }
 
@@ -237,9 +247,9 @@ export function mountAccountRoute(
     if (handoffStore && typeof handoffNonce === 'string' && handoffNonce) {
       accountId = (await handoffStore.consume(handoffNonce)) ?? undefined;
     }
-    let browser: { jti: string; accountId?: string } | undefined;
+    let browser: { jti: string; accountId?: string; loginTs?: number } | undefined;
     try {
-      browser = (await provider.Session.get(ctx)) as unknown as { jti: string; accountId?: string };
+      browser = (await provider.Session.get(ctx)) as unknown as { jti: string; accountId?: string; loginTs?: number };
     } catch {
       browser = undefined;
     }
@@ -271,8 +281,10 @@ export function mountAccountRoute(
     // Adding a passkey acts on this browser's session, so it is offered only
     // when the account shown IS that session's account (not one opened through
     // a hand-off link) and is a user record that can hold a passkey.
-    const addPasskeyToken =
-      rec && browser?.accountId === accountId ? accountActionToken(browser.jti) : undefined;
+    const ownSession = Boolean(rec) && browser?.accountId === accountId;
+    const recent = ownSession && isRecentSignIn(browser?.loginTs);
+    const addPasskeyToken = recent && browser ? accountActionToken(browser.jti) : undefined;
+    const passkeyNeedsReauth = ownSession && !recent;
 
     sendHtml(
       ctx.res,
@@ -287,6 +299,7 @@ export function mountAccountRoute(
         ent,
         backLink,
         addPasskeyToken,
+        passkeyNeedsReauth,
       }),
     );
   });

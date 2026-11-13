@@ -438,6 +438,21 @@ describe('a signed-in email account can add a passkey', () => {
       expect(await getWebAuthnStore().listByUserId(userId)).toHaveLength(1);
     });
 
+    it('a password reset ends the old session, so it cannot add a passkey afterwards', async () => {
+      const email = 'reset@citrate.example';
+      const { jar, userId } = await signedInWithPassword(email, 'correct horse battery staple');
+      const csrf = csrfFrom(await accountHtml(jar));
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(Date.now() + 2_000);
+      // Email-proven reset from another browser (PBA-L3a-008 bumps the account epoch).
+      const other = await onSignInPage();
+      await postJson(other.jar, '/auth/password/register', { email, password: 'a whole new passphrase here' });
+      expect((await postJson(other.jar, '/auth/password/verify', { email, code: lastCode!.code })).status).toBe(200);
+      const res = await postJson(jar, '/account/passkey/options', { csrf }, { origin: auth.baseUrl });
+      expect(res.status).toBe(401);
+      expect(await getWebAuthnStore().listByUserId(userId)).toHaveLength(0);
+    });
+
     it('/account/reauth/callback refuses a state this browser did not start', async () => {
       const { jar } = await signedInWithPassword('state@citrate.example', 'correct horse battery staple');
       const cb = await fetch(`${auth.baseUrl}/account/reauth/callback?state=forged&code=x`, {

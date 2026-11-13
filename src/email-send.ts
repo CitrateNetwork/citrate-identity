@@ -146,3 +146,31 @@ export async function sendVerificationCode(
   ].join('\n');
   return sendEmail({ to, subject, html, text });
 }
+
+/**
+ * Tell an account owner that a passkey was added to their account (2026-11-13,
+ * review of the passkey fix). A passkey is a lasting way in, so the owner hears
+ * about every one. The address is never logged; a failed send is reported to
+ * the caller only (the transport logs the status, not the recipient).
+ */
+export async function sendPasskeyAddedNotice(to: string, when: Date = new Date()): Promise<boolean> {
+  const stamp = when.toISOString().replace('T', ' ').slice(0, 16) + ' UTC';
+  const subject = 'A passkey was added to your Citrate account';
+  const text = [
+    `A new passkey was added to your Citrate account on ${stamp}.`,
+    '',
+    'If this was you, there is nothing to do: you can sign in with it from now on.',
+    "If this wasn't you, contact security@citrate.ai right away.",
+    '',
+    'Citrate Network',
+  ].join('\n');
+  const html = `<!-- passkey-added -->
+<div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;max-width:520px;margin:0 auto;color:#0e1a13">
+  <p style="font-size:13px;letter-spacing:.06em;text-transform:uppercase;color:#5b6b60;margin:0 0 8px">Account security</p>
+  <h1 style="font-size:22px;margin:0 0 12px">A passkey was added.</h1>
+  <p style="font-size:14px;line-height:1.6;margin:0">A new passkey was added to your Citrate account on ${stamp}.</p>
+  <p style="font-size:14px;line-height:1.6;margin:12px 0 0">If this was you, there is nothing to do. If this wasn't you, contact <a href="mailto:security@citrate.ai">security@citrate.ai</a> right away.</p>
+  <p style="font-size:12px;color:#8a978d;margin:24px 0 0">Citrate Network</p>
+</div>`;
+  return sendEmail({ to, subject, html, text });
+}
