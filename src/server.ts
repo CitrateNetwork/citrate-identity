@@ -38,7 +38,13 @@ import { mountStaticAssets } from './static-assets.js';
 import { mountPasswordRoutes } from './auth/password-routes.js';
 import { createRateLimiter, type RateLimiter } from './auth/rate-limit.js';
 import { initAccountEpochStore, mountSessionEpochGuard } from './auth/account-epoch.js';
-import { mountWebauthnRoutes, RedisChallengeStore } from './auth/webauthn-routes.js';
+import {
+  ACCOUNT_REAUTH_CALLBACK_PATH,
+  ACCOUNT_REAUTH_CLIENT_ID,
+  mountAccountPasskeyRoutes,
+  mountWebauthnRoutes,
+  RedisChallengeStore,
+} from './auth/webauthn-routes.js';
 import { mountGoogleRoutes } from './auth/google-routes.js';
 import { mountConfiguredOAuth2Providers } from './auth/oauth2-provider.js';
 import { initAuthStoresFromEnv } from './auth/stores.js';
@@ -202,6 +208,21 @@ export async function createProvider(
   // HA / restart-safe: when a Redis client is provided, panva persists all
   // authority state via the RedisAdapter; otherwise its in-memory default (dev).
   const configuration = await buildConfiguration(options.redis);
+  // /account/reauth signs a member in again before adding a passkey. Same-origin
+  // with THIS issuer (so the redirect can only come back here), openid only, no
+  // refresh grant; its code is never exchanged.
+  configuration.clients = [
+    ...(configuration.clients ?? []),
+    {
+      client_id: ACCOUNT_REAUTH_CLIENT_ID,
+      token_endpoint_auth_method: 'none',
+      application_type: 'web',
+      grant_types: ['authorization_code'],
+      response_types: ['code'],
+      redirect_uris: [`${new URL(issuer).origin}${ACCOUNT_REAUTH_CALLBACK_PATH}`],
+      scope: 'openid',
+    },
+  ];
   const provider = new Provider(issuer, configuration);
   // Behind a TLS-terminating proxy (auth.citrate.ai) we trust X-Forwarded-* so
   // discovery advertises https URLs and secure cookies behave.
@@ -382,13 +403,21 @@ export async function createProvider(
     .split(',')
     .map((o) => o.trim())
     .filter((o) => o.length > 0);
+  const webauthnRp = {
+    rpId,
+    rpName: 'Citrate',
+    expectedOrigin: extraOrigins.length > 0 ? [issuer, ...extraOrigins] : issuer,
+  };
   mountWebauthnRoutes(provider, {
-    rp: {
-      rpId,
-      rpName: 'Citrate',
-      expectedOrigin: extraOrigins.length > 0 ? [issuer, ...extraOrigins] : issuer,
-    },
+    rp: webauthnRp,
     // PBA-L3a-013: challenges shared across instances when Redis is wired.
+    ...(options.redis ? { challengeStore: new RedisChallengeStore(options.redis) } : {}),
+    // Budgets on the passkey-signup email code (issuance + guesses).
+    rateLimiter: options.rateLimiter ?? createRateLimiter(options.redis),
+  });
+  // "Add a passkey" on the account page, for a member already signed in.
+  mountAccountPasskeyRoutes(provider, {
+    rp: webauthnRp,
     ...(options.redis ? { challengeStore: new RedisChallengeStore(options.redis) } : {}),
   });
 

@@ -317,6 +317,10 @@ export const TRUSTED_FIRST_PARTY_CLIENT_IDS: ReadonlySet<string> = new Set([
   // citrate-studio. First-party, Citrate-owned end-to-end, so consent is
   // auto-granted like the web RPs.
   'citrate-core',
+  // citrate-account — auth.citrate.ai's own /account/reauth (sign in again
+  // before adding a passkey). Same-origin with the issuer, openid only; its
+  // client is registered in server.ts.
+  'citrate-account',
 ]);
 
 /** True iff `clientId` is a Citrate-owned trusted first-party RP (TD-8). */
@@ -368,6 +372,14 @@ export const DEV_DEFAULT_COOKIE_KEY = 'citrate-identity-dev-cookie-key';
 
 /** Minimum length (chars) for a production cookie signing key. */
 export const MIN_COOKIE_KEY_LENGTH = 32;
+
+/** The cookie signing keys (COOKIE_KEYS, comma-separated; first signs). */
+export function cookieKeys(env: { COOKIE_KEYS?: string } = process.env): string[] {
+  return (env.COOKIE_KEYS ?? DEV_DEFAULT_COOKIE_KEY)
+    .split(',')
+    .map((k) => k.trim())
+    .filter(Boolean);
+}
 
 /**
  * Where to persist the signing keys so they survive restarts in dev. If absent,
@@ -1454,10 +1466,7 @@ export async function buildConfiguration(
       // Keys for signing/verifying interaction + session cookies so tampered
       // cookies are detected and ignored. In production set COOKIE_KEYS to a
       // comma-separated list of high-entropy secrets (supports rotation).
-      keys: (process.env.COOKIE_KEYS ?? 'citrate-identity-dev-cookie-key')
-        .split(',')
-        .map((k) => k.trim())
-        .filter(Boolean),
+      keys: cookieKeys(),
       // panva defaults `_interaction` to `path=/interaction/<uid>` and
       // `_interaction_resume` to `path=/auth/<uid>`. That breaks every
       // sign-in flow whose form-submit hits a NON-`/interaction/<uid>/...`
