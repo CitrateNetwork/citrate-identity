@@ -7,6 +7,8 @@ export const ORCHARD_CLIENTS = {
   'citrate-orchard-schools': ['https://schools.citrate.ai'],
   'citrate-orchard-partnerships': ['https://partnerships.citrate.ai'],
 } as const;
+/** The landing page a signed-out member returns to (registered post-logout URI path). */
+export const ORCHARD_SIGNED_OUT_PATH = '/join?signed_out=1';
 export const ORCHARD_CLIENT_IDS: ReadonlySet<string> = new Set(Object.keys(ORCHARD_CLIENTS));
 export function buildOrchardProofMessage(args: { authority: string; sub: string; clientId: string; address: string; nonce: string; chainId: number }) {
   return [

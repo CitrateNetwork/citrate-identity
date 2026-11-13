@@ -1,5 +1,6 @@
-import { ORCHARD_CLIENTS } from './orchard-clients.js';
+import { ORCHARD_CLIENTS, ORCHARD_SIGNED_OUT_PATH } from './orchard-clients.js';
 import { isRevokedByEpoch, tokenAuthSec } from './auth/account-epoch.js';
+import { logoutSource, postLogoutSuccessSource } from './logout-ui.js';
 import {
   readFileSync,
   writeFileSync,
@@ -341,14 +342,38 @@ export const ACCOUNT_CHOICE_CLIENT_IDS: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * The interaction policy: panva's base prompts plus one login check that asks
- * desktop clients to show the sign-in page even when a session exists. Once
- * this interaction has a login result the check is satisfied, so it cannot loop.
+ * The interaction policy: panva's base prompts plus two login checks that show
+ * the sign-in page even when a session exists:
+ *   - desktop clients, always (they cannot otherwise switch accounts);
+ *   - any client that sends `prompt=select_account` (2026-11-12; panva
+ *     rejected the value before). The sign-in page is where a member picks an
+ *     account (the current one or another), so it is the account chooser.
+ *     `select_account` is registered as a requestable prompt only so panva
+ *     accepts the value; it has no checks of its own, because the interaction
+ *     page serves login and consent prompts only.
+ * (`prompt=login` is panva's own login check.) Once this interaction has a
+ * login result the checks are satisfied, so they cannot loop.
  */
 export function buildInteractionPolicy(): ReturnType<typeof interactionPolicy.base> {
   const policy = interactionPolicy.base();
   const login = policy.get('login');
   if (!login) throw new Error('interaction policy has no login prompt');
+  const selectAccount = new interactionPolicy.Prompt({ name: 'select_account', requestable: true });
+  selectAccount.checks.clear();
+  policy.add(selectAccount);
+  login.checks.add(
+    new interactionPolicy.Check(
+      'select_account_requested',
+      'The relying party asks the member to choose the account',
+      (ctx) => {
+        const { oidc } = ctx;
+        if (!oidc.session?.accountId) return interactionPolicy.Check.NO_NEED_TO_PROMPT;
+        if (!oidc.prompts.has('select_account')) return interactionPolicy.Check.NO_NEED_TO_PROMPT;
+        if (oidc.result?.login) return interactionPolicy.Check.NO_NEED_TO_PROMPT;
+        return interactionPolicy.Check.REQUEST_PROMPT;
+      },
+    ),
+  );
   login.checks.add(
     new interactionPolicy.Check(
       'desktop_account_choice',
@@ -372,6 +397,12 @@ export const DEV_DEFAULT_COOKIE_KEY = 'citrate-identity-dev-cookie-key';
 
 /** Minimum length (chars) for a production cookie signing key. */
 export const MIN_COOKIE_KEY_LENGTH = 32;
+
+/** RP_LOGOUT_SEAMLESS=1|true turns on the seamless RP-initiated logout pages. */
+export function rpLogoutSeamless(env: { RP_LOGOUT_SEAMLESS?: string } = process.env): boolean {
+  const v = env.RP_LOGOUT_SEAMLESS?.trim().toLowerCase();
+  return v === '1' || v === 'true';
+}
 
 /** The cookie signing keys (COOKIE_KEYS, comma-separated; first signs). */
 export function cookieKeys(env: { COOKIE_KEYS?: string } = process.env): string[] {
@@ -1286,7 +1317,12 @@ export async function buildConfiguration(
         grant_types: ['authorization_code'],
         response_types: ['code' as const],
         redirect_uris: origins.map(origin => `${origin}/auth/callback`),
-        post_logout_redirect_uris: origins.map(origin => `${origin}/`),
+        // `/join?signed_out=1` is where the landing app's /auth/logout sends a
+        // member after RP-initiated logout (exact match, query included).
+        post_logout_redirect_uris: origins.flatMap((origin) => [
+          `${origin}/`,
+          `${origin}${ORCHARD_SIGNED_OUT_PATH}`,
+        ]),
         scope: 'openid profile wallet',
       })),
       {
@@ -1530,6 +1566,19 @@ export async function buildConfiguration(
       // devInteractions OFF: panva's built-in dev login page cannot perform a
       // SIWE signature. We serve our own interaction view (see interactions.url).
       devInteractions: { enabled: false },
+      // RP-initiated logout (`/session/end`). RP_LOGOUT_SEAMLESS=1: a valid
+      // id_token_hint for the browser's own account signs out with no extra
+      // click, and confirming always ends the whole browser session (see
+      // logout-ui.ts). Unset: panva's default pages, as before 2026-11-12.
+      ...(rpLogoutSeamless()
+        ? {
+            rpInitiatedLogout: {
+              enabled: true,
+              logoutSource: logoutSource as never,
+              postLogoutSuccessSource: postLogoutSuccessSource as never,
+            },
+          }
+        : {}),
       // RFC 8628 Device Authorization Grant — for headless / server-side agents
       // (e.g. Hermes on citrate-agent-runtime) that cannot open a loopback
       // browser. The device POSTs /device/auth for a user_code, the human enters

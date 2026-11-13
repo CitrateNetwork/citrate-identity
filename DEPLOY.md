@@ -89,6 +89,8 @@ again.
 | `ISSUER_URL` | **yes** | `https://auth.citrate.ai` — public HTTPS, no localhost |
 | `ISSUER_HOST` | **yes** | `auth.citrate.ai` — the host Caddy gets a cert for |
 | `COOKIE_KEYS` | **yes** | comma-separated, each **≥32 chars**; `openssl rand -hex 32`. Rotate by **prepending** a new key |
+| `RP_LOGOUT_SEAMLESS` | optional | `1` = `/session/end` with a valid `id_token_hint` for the browser's own account signs out without a confirm click, and confirming always ends the whole browser session. Unset = panva's default confirm page |
+| `AUTH_ROOT_REDIRECT_URL` | optional | `https://www.citrate.ai/join` = `GET /` redirects there. Must be https; unset = `GET /` is a 404 |
 | `EXPLORER_ORIGIN` | **yes** | `https://explorer.citrate.ai` (CORS + redirect_uri) |
 | `DASHBOARD_ORIGIN` | **yes** | `https://dashboard.citrate.ai` |
 | `STUDIO_ORIGIN` | optional | only if studio runs as a hosted web origin |

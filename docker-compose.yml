@@ -28,6 +28,11 @@ services:
       PORT: "3000"
       ISSUER_URL: ${ISSUER_URL}
       COOKIE_KEYS: ${COOKIE_KEYS}
+      # RP-initiated logout with no confirm click for a valid id_token_hint, and
+      # a logout that ends the whole browser session (src/logout-ui.ts). Unset = off.
+      RP_LOGOUT_SEAMLESS: ${RP_LOGOUT_SEAMLESS:-}
+      # GET / redirects here (https only). Unset = GET / is a 404.
+      AUTH_ROOT_REDIRECT_URL: ${AUTH_ROOT_REDIRECT_URL:-}
       EXPLORER_ORIGIN: ${EXPLORER_ORIGIN}
       DASHBOARD_ORIGIN: ${DASHBOARD_ORIGIN}
       # memrizz RP (federated agent-memory webapp). Echoed for CORS + the memrizz
