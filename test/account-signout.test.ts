@@ -1,4 +1,10 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import {
+  getAccountSessionIndex,
+  InMemoryAccountSessionIndex,
+  setAccountSessionIndex,
+  type AccountSessionIndex,
+} from '../src/auth/account-sessions.js';
 import { privateKeyToAccount } from 'viem/accounts';
 import { type Hex } from 'viem';
 import {
@@ -18,6 +24,9 @@ import {
  * session, grant and refresh token of the account). Both are same-origin form
  * POSTs carrying a session-bound token, so another site cannot sign a member
  * out (or keep them from being signed out) by posting the form for them.
+ *
+ * All of it is behind ACCOUNT_SESSION_CONTROLS=1 (review of #48): with the flag
+ * unset the authority behaves exactly as before (last describe block).
  */
 
 const alice = privateKeyToAccount(`0x${'e1'.repeat(32)}` as Hex);
@@ -34,12 +43,21 @@ const ORCHARD: Client = {
 };
 
 let auth: TestAuthority;
+let defaults: TestAuthority;
 
 beforeAll(async () => {
-  auth = await startAuthority({ googleEnabled: false });
+  delete process.env.ACCOUNT_SESSION_CONTROLS;
+  defaults = await startAuthority({ googleEnabled: false });
+  process.env.ACCOUNT_SESSION_CONTROLS = '1';
+  try {
+    auth = await startAuthority({ googleEnabled: false });
+  } finally {
+    delete process.env.ACCOUNT_SESSION_CONTROLS;
+  }
 });
 afterAll(async () => {
   await auth.close();
+  await defaults.close();
 });
 
 async function accountPage(jar: CookieJar): Promise<string> {
@@ -196,5 +214,69 @@ describe('Sign out of all sessions', () => {
     const res = await post(jar, '/account/sign-out-all', fields, 'https://evil.example');
     expect(res.status).toBe(403);
     expect(await hasLiveSession(jar)).toBe(true);
+  });
+});
+
+describe('POST /logout {everywhere: true}', () => {
+  const realIndex = getAccountSessionIndex();
+  afterEach(() => setAccountSessionIndex(realIndex));
+
+  async function logoutEverywhere(accessToken: string, on: TestAuthority) {
+    return fetch(`${on.baseUrl}/logout`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${accessToken}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ everywhere: true }),
+    });
+  }
+
+  it('still answers 200 when the session index fails (e.g. Redis down)', async () => {
+    const app = await signedInBrowser(auth, EXPLORER, carol, { prompt: 'consent' });
+    const broken: AccountSessionIndex = {
+      add: async () => {},
+      drain: async () => {
+        throw new Error('redis: connection refused');
+      },
+    };
+    setAccountSessionIndex(broken);
+    const res = await logoutEverywhere(app.tokens.access_token, auth);
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { everywhere?: boolean }).everywhere).toBe(true);
+    // The account epoch still refuses the refresh token.
+    expect(await refresh(app.tokens.refresh_token!)).toBe(400);
+  });
+});
+
+describe('with ACCOUNT_SESSION_CONTROLS unset (current behaviour)', () => {
+  it('/account shows no sign-out actions', async () => {
+    const { jar } = await signedInBrowser(defaults, ORCHARD, alice);
+    const res = await fetch(`${defaults.baseUrl}/account`, { headers: { cookie: jar.header() } });
+    const html = await res.text();
+    expect(html).not.toContain('/account/sign-out');
+    expect(html).not.toContain('Signed in as');
+  });
+
+  it('the sign-out routes do not exist', async () => {
+    const { jar } = await signedInBrowser(defaults, ORCHARD, alice);
+    for (const path of ['/account/sign-out', '/account/sign-out-all']) {
+      const res = await fetch(`${defaults.baseUrl}${path}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/x-www-form-urlencoded', cookie: jar.header(), origin: defaults.baseUrl },
+        body: '',
+        redirect: 'manual',
+      });
+      expect(res.status, path).toBe(404);
+    }
+  });
+
+  it('sessions and grants are not indexed', async () => {
+    const spy = new InMemoryAccountSessionIndex();
+    const realIndex = getAccountSessionIndex();
+    setAccountSessionIndex(spy);
+    try {
+      await signedInBrowser(defaults, ORCHARD, alice);
+      expect(await spy.drain(alice.address)).toEqual([]);
+    } finally {
+      setAccountSessionIndex(realIndex);
+    }
   });
 });

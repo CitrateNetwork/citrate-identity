@@ -45,6 +45,12 @@ describe('session lifetime from the environment', () => {
     });
   }
 
+  it('refuses values above 30 days (the account-epoch lifetime)', () => {
+    expect(sessionLifetimeFromEnv({ SESSION_IDLE_TTL_SECONDS: '2592000' }).idleSec).toBe(2_592_000);
+    expect(() => sessionLifetimeFromEnv({ SESSION_IDLE_TTL_SECONDS: '2592001' })).toThrow(/at most 2592000/);
+    expect(() => sessionLifetimeFromEnv({ SESSION_ABSOLUTE_TTL_SECONDS: '99999999' })).toThrow(/at most 2592000/);
+  });
+
   it('refuses an idle limit longer than the absolute one', () => {
     expect(() =>
       sessionLifetimeFromEnv({ SESSION_IDLE_TTL_SECONDS: '7200', SESSION_ABSOLUTE_TTL_SECONDS: '3600' }),
