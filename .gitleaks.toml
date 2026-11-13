@@ -8,6 +8,10 @@
 # 0x37b36e6b4b8AfD3BFCA78370E372b66493531B7D, which holds no funds and has no
 # deployed/treasury/production role (verified: referenced nowhere else in the
 # federation). Publishing it is inert.
+#
+# `regexes` lists EXACT fixture values (anchored ^…$), never paths, so a real
+# secret added to the same file is still caught. Pinned by
+# scripts/test-gitleaks-allowlist.sh.
 title = "citrate-identity"
 
 [extend]
@@ -21,4 +25,9 @@ paths = [
   # Same throwaway key (derives 0x37b3…1B7D: 0 balance, 0 nonce on 40204,
   # verified 2026-09-24). Its omission kept the blocking secret-scan red on main.
   '''test/aa/sponsor\.test\.ts''',
+]
+regexes = [
+  # test/kyc-status-secrets.test.ts (#44): a deliberately shared webhook/status
+  # secret, used to prove the authority refuses that misconfiguration. Inert.
+  '''^same-secret-0123456789$''',
 ]
