@@ -1,7 +1,7 @@
 /**
  * Cross-origin + operational HTTP extras for the Citrate OIDC authority.
  *
- * Two concerns, mounted as a SINGLE panva middleware so they run BEFORE every
+ * Three concerns, mounted as a SINGLE panva middleware so they run BEFORE every
  * other route (the SIWE / KYC / logout routes and panva's own router):
  *
  *   1. CORS — RPs (citrate-explorer / -dashboard / optionally -studio) call a
@@ -23,12 +23,37 @@
  *      500 the endpoint (so the LB sees the process is up even if a dependency is
  *      briefly flapping; deeper checks belong in dependency-specific alerting).
  *
- * Both are mounted OUTSIDE panva's OIDC routing and short-circuit before
+ *   3. `GET /` — when AUTH_ROOT_REDIRECT_URL is set (an https URL, e.g.
+ *      https://www.citrate.ai/join), a 302 there instead of a 404. Unset keeps
+ *      the 404.
+ *
+ * All are mounted OUTSIDE panva's OIDC routing and short-circuit before
  * `next()`, so they never interfere with the protocol endpoints.
  */
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type Provider from 'oidc-provider';
 import { isAllowedCorsOrigin } from './config.js';
+
+/**
+ * Where GET / on the authority sends a visitor, from AUTH_ROOT_REDIRECT_URL.
+ * Unset or empty: no redirect (404, the behaviour before 2026-11-12). Anything
+ * but an absolute https URL refuses to boot rather than redirecting somewhere
+ * unintended.
+ */
+export function rootRedirectFromEnv(env: { AUTH_ROOT_REDIRECT_URL?: string } = process.env): string | undefined {
+  const raw = env.AUTH_ROOT_REDIRECT_URL?.trim();
+  if (!raw) return undefined;
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new Error(`AUTH_ROOT_REDIRECT_URL must be an absolute https URL, got "${raw}"`);
+  }
+  if (url.protocol !== 'https:') {
+    throw new Error(`AUTH_ROOT_REDIRECT_URL must be an absolute https URL, got "${raw}"`);
+  }
+  return url.href;
+}
 
 /**
  * Deployed git commit, surfaced on `/health` so a deploy can be *probed* rather
@@ -106,6 +131,7 @@ export function mountHttpExtras(
   provider: Provider,
   options: HttpExtrasOptions = {},
 ): void {
+  const rootRedirect = rootRedirectFromEnv();
   provider.use(async (ctx, next) => {
     const { method, path } = ctx;
 
@@ -153,6 +179,13 @@ export function mountHttpExtras(
       ctx.set('cache-control', 'no-store');
       ctx.body = body;
       return; // handled — do not fall through to panva
+    }
+
+    // --- GET / — the authority has no home page (AUTH_ROOT_REDIRECT_URL). ---
+    if (rootRedirect && (method === 'GET' || method === 'HEAD') && path === '/') {
+      ctx.set('cache-control', 'no-store');
+      ctx.redirect(rootRedirect);
+      return;
     }
 
     await next();
