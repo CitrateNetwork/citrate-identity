@@ -45,6 +45,22 @@ describe('session lifetime from the environment', () => {
     });
   }
 
+  it('never puts the configured value in the error (it reaches the boot log)', () => {
+    for (const [name, raw] of [
+      ['SESSION_IDLE_TTL_SECONDS', 'pa55-w0rd-in-the-wrong-var'],
+      ['SESSION_ABSOLUTE_TTL_SECONDS', '99999999'],
+    ] as const) {
+      let message = '';
+      try {
+        sessionLifetimeFromEnv({ [name]: raw });
+      } catch (err) {
+        message = (err as Error).message;
+      }
+      expect(message).toContain(name);
+      expect(message).not.toContain(raw);
+    }
+  });
+
   it('refuses values above 30 days (the account-epoch lifetime)', () => {
     expect(sessionLifetimeFromEnv({ SESSION_IDLE_TTL_SECONDS: '2592000' }).idleSec).toBe(2_592_000);
     expect(() => sessionLifetimeFromEnv({ SESSION_IDLE_TTL_SECONDS: '2592001' })).toThrow(/at most 2592000/);

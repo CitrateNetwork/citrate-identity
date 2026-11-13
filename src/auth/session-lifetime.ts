@@ -14,6 +14,8 @@
  *     unset: no absolute limit (the previous behaviour).
  * Proposed production values: 43200 (12h) idle, 604800 (7d) absolute.
  *
+ * Error messages name the variable and the expected format, never the value
+ * (it reaches the boot log; CodeQL js/clear-text-logging).
  * A value that is not a positive whole number of seconds, or an idle limit
  * above the absolute one, refuses to boot rather than running with a
  * lifetime nobody chose.
@@ -39,10 +41,10 @@ function seconds(name: string, raw: string | undefined): number | undefined {
   if (raw === undefined || raw.trim() === '') return undefined;
   const v = raw.trim();
   if (!/^\d+$/.test(v) || Number(v) <= 0 || !Number.isSafeInteger(Number(v))) {
-    throw new Error(`${name} must be a positive whole number of seconds, got "${raw}"`);
+    throw new Error(`${name} must be a positive whole number of seconds`);
   }
   if (Number(v) > MAX_SESSION_TTL_SEC) {
-    throw new Error(`${name} must be at most ${MAX_SESSION_TTL_SEC} (30 days), got "${raw}"`);
+    throw new Error(`${name} must be at most ${MAX_SESSION_TTL_SEC} seconds (30 days)`);
   }
   return Number(v);
 }

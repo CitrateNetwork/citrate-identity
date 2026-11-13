@@ -47,10 +47,10 @@ export function rootRedirectFromEnv(env: { AUTH_ROOT_REDIRECT_URL?: string } = p
   try {
     url = new URL(raw);
   } catch {
-    throw new Error(`AUTH_ROOT_REDIRECT_URL must be an absolute https URL, got "${raw}"`);
+    throw new Error('AUTH_ROOT_REDIRECT_URL must be an absolute https URL');
   }
   if (url.protocol !== 'https:') {
-    throw new Error(`AUTH_ROOT_REDIRECT_URL must be an absolute https URL, got "${raw}"`);
+    throw new Error('AUTH_ROOT_REDIRECT_URL must be an absolute https URL');
   }
   return url.href;
 }
