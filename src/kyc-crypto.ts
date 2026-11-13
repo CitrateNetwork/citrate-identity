@@ -99,7 +99,7 @@ function open(payload: string, key: Buffer): string {
   const iv = buf.subarray(1, 1 + IV_LEN);
   const tag = buf.subarray(1 + IV_LEN, 1 + IV_LEN + TAG_LEN);
   const enc = buf.subarray(1 + IV_LEN + TAG_LEN);
-  const decipher = createDecipheriv(ALG, key, iv);
+  const decipher = createDecipheriv(ALG, key, iv, { authTagLength: TAG_LEN });
   decipher.setAuthTag(tag);
   try {
     return Buffer.concat([decipher.update(enc), decipher.final()]).toString('utf8');
@@ -160,7 +160,7 @@ export function openBytes(ciphertext: string, dek: Buffer): Buffer {
   const iv = buf.subarray(1, 1 + IV_LEN);
   const tag = buf.subarray(1 + IV_LEN, 1 + IV_LEN + TAG_LEN);
   const enc = buf.subarray(1 + IV_LEN + TAG_LEN);
-  const decipher = createDecipheriv(ALG, dek, iv);
+  const decipher = createDecipheriv(ALG, dek, iv, { authTagLength: TAG_LEN });
   decipher.setAuthTag(tag);
   try {
     return Buffer.concat([decipher.update(enc), decipher.final()]);

@@ -198,32 +198,8 @@ describe('FWA-C6-01 tripwire: federation routes must check email_verified', () =
     const offenders: string[] = [];
     for (const file of walk(SRC_ROOT)) {
       const raw = readFileSync(file, 'utf8');
-      const code = stripCommentsAndStrings(raw);
-      const verifiesAToken = /\bjwt(Verify|Decrypt)\s*\(/.test(code);
-      if (!verifiesAToken) continue;
-
-      // Look at each brace-delimited scope (function/arrow body etc). The file
-      // is an offender if ANY scope reads the email claim without a verified
-      // guard in that same scope — AND the broadest (whole-file, stripped) view
-      // also lacks a guard around that read. We require the per-scope check so
-      // an email_verified check in an unrelated function can't launder a read
-      // elsewhere; the innermost scope containing the read is the tightest.
-      const scopes = braceScopes(code);
-      const offendingScopes = scopes.filter(scopeIsOffender);
-
-      if (offendingScopes.length === 0) continue;
-
-      // Among the offending scopes, only flag those whose read is NOT enclosed
-      // by some ancestor scope that DOES carry the guard (e.g. the read sits in
-      // a tiny block but the enclosing function guards it). Approximate the
-      // "tightest guarded ancestor" by checking: does any scope that CONTAINS
-      // this offending scope's text carry the guard?
-      const genuinelyUnguarded = offendingScopes.some((off) => {
-        const ancestorGuards = scopes.some(
-          (s) => s !== off && s.includes(off) && VERIFIED_GUARD.test(s),
-        );
-        return !ancestorGuards;
-      });
+      // The same predicate the meta-tests below exercise (one source of truth).
+      const genuinelyUnguarded = fileTrips(raw);
 
       if (genuinelyUnguarded) {
         offenders.push(file.replace(SRC_ROOT, 'src'));
@@ -246,18 +222,14 @@ describe('FWA-C6-01 tripwire: federation routes must check email_verified', () =
 function fileTrips(src: string): boolean {
   const code = stripCommentsAndStrings(src);
   if (!/\bjwt(Verify|Decrypt)\s*\(/.test(code)) return false;
+  // Look at each brace-delimited scope (function/arrow body etc). The file is
+  // an offender if ANY scope reads the email claim without a verified guard in
+  // that same scope, AND no enclosing scope carries the guard (an
+  // email_verified check in an unrelated function cannot launder the read).
   const scopes = braceScopes(code);
-  const offendingScopes = scopes.filter(
-    (s) =>
-      (/\.email\b(?!_?[Vv]erified)/.test(s) ||
-        /\[\s*['"]email['"]\s*\]/.test(s)) &&
-      !/email_verified|emailVerified/.test(s),
-  );
+  const offendingScopes = scopes.filter(scopeIsOffender);
   return offendingScopes.some(
-    (off) =>
-      !scopes.some(
-        (s) => s !== off && s.includes(off) && /email_verified|emailVerified/.test(s),
-      ),
+    (off) => !scopes.some((s) => s !== off && s.includes(off) && VERIFIED_GUARD.test(s)),
   );
 }
 
