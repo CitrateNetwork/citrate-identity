@@ -31,6 +31,10 @@ services:
       # RP-initiated logout with no confirm click for a valid id_token_hint, and
       # a logout that ends the whole browser session (src/logout-ui.ts). Unset = off.
       RP_LOGOUT_SEAMLESS: ${RP_LOGOUT_SEAMLESS:-}
+      # 1 = register <orchard origin>/join?signed_out=1 as a post-logout URI.
+      ORCHARD_SIGNED_OUT_URI: ${ORCHARD_SIGNED_OUT_URI:-}
+      # 1 = accept prompt=select_account (shows the sign-in page). Unset = refused.
+      OIDC_PROMPT_SELECT_ACCOUNT: ${OIDC_PROMPT_SELECT_ACCOUNT:-}
       # GET / redirects here (https only). Unset = GET / is a 404.
       AUTH_ROOT_REDIRECT_URL: ${AUTH_ROOT_REDIRECT_URL:-}
       EXPLORER_ORIGIN: ${EXPLORER_ORIGIN}

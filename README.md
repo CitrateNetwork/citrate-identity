@@ -116,6 +116,8 @@ Key env vars (full annotations in `.env.example`):
 | `DASHBOARD_ORIGIN` | `http://localhost:3002` | Redirect base for the dashboard RP. |
 | `COOKIE_KEYS` | dev default | Comma-separated cookie-signing secrets (prepend to rotate). |
 | `RP_LOGOUT_SEAMLESS` | unset (off) | `1`: no confirm click on `/session/end` for a valid `id_token_hint`; logout ends the whole browser session. |
+| `ORCHARD_SIGNED_OUT_URI` | unset (off) | `1`: register `<orchard origin>/join?signed_out=1` as a post-logout URI. |
+| `OIDC_PROMPT_SELECT_ACCOUNT` | unset (off) | `1`: accept `prompt=select_account`. |
 | `AUTH_ROOT_REDIRECT_URL` | unset (404) | https URL that `GET /` redirects to (e.g. `https://www.citrate.ai/join`). |
 | `DATABASE_URL` | unset → in-memory | Postgres for the KYC claim store (persists across restarts). **Required in production.** |
 | `REDIS_URL` | unset → in-memory | Redis backing the panva adapter, SIWE nonce store, and logout bus. **Required in production.** |

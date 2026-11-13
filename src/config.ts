@@ -353,11 +353,24 @@ export const ACCOUNT_CHOICE_CLIENT_IDS: ReadonlySet<string> = new Set([
  *     page serves login and consent prompts only.
  * (`prompt=login` is panva's own login check.) Once this interaction has a
  * login result the checks are satisfied, so they cannot loop.
+ *
+ * `select_account` is behind OIDC_PROMPT_SELECT_ACCOUNT=1; unset, panva keeps
+ * rejecting the value, as before.
  */
-export function buildInteractionPolicy(): ReturnType<typeof interactionPolicy.base> {
+export function buildInteractionPolicy(
+  opts: { selectAccount?: boolean } = { selectAccount: envFlag('OIDC_PROMPT_SELECT_ACCOUNT') },
+): ReturnType<typeof interactionPolicy.base> {
   const policy = interactionPolicy.base();
   const login = policy.get('login');
   if (!login) throw new Error('interaction policy has no login prompt');
+  addDesktopAccountChoice(login);
+  if (opts.selectAccount) addSelectAccount(policy, login);
+  return policy;
+}
+
+type LoginPrompt = NonNullable<ReturnType<ReturnType<typeof interactionPolicy.base>['get']>>;
+
+function addSelectAccount(policy: ReturnType<typeof interactionPolicy.base>, login: LoginPrompt): void {
   const selectAccount = new interactionPolicy.Prompt({ name: 'select_account', requestable: true });
   selectAccount.checks.clear();
   policy.add(selectAccount);
@@ -374,6 +387,9 @@ export function buildInteractionPolicy(): ReturnType<typeof interactionPolicy.ba
       },
     ),
   );
+}
+
+function addDesktopAccountChoice(login: LoginPrompt): void {
   login.checks.add(
     new interactionPolicy.Check(
       'desktop_account_choice',
@@ -389,7 +405,6 @@ export function buildInteractionPolicy(): ReturnType<typeof interactionPolicy.ba
       },
     ),
   );
-  return policy;
 }
 
 /** The dev-default cookie key shipped in source — must never run in production. */
@@ -398,10 +413,15 @@ export const DEV_DEFAULT_COOKIE_KEY = 'citrate-identity-dev-cookie-key';
 /** Minimum length (chars) for a production cookie signing key. */
 export const MIN_COOKIE_KEY_LENGTH = 32;
 
+/** A boolean env flag: `1` or `true` turns it on; anything else (or unset) is off. */
+export function envFlag(name: string, env: Record<string, string | undefined> = process.env): boolean {
+  const v = env[name]?.trim().toLowerCase();
+  return v === '1' || v === 'true';
+}
+
 /** RP_LOGOUT_SEAMLESS=1|true turns on the seamless RP-initiated logout pages. */
 export function rpLogoutSeamless(env: { RP_LOGOUT_SEAMLESS?: string } = process.env): boolean {
-  const v = env.RP_LOGOUT_SEAMLESS?.trim().toLowerCase();
-  return v === '1' || v === 'true';
+  return envFlag('RP_LOGOUT_SEAMLESS', env);
 }
 
 /** The cookie signing keys (COOKIE_KEYS, comma-separated; first signs). */
@@ -1023,6 +1043,7 @@ export async function buildConfiguration(
   redis?: RedisLike,
 ): Promise<Configuration> {
   const jwks = await loadOrCreateJwks();
+  const orchardSignedOutUri = envFlag('ORCHARD_SIGNED_OUT_URI');
 
   return {
     jwks,
@@ -1319,9 +1340,10 @@ export async function buildConfiguration(
         redirect_uris: origins.map(origin => `${origin}/auth/callback`),
         // `/join?signed_out=1` is where the landing app's /auth/logout sends a
         // member after RP-initiated logout (exact match, query included).
+        // Behind ORCHARD_SIGNED_OUT_URI=1; unset registers only `<origin>/`.
         post_logout_redirect_uris: origins.flatMap((origin) => [
           `${origin}/`,
-          `${origin}${ORCHARD_SIGNED_OUT_PATH}`,
+          ...(orchardSignedOutUri ? [`${origin}${ORCHARD_SIGNED_OUT_PATH}`] : []),
         ]),
         scope: 'openid profile wallet',
       })),
