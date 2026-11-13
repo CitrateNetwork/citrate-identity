@@ -29,9 +29,10 @@ import {
  *   - prompt=login and prompt=select_account force the sign-in page even
  *     with a live session, so the site can offer "Use a different account";
  *   - GET / sends a stray visitor to the join page.
- * The seamless logout pages and the root redirect are behind
- * RP_LOGOUT_SEAMLESS / AUTH_ROOT_REDIRECT_URL; with both unset the authority
- * behaves as before (last describe block).
+ * Each is behind a default-off flag: ORCHARD_SIGNED_OUT_URI (the new
+ * post-logout URI), RP_LOGOUT_SEAMLESS (no confirm click),
+ * OIDC_PROMPT_SELECT_ACCOUNT and AUTH_ROOT_REDIRECT_URL. With all unset the
+ * authority behaves as before (last describe block).
  */
 
 const alice = privateKeyToAccount(`0x${'c1'.repeat(32)}` as Hex);
@@ -46,20 +47,21 @@ const SIGNED_OUT = 'https://www.citrate.ai/join?signed_out=1';
 let auth: TestAuthority;
 
 let defaults: TestAuthority;
+const FLAGS = ['RP_LOGOUT_SEAMLESS', 'AUTH_ROOT_REDIRECT_URL', 'OIDC_PROMPT_SELECT_ACCOUNT', 'ORCHARD_SIGNED_OUT_URI'];
 
 beforeAll(async () => {
   // An authority as it runs with both flags unset (the behaviour before this change)...
-  delete process.env.RP_LOGOUT_SEAMLESS;
-  delete process.env.AUTH_ROOT_REDIRECT_URL;
+  for (const f of FLAGS) delete process.env[f];
   defaults = await startAuthority({ googleEnabled: false });
   // ...and one with them set, as production is meant to run.
   process.env.RP_LOGOUT_SEAMLESS = '1';
   process.env.AUTH_ROOT_REDIRECT_URL = 'https://www.citrate.ai/join';
+  process.env.OIDC_PROMPT_SELECT_ACCOUNT = '1';
+  process.env.ORCHARD_SIGNED_OUT_URI = '1';
   try {
     auth = await startAuthority({ googleEnabled: false });
   } finally {
-    delete process.env.RP_LOGOUT_SEAMLESS;
-    delete process.env.AUTH_ROOT_REDIRECT_URL;
+    for (const f of FLAGS) delete process.env[f];
   }
 });
 afterAll(async () => {
@@ -215,10 +217,19 @@ describe('with RP_LOGOUT_SEAMLESS and AUTH_ROOT_REDIRECT_URL unset (current beha
     return signedInBrowser(defaults, ORCHARD, alice);
   }
 
-  it('still accepts the registered post-logout URI, behind panva\'s confirm page', async () => {
+  it('does not register the new post-logout URI', async () => {
     const { jar, tokens } = await signedIn();
     const res = await fetch(
       `${defaults.baseUrl}/session/end?${new URLSearchParams({ id_token_hint: tokens.id_token, post_logout_redirect_uri: SIGNED_OUT })}`,
+      { headers: { cookie: jar.header() }, redirect: 'manual' },
+    );
+    expect(res.status).toBe(400);
+  });
+
+  it("keeps panva's confirm page for the URIs registered before", async () => {
+    const { jar, tokens } = await signedIn();
+    const res = await fetch(
+      `${defaults.baseUrl}/session/end?${new URLSearchParams({ id_token_hint: tokens.id_token, post_logout_redirect_uri: 'https://www.citrate.ai/' })}`,
       { headers: { cookie: jar.header() }, redirect: 'manual' },
     );
     jar.absorb(res);
@@ -226,7 +237,6 @@ describe('with RP_LOGOUT_SEAMLESS and AUTH_ROOT_REDIRECT_URL unset (current beha
     const html = await res.text();
     expect(html).toContain('Yes, sign me out');
     expect(html).not.toContain('<script');
-    // "Yes, sign me out" posts logout=yes and lands back on the site.
     const form = /<form id="op\.logoutForm" method="post" action="([^"]+)">([\s\S]*?)<\/form>/.exec(html)!;
     const fields = hiddenFields(form[2]);
     fields.set('logout', 'yes');
@@ -237,7 +247,15 @@ describe('with RP_LOGOUT_SEAMLESS and AUTH_ROOT_REDIRECT_URL unset (current beha
       redirect: 'manual',
     });
     expect(done.status).toBe(303);
-    expect(done.headers.get('location')).toBe(SIGNED_OUT);
+    expect(done.headers.get('location')).toBe('https://www.citrate.ai/');
+  });
+
+  it('still refuses prompt=select_account', async () => {
+    const { jar } = await signedIn();
+    const { location } = await startAuth(defaults, jar, ORCHARD, { prompt: 'select_account' });
+    const to = new URL(location, defaults.baseUrl);
+    expect(to.href.startsWith(ORCHARD.redirectUri)).toBe(true);
+    expect(to.searchParams.get('error')).toBe('invalid_request');
   });
 
   it('keeps GET / as a 404', async () => {
