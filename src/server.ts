@@ -345,6 +345,7 @@ export async function createProvider(
   // one-time nonce store SIWE uses (Redis in prod), so a proof can
   // never be replayed; canonical = first wallet per the ADR.
   mountIdentityRegistryRoutes(provider, {
+    rateLimiter: options.rateLimiter ?? createRateLimiter(options.redis),
     authority: siweDomainFromIssuer(issuer),
     chainId: CITRATE_CHAIN_ID,
     nonceStore: nonceStore ?? new InMemoryNonceStore(),
