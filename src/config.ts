@@ -1510,7 +1510,12 @@ export async function buildConfiguration(
       // every RP gets the centralized access tier in the id_token without having
       // to request an extra scope. Minted only when the principal is on the
       // entitlements roster; absent otherwise (RP falls back to Public).
-      openid: ['sub', ENTITLEMENT_CLAIM],
+      // `acr` / `amr` (OIDC Core §2) are the login's own values, set by each
+      // sign-in route (webauthn → ['webauthn'], password → ['pwd'], …). Listing
+      // them under `openid` lets panva's claim mask keep them in every ID token
+      // and advertises them in discovery; RPs that require a passkey or MFA
+      // sign-in (the landing admin check) read `amr`. `auth_time` unchanged.
+      openid: ['sub', 'acr', 'amr', ENTITLEMENT_CLAIM],
       profile: ['name', 'email', 'email_verified'],
       // Citrate extension: canonical wallet + linked wallets + the most
       // recent signing method, surfaced under the `wallet` scope (EW-S1

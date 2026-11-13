@@ -66,9 +66,21 @@ beforeEach(() => {
   });
 });
 
-async function page(client: Client) {
+/**
+ * `auth_time` is unchanged by this fix: panva adds it when the RP asks for it
+ * (`max_age`, as the landing admin sign-in does with max_age=0 + prompt=login).
+ */
+// Exactly what citrate-landing's /auth/start?admin=1 sends (the claims
+// parameter is not supported here and is ignored, as before).
+const ADMIN_STYLE = {
+  max_age: '0',
+  prompt: 'login',
+  claims: JSON.stringify({ id_token: { amr: { essential: true }, auth_time: { essential: true } } }),
+};
+
+async function page(client: Client, extra: Record<string, string> = {}) {
   const jar = new CookieJar();
-  const { location, codeVerifier } = await startAuth(auth, jar, client);
+  const { location, codeVerifier } = await startAuth(auth, jar, client, extra);
   expect((await follow(auth, jar, client, location)).signInPage).toBe(true);
   return { jar, codeVerifier };
 }
@@ -106,7 +118,7 @@ describe('the ID token says how the member signed in', () => {
       expect((await post(reg.jar, '/auth/webauthn/signup-verify', { response: device.create(opts, auth.baseUrl) })).status).toBe(201);
 
       const before = Math.floor(Date.now() / 1000);
-      const { jar, codeVerifier } = await page(client);
+      const { jar, codeVerifier } = await page(client, ADMIN_STYLE);
       const aopts = (await (await post(jar, '/auth/webauthn/authenticate-options', {})).json()) as
         PublicKeyCredentialRequestOptionsJSON;
       const res = await post(jar, '/auth/webauthn/authenticate-verify', { response: device.get(aopts, auth.baseUrl) });
@@ -123,13 +135,23 @@ describe('the ID token says how the member signed in', () => {
   it('password → amr ["pwd"]', async () => {
     const email = 'pwd@citrate.example';
     await memberWithPassword(email, 'correct horse battery staple');
-    const { jar, codeVerifier } = await page(ORCHARD);
+    const { jar, codeVerifier } = await page(ORCHARD, ADMIN_STYLE);
     const res = await post(jar, '/auth/password/login', { email, password: 'correct horse battery staple' });
     expect(res.status).toBe(200);
     const claims = await idTokenAfter(ORCHARD, jar, codeVerifier, ((await res.json()) as { redirectTo: string }).redirectTo);
     expect(claims.amr).toEqual(['pwd']);
     expect(claims.acr).toBe('urn:citrate:password');
     expect(typeof claims.auth_time).toBe('number');
+  });
+
+  it('without max_age, amr is still there (auth_time stays as before: only on request)', async () => {
+    const email = 'plain@citrate.example';
+    await memberWithPassword(email, 'correct horse battery staple');
+    const { jar, codeVerifier } = await page(EXPLORER);
+    const res = await post(jar, '/auth/password/login', { email, password: 'correct horse battery staple' });
+    const claims = await idTokenAfter(EXPLORER, jar, codeVerifier, ((await res.json()) as { redirectTo: string }).redirectTo);
+    expect(claims.amr).toEqual(['pwd']);
+    expect(claims.auth_time).toBeUndefined();
   });
 
   it('wallet (SIWE) → amr ["siwe"]', async () => {
