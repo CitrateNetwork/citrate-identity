@@ -109,7 +109,7 @@ export async function follow(auth: TestAuthority, jar: CookieJar, client: Client
   for (let hop = 0; hop < 12; hop++) {
     const url = location.startsWith('http') ? location : `${auth.baseUrl}${location}`;
     if (url.startsWith(client.redirectUri)) {
-      return { code: new URL(url).searchParams.get('code') ?? undefined, signInPage: false };
+      return { code: new URL(url).searchParams.get('code') ?? undefined, signInPage: false, url };
     }
     const res = await fetch(url, { headers: { cookie: jar.header() }, redirect: 'manual' });
     jar.absorb(res);
@@ -138,7 +138,7 @@ export async function follow(auth: TestAuthority, jar: CookieJar, client: Client
         location = post.headers.get('location') ?? '';
         continue;
       }
-      return { code: undefined, signInPage: true };
+      return { code: undefined, signInPage: true, url };
     }
     if (res.status !== 302 && res.status !== 303) {
       throw new Error(`unexpected ${res.status} at ${url}: ${await res.text()}`);

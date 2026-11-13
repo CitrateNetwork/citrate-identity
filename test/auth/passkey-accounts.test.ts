@@ -15,7 +15,7 @@
  *   - a signed-in email account can add a passkey from /account;
  *   - the sign-in page no longer steers a failed sign-in into account creation.
  */
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type {
   PublicKeyCredentialCreationOptionsJSON,
   PublicKeyCredentialRequestOptionsJSON,
@@ -35,7 +35,7 @@ import {
   setEmailVerificationStore,
 } from '../../src/auth/email-verification-pg.js';
 import { hashPassword } from '../../src/auth/password.js';
-import { resetEmailSender, setEmailSender } from '../../src/email-send.js';
+import { resetEmailSender, setEmailSender, type EmailMessage } from '../../src/email-send.js';
 import {
   CookieJar,
   exchange,
@@ -74,6 +74,7 @@ const EXPLORER: Client = { clientId: 'citrate-explorer', redirectUri: 'http://lo
 let auth: TestAuthority;
 let users: CountingUserStore;
 let lastCode: { to: string; code: string } | null;
+let sent: EmailMessage[];
 
 beforeAll(async () => {
   auth = await startAuthority({ googleEnabled: false });
@@ -88,12 +89,17 @@ beforeEach(() => {
   setWebAuthnStore(new InMemoryWebAuthnCredentialStore());
   setEmailVerificationStore(new InMemoryEmailVerificationStore());
   lastCode = null;
+  sent = [];
   setEmailSender(async (msg) => {
+    sent.push(msg);
     const m = /(\d{6})/.exec(msg.subject);
-    lastCode = m ? { to: msg.to, code: m[1] } : null;
+    if (m) lastCode = { to: msg.to, code: m[1] };
     return true;
   });
 });
+
+/** Notices (not verification codes) sent to `to`. */
+const noticesTo = (to: string) => sent.filter((m) => m.to === to && !/\d{6}/.test(m.subject));
 
 /** A browser on the sign-in page of a fresh /auth request. */
 async function onSignInPage(jar = new CookieJar()) {
@@ -270,6 +276,15 @@ describe('creating an account with a passkey needs a verified email', () => {
     expect(((await verify.json()) as { userId: string }).userId).toBe(existing.id);
     expect(users.created).toBe(0);
     expect((await passkeySignIn(device)).sub).toBe(existing.id);
+    // The owner hears about a passkey added to their existing account.
+    expect(noticesTo('larry@citrate.example').map((m) => m.subject)).toEqual([
+      expect.stringMatching(/passkey was added/i),
+    ]);
+  });
+
+  it('sends no "passkey added" notice for a brand-new account', async () => {
+    await passkeySignUp(new SoftAuthenticator(), 'fresh@citrate.example');
+    expect(noticesTo('fresh@citrate.example')).toHaveLength(0);
   });
 
   it('the code is single-use', async () => {
@@ -339,6 +354,98 @@ describe('a signed-in email account can add a passkey', () => {
     expect((await postJson(jar, '/account/passkey/options', {}, { origin: auth.baseUrl })).status).toBe(403);
     expect((await postJson(jar, '/account/passkey/options', { csrf }, { origin: 'https://evil.example' })).status).toBe(403);
     expect((await postJson(new CookieJar(), '/account/passkey/options', { csrf }, { origin: auth.baseUrl })).status).toBe(401);
+  });
+
+  it('emails the account owner when a passkey is added', async () => {
+    const { jar } = await signedInWithPassword('notify@citrate.example', 'correct horse battery staple');
+    const csrf = csrfFrom(await accountHtml(jar));
+    const origin = { origin: auth.baseUrl };
+    const opts = (await (await postJson(jar, '/account/passkey/options', { csrf }, origin)).json()) as
+      PublicKeyCredentialCreationOptionsJSON;
+    expect(noticesTo('notify@citrate.example')).toHaveLength(0);
+    const v = await postJson(jar, '/account/passkey/verify', { csrf, response: new SoftAuthenticator().create(opts, auth.baseUrl) }, origin);
+    expect(v.status).toBe(200);
+    const notices = noticesTo('notify@citrate.example');
+    expect(notices).toHaveLength(1);
+    expect(notices[0]!.subject).toMatch(/passkey was added/i);
+    expect(notices[0]!.text).toMatch(/security@citrate\.ai/);
+  });
+
+  describe('needs a recent sign-in', () => {
+    afterEach(() => vi.useRealTimers());
+
+    async function sixMinutesLater() {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(Date.now() + 6 * 60_000);
+    }
+
+    it('refuses to add a passkey on a sign-in older than 5 minutes, and offers to confirm instead', async () => {
+      const { jar, userId } = await signedInWithPassword('stale@citrate.example', 'correct horse battery staple');
+      const csrf = csrfFrom(await accountHtml(jar));
+      await sixMinutesLater();
+      const html = await accountHtml(jar);
+      expect(html).not.toContain('id="add-passkey"');
+      expect(html).toContain('href="/account/reauth"');
+      const origin = { origin: auth.baseUrl };
+      const res = await postJson(jar, '/account/passkey/options', { csrf }, origin);
+      expect(res.status).toBe(401);
+      expect(((await res.json()) as { error: string }).error).toBe('reauth_required');
+      // Nor can a ceremony begun earlier be finished late.
+      expect(await getWebAuthnStore().listByUserId(userId)).toHaveLength(0);
+    });
+
+    it('refuses to finish a ceremony once the sign-in has aged past 5 minutes', async () => {
+      const { jar, userId } = await signedInWithPassword('late@citrate.example', 'correct horse battery staple');
+      const csrf = csrfFrom(await accountHtml(jar));
+      const origin = { origin: auth.baseUrl };
+      const opts = (await (await postJson(jar, '/account/passkey/options', { csrf }, origin)).json()) as
+        PublicKeyCredentialCreationOptionsJSON;
+      await sixMinutesLater();
+      const v = await postJson(jar, '/account/passkey/verify', { csrf, response: new SoftAuthenticator().create(opts, auth.baseUrl) }, origin);
+      expect(v.status).toBe(401);
+      expect(await getWebAuthnStore().listByUserId(userId)).toHaveLength(0);
+    });
+
+    it('/account/reauth asks for the sign-in again, then adding works', async () => {
+      const email = 'again@citrate.example';
+      const password = 'correct horse battery staple';
+      const { jar, userId } = await signedInWithPassword(email, password);
+      await sixMinutesLater();
+
+      const start = await fetch(`${auth.baseUrl}/account/reauth`, { headers: { cookie: jar.header() }, redirect: 'manual' });
+      jar.absorb(start);
+      expect(start.status).toBe(302);
+      const authorize = new URL(start.headers.get('location')!);
+      expect(authorize.pathname).toBe('/auth');
+      expect(authorize.searchParams.get('prompt')).toBe('login');
+      const client = { clientId: authorize.searchParams.get('client_id')!, redirectUri: `${auth.baseUrl}/account/reauth/callback` };
+      // The live session does NOT skip the sign-in page.
+      expect((await follow(auth, jar, client, authorize.toString())).signInPage).toBe(true);
+      const login = await postJson(jar, '/auth/password/login', { email, password });
+      expect(login.status).toBe(200);
+      const back = await follow(auth, jar, client, ((await login.json()) as { redirectTo: string }).redirectTo);
+      const cb = await fetch(back.url!, { headers: { cookie: jar.header() }, redirect: 'manual' });
+      jar.absorb(cb);
+      expect(cb.status).toBe(302);
+      expect(cb.headers.get('location')).toBe('/account');
+
+      const csrf = csrfFrom(await accountHtml(jar));
+      const origin = { origin: auth.baseUrl };
+      const opts = (await (await postJson(jar, '/account/passkey/options', { csrf }, origin)).json()) as
+        PublicKeyCredentialCreationOptionsJSON;
+      const v = await postJson(jar, '/account/passkey/verify', { csrf, response: new SoftAuthenticator().create(opts, auth.baseUrl) }, origin);
+      expect(v.status).toBe(200);
+      expect(await getWebAuthnStore().listByUserId(userId)).toHaveLength(1);
+    });
+
+    it('/account/reauth/callback refuses a state this browser did not start', async () => {
+      const { jar } = await signedInWithPassword('state@citrate.example', 'correct horse battery staple');
+      const cb = await fetch(`${auth.baseUrl}/account/reauth/callback?state=forged&code=x`, {
+        headers: { cookie: jar.header() },
+        redirect: 'manual',
+      });
+      expect(cb.status).toBe(400);
+    });
   });
 
   it('refuses a registration answering a different challenge', async () => {
