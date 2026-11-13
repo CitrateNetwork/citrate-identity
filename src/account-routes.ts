@@ -291,6 +291,12 @@ export interface AccountRouteOptions {
    * holds. Omitted → cookie-only behaviour, unchanged.
    */
   handoffStore?: HandoffStore;
+  /**
+   * The Sign out / Sign out of all sessions card and its POST routes
+   * (ACCOUNT_SESSION_CONTROLS=1). Off: /account renders as before and the
+   * routes are not mounted.
+   */
+  sessionControls?: boolean;
 }
 
 /**
@@ -308,8 +314,10 @@ export function mountAccountRoute(
   // panva's session cookie name (`_session` by default); not in its typings.
   const sessionCookie = (provider as unknown as { cookieName(n: string): string }).cookieName('session');
 
-  // POST /account/sign-out and /account/sign-out-all.
-  provider.use(async (ctx, next) => {
+  const sessionControls = options.sessionControls === true;
+
+  // POST /account/sign-out and /account/sign-out-all (ACCOUNT_SESSION_CONTROLS).
+  if (sessionControls) provider.use(async (ctx, next) => {
     if (ctx.method !== 'POST' || (ctx.path !== '/account/sign-out' && ctx.path !== '/account/sign-out-all')) {
       return next();
     }
@@ -409,7 +417,7 @@ export function mountAccountRoute(
     // The sign-out actions act on this browser's session, so they are shown
     // only when the account on the page IS that session's account.
     const signedIn =
-      browser?.accountId === accountId
+      sessionControls && browser?.accountId === accountId
         ? { who: rec?.email ?? wallet ?? accountId, token: accountActionToken(browser.jti) }
         : undefined;
 

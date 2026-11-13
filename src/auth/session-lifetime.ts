@@ -28,11 +28,21 @@ export interface SessionLifetime {
   absoluteSec?: number;
 }
 
+/**
+ * Upper bound for both limits: 30 days, the account-epoch lifetime
+ * (account-epoch.ts EPOCH_TTL_SEC). A session living longer could outlive a
+ * "log out everywhere" or password-reset stamp on its account.
+ */
+export const MAX_SESSION_TTL_SEC = 30 * 24 * 60 * 60;
+
 function seconds(name: string, raw: string | undefined): number | undefined {
   if (raw === undefined || raw.trim() === '') return undefined;
   const v = raw.trim();
   if (!/^\d+$/.test(v) || Number(v) <= 0 || !Number.isSafeInteger(Number(v))) {
     throw new Error(`${name} must be a positive whole number of seconds, got "${raw}"`);
+  }
+  if (Number(v) > MAX_SESSION_TTL_SEC) {
+    throw new Error(`${name} must be at most ${MAX_SESSION_TTL_SEC} (30 days), got "${raw}"`);
   }
   return Number(v);
 }
