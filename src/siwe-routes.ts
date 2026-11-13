@@ -643,7 +643,26 @@ h1 {
         <div class="actions">
           <button id="signin-passkey" class="btn primary" type="button">Continue with passkey</button>
         </div>
-        <button id="signup-passkey" class="altlink" type="button">First time? Register a new passkey.</button>
+        <button id="signup-passkey" class="altlink" type="button" aria-expanded="false" aria-controls="passkey-signup">New to Citrate? Create an account with a passkey.</button>
+        <!-- Creating an account is its own action and needs a verified email (2026-11-13):
+             a failed or dismissed sign-in never leads here by itself. -->
+        <div id="passkey-signup" hidden>
+          <div class="eyebrow" aria-hidden="true">CREATE AN ACCOUNT WITH A PASSKEY</div>
+          <p class="note">${ICON_MAIL}<span>Enter your email. We'll send a 6-digit code to confirm it, then your device creates a passkey for this account. If the email already has a Citrate account, the passkey is added to it.</span></p>
+          <form id="form-passkey-signup" novalidate>
+            <div class="field">
+              <label for="signup-passkey-email">Email</label>
+              <input id="signup-passkey-email" name="email" type="email" autocomplete="email" required />
+            </div>
+            <div class="field" id="signup-passkey-code-field" hidden>
+              <label for="signup-passkey-code">6-digit code</label>
+              <input id="signup-passkey-code" name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]*" maxlength="6" placeholder="000000" style="letter-spacing:.35em;font-family:var(--font-mono)" />
+            </div>
+            <div class="actions">
+              <button id="signup-passkey-submit" class="btn" type="submit">Send code</button>
+            </div>
+          </form>
+        </div>
       </div>
 
       <!-- Email / password panel. -->
@@ -842,18 +861,11 @@ document.getElementById('guardian-save').addEventListener('click', async () => {
 });
 
 // --- PASSKEY flow (/auth/webauthn/authenticate-{options,verify}). ---
-// A first-time user has no passkey yet, so AUTHENTICATE can only fail (nothing to
-// select → NotAllowedError). Don't dead-end at "no passkeys found": point them at
-// the register flow, which needs NO prior session (WP-A self-enroll signup), and
-// promote the "Register a new passkey" control so it reads as the primary action.
-function offerPasskeySignup(prefix) {
-  const btn = document.getElementById('signup-passkey');
-  setStatus((prefix ? prefix + ' ' : '') + 'No passkey on this device yet. First time? Create one below — no password needed.', true);
-  if (btn) {
-    btn.classList.add('primary');
-    btn.classList.remove('altlink');
-    try { btn.focus(); } catch (e) {}
-  }
+// A failed or dismissed passkey prompt is reported as such. It never leads into
+// creating an account: the passkey may be on another device (choose "use a phone
+// or tablet" in the browser prompt), or the account may use another method.
+function passkeyNotFound(prefix) {
+  setStatus((prefix ? prefix + ' ' : '') + 'No passkey was used. If your passkey is on another device, choose "use a phone or tablet" in the prompt. Otherwise sign in with the method you used before (Email, Social or Wallet).', true);
 }
 
 const passkeyBtn = document.getElementById('signin-passkey');
@@ -872,11 +884,7 @@ passkeyBtn.addEventListener('click', async () => {
     if (!optsRes.ok) {
       const err = await optsRes.json().catch(() => ({}));
       const reason = (err.reason || '') + '';
-      if (optsRes.status === 404 || /no.*passkey|no.*credential|not.*found/i.test(reason)) {
-        offerPasskeySignup('');
-      } else {
-        setStatus('Could not start passkey sign-in: ' + (reason || optsRes.status), true);
-      }
+      setStatus('Could not start passkey sign-in: ' + (reason || optsRes.status), true);
       passkeyBtn.disabled = false; return;
     }
     const options = await optsRes.json();
@@ -889,7 +897,7 @@ passkeyBtn.addEventListener('click', async () => {
     };
     const assertion = await navigator.credentials.get({ publicKey });
     if (!assertion) {
-      offerPasskeySignup('');
+      passkeyNotFound('');
       passkeyBtn.disabled = false; return;
     }
     const response = serializeAssertion(assertion);
@@ -903,7 +911,7 @@ passkeyBtn.addEventListener('click', async () => {
     if (!verifyRes.ok || !result.redirectTo) {
       const reason = (result.reason || result.error || '') + '';
       if (/no.*passkey|no.*credential|unknown.*credential|not.*found|not.*registered/i.test(reason)) {
-        offerPasskeySignup('That passkey isn’t registered here.');
+        passkeyNotFound('That passkey isn’t registered with Citrate.');
       } else {
         setStatus('Passkey sign-in failed: ' + (reason || verifyRes.status), true);
       }
@@ -913,10 +921,9 @@ passkeyBtn.addEventListener('click', async () => {
     finishSignin(result);
   } catch (err) {
     // NotAllowedError is thrown both when there is no credential to select and when
-    // the user dismisses the prompt; either way the helpful next step is the
-    // create-a-passkey path, not a raw error.
+    // the user dismisses the prompt. Neither means "create a new account".
     if (err && (err.name === 'NotAllowedError' || err.name === 'InvalidStateError')) {
-      offerPasskeySignup('');
+      passkeyNotFound('');
     } else {
       setStatus('Error: ' + describeError(err), true);
     }
@@ -966,26 +973,58 @@ function serializeAttestation(c) {
   };
 }
 
-// --- PASSKEY SIGNUP flow (/auth/webauthn/signup-{options,verify}). ---
+// --- PASSKEY SIGNUP flow (/auth/webauthn/signup-{email,options,verify}). ---
+// An explicit action: open the form, prove the email with a code, then create
+// the passkey. Nothing is created until the code is confirmed.
 const passkeySignupBtn = document.getElementById('signup-passkey');
-passkeySignupBtn.addEventListener('click', async () => {
-  passkeySignupBtn.disabled = true;
+const passkeySignupBox = document.getElementById('passkey-signup');
+const passkeySignupForm = document.getElementById('form-passkey-signup');
+const passkeySignupEmail = document.getElementById('signup-passkey-email');
+const passkeySignupCodeField = document.getElementById('signup-passkey-code-field');
+const passkeySignupCode = document.getElementById('signup-passkey-code');
+const passkeySignupSubmit = document.getElementById('signup-passkey-submit');
+passkeySignupBtn.addEventListener('click', () => {
+  passkeySignupBox.hidden = false;
+  passkeySignupBtn.setAttribute('aria-expanded', 'true');
+  try { passkeySignupEmail.focus(); } catch (e) {}
+});
+passkeySignupForm.addEventListener('submit', async (ev) => {
+  ev.preventDefault();
+  passkeySignupSubmit.disabled = true;
+  const email = (passkeySignupEmail.value || '').trim();
   try {
     if (!window.PublicKeyCredential) {
       setStatus('This browser does not support passkeys.', true);
-      passkeySignupBtn.disabled = false; return;
+      passkeySignupSubmit.disabled = false; return;
     }
-    setStatus('Asking your device to create a new passkey…');
+    if (passkeySignupCodeField.hidden) {
+      const res = await fetch('/auth/webauthn/signup-email', {
+        method: 'POST', credentials: 'same-origin',
+        headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email }),
+      });
+      const r = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setStatus('Could not send the code: ' + (r.reason || res.status), true);
+        passkeySignupSubmit.disabled = false; return;
+      }
+      passkeySignupCodeField.hidden = false;
+      passkeySignupSubmit.textContent = 'Confirm and create passkey';
+      setStatus('We emailed a 6-digit code to ' + email + '.');
+      try { passkeySignupCode.focus(); } catch (e) {}
+      passkeySignupSubmit.disabled = false; return;
+    }
+    const code = (passkeySignupCode.value || '').trim();
     const optsRes = await fetch('/auth/webauthn/signup-options', {
       method: 'POST', credentials: 'same-origin',
-      headers: { 'content-type': 'application/json' }, body: '{}',
+      headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email, code }),
     });
     if (!optsRes.ok) {
       const err = await optsRes.json().catch(() => ({}));
-      setStatus('Could not start passkey signup: ' + (err.reason || optsRes.status), true);
-      passkeySignupBtn.disabled = false; return;
+      setStatus('Could not confirm the code: ' + (err.reason || optsRes.status), true);
+      passkeySignupSubmit.disabled = false; return;
     }
     const options = await optsRes.json();
+    setStatus('Asking your device to create a passkey for ' + email + '…');
     const publicKey = {
       ...options,
       challenge: b64uToBuf(options.challenge),
@@ -994,8 +1033,8 @@ passkeySignupBtn.addEventListener('click', async () => {
     };
     const attestation = await navigator.credentials.create({ publicKey });
     if (!attestation) {
-      setStatus('No credential returned.', true);
-      passkeySignupBtn.disabled = false; return;
+      setStatus('No passkey was created.', true);
+      passkeySignupSubmit.disabled = false; return;
     }
     const response = serializeAttestation(attestation);
     setStatus('Verifying…');
@@ -1006,14 +1045,20 @@ passkeySignupBtn.addEventListener('click', async () => {
     });
     const result = await verifyRes.json();
     if (!verifyRes.ok || !result.redirectTo) {
-      setStatus('Passkey signup failed: ' + (result.reason || result.error || verifyRes.status), true);
-      passkeySignupBtn.disabled = false; return;
+      setStatus('Passkey setup failed: ' + (result.reason || result.error || verifyRes.status), true);
+      passkeySignupSubmit.disabled = false; return;
     }
-    setStatus('Account created.');
+    setStatus('Passkey saved.');
     finishSignin(result);
   } catch (err) {
-    setStatus('Error: ' + describeError(err), true);
-    passkeySignupBtn.disabled = false;
+    if (err && err.name === 'InvalidStateError') {
+      setStatus('This device already has a passkey for this account. Use "Continue with passkey".', true);
+    } else if (err && err.name === 'NotAllowedError') {
+      setStatus('No passkey was created.', true);
+    } else {
+      setStatus('Error: ' + describeError(err), true);
+    }
+    passkeySignupSubmit.disabled = false;
   }
 });
 

@@ -38,7 +38,7 @@ import { mountStaticAssets } from './static-assets.js';
 import { mountPasswordRoutes } from './auth/password-routes.js';
 import { createRateLimiter, type RateLimiter } from './auth/rate-limit.js';
 import { initAccountEpochStore, mountSessionEpochGuard } from './auth/account-epoch.js';
-import { mountWebauthnRoutes, RedisChallengeStore } from './auth/webauthn-routes.js';
+import { mountAccountPasskeyRoutes, mountWebauthnRoutes, RedisChallengeStore } from './auth/webauthn-routes.js';
 import { mountGoogleRoutes } from './auth/google-routes.js';
 import { mountConfiguredOAuth2Providers } from './auth/oauth2-provider.js';
 import { initAuthStoresFromEnv } from './auth/stores.js';
@@ -382,13 +382,21 @@ export async function createProvider(
     .split(',')
     .map((o) => o.trim())
     .filter((o) => o.length > 0);
+  const webauthnRp = {
+    rpId,
+    rpName: 'Citrate',
+    expectedOrigin: extraOrigins.length > 0 ? [issuer, ...extraOrigins] : issuer,
+  };
   mountWebauthnRoutes(provider, {
-    rp: {
-      rpId,
-      rpName: 'Citrate',
-      expectedOrigin: extraOrigins.length > 0 ? [issuer, ...extraOrigins] : issuer,
-    },
+    rp: webauthnRp,
     // PBA-L3a-013: challenges shared across instances when Redis is wired.
+    ...(options.redis ? { challengeStore: new RedisChallengeStore(options.redis) } : {}),
+    // Budgets on the passkey-signup email code (issuance + guesses).
+    rateLimiter: options.rateLimiter ?? createRateLimiter(options.redis),
+  });
+  // "Add a passkey" on the account page, for a member already signed in.
+  mountAccountPasskeyRoutes(provider, {
+    rp: webauthnRp,
     ...(options.redis ? { challengeStore: new RedisChallengeStore(options.redis) } : {}),
   });
 

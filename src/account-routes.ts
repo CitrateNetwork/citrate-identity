@@ -12,6 +12,11 @@
  * page (the hub is normally reached from a logged-in RP via `return_to`).
  *
  * No PII beyond what the session already exposes; the page never stores anything.
+ *
+ * "Add a passkey" (2026-11-13): when the account shown is this browser's own
+ * session and has a user record, the page offers to add a passkey to it
+ * (auth/webauthn-routes.ts `mountAccountPasskeyRoutes`; script at
+ * /account/passkey.js, allowed by the page's `script-src 'self'`).
  */
 import type Provider from 'oidc-provider';
 import type { ServerResponse } from 'node:http';
@@ -21,6 +26,7 @@ import { resolveEntitlementClaim, type EntitlementClaim } from './entitlements.j
 import { getUserStore } from './auth/stores.js';
 import { predictedWalletForAccount } from './aa/wallet-claims.js';
 import type { HandoffStore } from './handoff-store.js';
+import { accountActionToken } from './account-csrf.js';
 
 function escapeHtml(v: string): string {
   return v
@@ -134,8 +140,10 @@ function renderHub(args: {
   expiresAt?: string;
   ent: EntitlementClaim | null;
   backLink?: string;
+  /** Present when this browser's own session can add a passkey to the account. */
+  addPasskeyToken?: string;
 }): string {
-  const { email, signingMethod, wallet, kyc, ent, backLink } = args;
+  const { email, signingMethod, wallet, kyc, ent, backLink, addPasskeyToken } = args;
   const kycBadge =
     kyc === 'verified' ? '<span class="badge ok">Verified</span>'
     : kyc === 'pending' ? '<span class="badge warn">In review</span>'
@@ -161,6 +169,7 @@ ${backLink ? `<a class="back" href="${escapeHtml(backLink)}">&larr; Back to the 
   <div class="row"><span class="k">Wallet</span><span class="v mono">${wallet ? escapeHtml(wallet) : '<span class="badge muted">not provisioned</span>'}</span></div>
 </div>
 
+${addPasskeyToken ? renderPasskeyCard(addPasskeyToken) : ''}
 <div class="card"><h2>Identity verification (KYC)</h2>
   <div class="row"><span class="k">Status</span><span class="v">${kycBadge}</span></div>
   ${kycCta}
@@ -171,7 +180,14 @@ ${backLink ? `<a class="back" href="${escapeHtml(backLink)}">&larr; Back to the 
   ${ent?.expiresAt ? `<div class="row"><span class="k">Expires</span><span class="v">${escapeHtml(new Date(ent.expiresAt).toISOString().slice(0,10))}</span></div>` : ''}
   <p class="note">Your tier is read by every Citrate app from this account. Higher tiers (academic, confidential, org roles) are granted by Citrate.</p>
 </div>
-</div></body></html>`;
+</div>${addPasskeyToken ? '<script src="/account/passkey.js" defer></script>' : ''}</body></html>`;
+}
+
+function renderPasskeyCard(token: string): string {
+  return `<div class="card"><h2>Passkeys</h2>
+  <button id="add-passkey" class="btn secondary" type="button" data-csrf="${escapeHtml(token)}">Add a passkey</button>
+  <p id="add-passkey-status" class="note" role="status">Add a passkey to sign in to this account with your device instead of a code or password.</p>
+</div>`;
 }
 
 function renderSignedOut(): string {
@@ -221,14 +237,13 @@ export function mountAccountRoute(
     if (handoffStore && typeof handoffNonce === 'string' && handoffNonce) {
       accountId = (await handoffStore.consume(handoffNonce)) ?? undefined;
     }
-    if (!accountId) {
-      try {
-        const session = await provider.Session.get(ctx);
-        accountId = session?.accountId;
-      } catch {
-        accountId = undefined;
-      }
+    let browser: { jti: string; accountId?: string } | undefined;
+    try {
+      browser = (await provider.Session.get(ctx)) as unknown as { jti: string; accountId?: string };
+    } catch {
+      browser = undefined;
     }
+    if (!accountId) accountId = browser?.accountId;
     if (!accountId) {
       sendHtml(ctx.res, 200, renderSignedOut());
       return;
@@ -253,6 +268,11 @@ export function mountAccountRoute(
       rec?.emailVerified ?? false, // F-01: only a verified email matches a grant
     );
     const backLink = validatedBackLink(ctx.query['return_to']);
+    // Adding a passkey acts on this browser's session, so it is offered only
+    // when the account shown IS that session's account (not one opened through
+    // a hand-off link) and is a user record that can hold a passkey.
+    const addPasskeyToken =
+      rec && browser?.accountId === accountId ? accountActionToken(browser.jti) : undefined;
 
     sendHtml(
       ctx.res,
@@ -266,6 +286,7 @@ export function mountAccountRoute(
         expiresAt: claim?.expires_at,
         ent,
         backLink,
+        addPasskeyToken,
       }),
     );
   });

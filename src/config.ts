@@ -369,6 +369,14 @@ export const DEV_DEFAULT_COOKIE_KEY = 'citrate-identity-dev-cookie-key';
 /** Minimum length (chars) for a production cookie signing key. */
 export const MIN_COOKIE_KEY_LENGTH = 32;
 
+/** The cookie signing keys (COOKIE_KEYS, comma-separated; first signs). */
+export function cookieKeys(env: { COOKIE_KEYS?: string } = process.env): string[] {
+  return (env.COOKIE_KEYS ?? DEV_DEFAULT_COOKIE_KEY)
+    .split(',')
+    .map((k) => k.trim())
+    .filter(Boolean);
+}
+
 /**
  * Where to persist the signing keys so they survive restarts in dev. If absent,
  * a fresh RS256 key is generated and written. Tests use ephemeral keys (either
@@ -1454,10 +1462,7 @@ export async function buildConfiguration(
       // Keys for signing/verifying interaction + session cookies so tampered
       // cookies are detected and ignored. In production set COOKIE_KEYS to a
       // comma-separated list of high-entropy secrets (supports rotation).
-      keys: (process.env.COOKIE_KEYS ?? 'citrate-identity-dev-cookie-key')
-        .split(',')
-        .map((k) => k.trim())
-        .filter(Boolean),
+      keys: cookieKeys(),
       // panva defaults `_interaction` to `path=/interaction/<uid>` and
       // `_interaction_resume` to `path=/auth/<uid>`. That breaks every
       // sign-in flow whose form-submit hits a NON-`/interaction/<uid>/...`

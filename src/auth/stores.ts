@@ -52,12 +52,15 @@ export interface UserStore {
     providerSub: string,
   ): Promise<void>;
   /**
-   * Create a brand-new account with no email/password/Google federation,
-   * intended for a first-time passkey signup (WP-A). The caller is
-   * expected to immediately insert a WebAuthn credential bound to the
-   * returned user id; until that succeeds the row is dangling.
+   * Create a brand-new account with no password/Google federation, for a
+   * first-time passkey signup (WP-A). The caller is expected to immediately
+   * insert a WebAuthn credential bound to the returned user id; until that
+   * succeeds the row is dangling. The signup route always passes `email`,
+   * which it has PROVEN with a one-time code, so the row is created with
+   * `email_verified = true` (2026-11-13: an email-less passkey signup is no
+   * longer possible from the sign-in page).
    */
-  createWithPasskey(): Promise<UserRecord>;
+  createWithPasskey(args?: { id?: string; email?: string }): Promise<UserRecord>;
   findById(id: string): Promise<UserRecord | undefined>;
   findByEmail(email: string): Promise<UserRecord | undefined>;
   findByGoogleSub(googleSub: string): Promise<UserRecord | undefined>;
@@ -225,16 +228,22 @@ export class InMemoryUserStore implements UserStore {
     this.byFederated.set(key, userId);
   }
 
-  async createWithPasskey(): Promise<UserRecord> {
-    const id = randomUUID();
+  async createWithPasskey(args: { id?: string; email?: string } = {}): Promise<UserRecord> {
+    // `id` lets the signup route create the row under the user handle the
+    // passkey was registered with.
+    const id = args.id ?? randomUUID();
     const now = new Date();
+    const email = args.email ? normalizeEmail(args.email) : undefined;
+    if (email && this.byEmail.has(email)) throw new Error('email already registered');
     const rec: UserRecord = {
       id,
-      emailVerified: false,
+      ...(email ? { email } : {}),
+      emailVerified: Boolean(email),
       createdAt: now,
       updatedAt: now,
     };
     this.byId.set(id, rec);
+    if (email) this.byEmail.set(email, id);
     return rec;
   }
 

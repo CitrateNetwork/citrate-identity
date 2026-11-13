@@ -337,21 +337,46 @@ describe('POST /auth/webauthn/authenticate-options', () => {
 
 describe('POST /auth/webauthn/signup-* (WP-A passkey signup)', () => {
   let h: Harness;
+  let lastCode: string | null = null;
   beforeAll(async () => {
     h = await listenProvider();
   });
   afterAll(async () => {
+    resetEmailSender();
     await closeServer(h.server);
   });
+  beforeEach(() => {
+    setEmailVerificationStore(new InMemoryEmailVerificationStore());
+    lastCode = null;
+    setEmailSender(async (msg) => {
+      lastCode = /(\d{6})/.exec(msg.subject)?.[1] ?? null;
+      return true;
+    });
+  });
+
+  /**
+   * 2026-11-13: signup-options needs the email + the code emailed by
+   * signup-email (a passkey alone no longer creates an account). Returns the
+   * signup-options response.
+   */
+  async function signupOptions(jar: CookieJar, email = 'member@citrate.example'): Promise<Response> {
+    const sent = await fetch(`${h.baseUrl}/auth/webauthn/signup-email`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', cookie: jar.header() },
+      body: JSON.stringify({ email }),
+    });
+    expect(sent.status).toBe(200);
+    return fetch(`${h.baseUrl}/auth/webauthn/signup-options`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', cookie: jar.header() },
+      body: JSON.stringify({ email, code: lastCode }),
+      redirect: 'manual',
+    });
+  }
 
   it('signup-options returns registration options with a base64url challenge and a server-side user.id', async () => {
     const jar = await startInteraction(h.baseUrl);
-    const res = await fetch(`${h.baseUrl}/auth/webauthn/signup-options`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', cookie: jar.header() },
-      body: '{}',
-      redirect: 'manual',
-    });
+    const res = await signupOptions(jar);
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
       challenge: string;
@@ -363,7 +388,8 @@ describe('POST /auth/webauthn/signup-* (WP-A passkey signup)', () => {
     expect(body.challenge.length).toBeGreaterThan(0);
     expect(typeof body.user.id).toBe('string');
     expect(body.user.id.length).toBeGreaterThan(0);
-    expect(body.user.name).toBe('New Citrate user');
+    // Named after the verified email, so the member can tell passkeys apart.
+    expect(body.user.name).toBe('member@citrate.example');
     expect(Array.isArray(body.pubKeyCredParams)).toBe(true);
   });
 
@@ -395,12 +421,7 @@ describe('POST /auth/webauthn/signup-* (WP-A passkey signup)', () => {
 
   it('signup-verify rejects a missing response body (400 after starting options)', async () => {
     const jar = await startInteraction(h.baseUrl);
-    const opts = await fetch(`${h.baseUrl}/auth/webauthn/signup-options`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', cookie: jar.header() },
-      body: '{}',
-      redirect: 'manual',
-    });
+    const opts = await signupOptions(jar);
     expect(opts.status).toBe(200);
     const res = await fetch(`${h.baseUrl}/auth/webauthn/signup-verify`, {
       method: 'POST',
@@ -419,12 +440,7 @@ describe('POST /auth/webauthn/signup-* (WP-A passkey signup)', () => {
     // @simplewebauthn/server cannot verify — covers the verifyRegistration
     // throw path → 400 invalid_grant.
     const jar = await startInteraction(h.baseUrl);
-    const opts = await fetch(`${h.baseUrl}/auth/webauthn/signup-options`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', cookie: jar.header() },
-      body: '{}',
-      redirect: 'manual',
-    });
+    const opts = await signupOptions(jar);
     expect(opts.status).toBe(200);
     const bogusResponse = {
       id: 'AAAA',

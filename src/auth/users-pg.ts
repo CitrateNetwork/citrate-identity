@@ -244,19 +244,24 @@ export class PgUserStore {
   }
 
   /**
-   * Create a passkey-only user (no email, no password, no Google federation).
-   * Used by WP-A's `/auth/webauthn/signup-verify` for first-time enrollment;
-   * the caller MUST insert the WebAuthn credential atomically afterwards.
+   * Create a passkey user (no password, no Google federation). Used by WP-A's
+   * `/auth/webauthn/signup-verify` for first-time enrollment, which passes the
+   * email it verified; the caller MUST insert the WebAuthn credential
+   * atomically afterwards.
    */
-  async createWithPasskey(): Promise<UserRecord> {
-    const id = randomUUID();
+  async createWithPasskey(args: { id?: string; email?: string } = {}): Promise<UserRecord> {
+    // `id` lets the signup route create the row under the user handle the
+    // passkey was registered with.
+    const id = args.id ?? randomUUID();
+    // An email here was proven by the signup route's one-time code.
+    const email = args.email ? normalizeEmail(args.email) : null;
     const res = await this.pool.query(
-      `INSERT INTO users (id)
-       VALUES ($1)
+      `INSERT INTO users (id, email, email_verified)
+       VALUES ($1, $2, $3)
        RETURNING id, email, email_verified, password_hash, google_sub,
                  primary_wallet, legacy_siwe_eoa, last_signing_method,
                  created_at, updated_at`,
-      [id],
+      [id, email, email !== null],
     );
     return rowToRecord(res.rows[0] as RawRow);
   }
