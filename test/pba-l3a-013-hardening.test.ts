@@ -54,11 +54,15 @@ describe('1b. back-link through the real /account page', () => {
 
 describe('2. explicit TTLs', () => {
   it('pins Session, Grant and Interaction lifetimes', async () => {
-    const conf = (await buildConfiguration()) as { ttl: Record<string, number> };
-    expect(conf.ttl.Session).toBe(14 * 24 * 60 * 60);
+    const conf = (await buildConfiguration()) as unknown as {
+      ttl: Record<string, number> & { Session: (ctx: unknown, s: { loginTs?: number }) => number };
+    };
+    // 2026-11-12: Session is a function (idle + optional absolute limit,
+    // auth/session-lifetime.ts). With the env unset it is still 14 days.
+    expect(conf.ttl.Session(undefined, { loginTs: Math.floor(Date.now() / 1000) })).toBe(14 * 24 * 60 * 60);
     expect(conf.ttl.Grant).toBe(14 * 24 * 60 * 60);
     expect(conf.ttl.Interaction).toBe(60 * 60);
-    expect(conf.ttl.Session).toBeLessThanOrEqual(conf.ttl.RefreshToken!);
+    expect(conf.ttl.Session(undefined, {})).toBeLessThanOrEqual(conf.ttl.RefreshToken!);
   });
 });
 

@@ -45,6 +45,7 @@ import {
   mountWebauthnRoutes,
   RedisChallengeStore,
 } from './auth/webauthn-routes.js';
+import { initAccountSessionIndex, trackAccountSessions } from './auth/account-sessions.js';
 import { mountGoogleRoutes } from './auth/google-routes.js';
 import { mountConfiguredOAuth2Providers } from './auth/oauth2-provider.js';
 import { initAuthStoresFromEnv } from './auth/stores.js';
@@ -269,6 +270,10 @@ export async function createProvider(
   // sessions before any route reads them.
   initAccountEpochStore(options.redis);
   mountSessionEpochGuard(provider);
+  // "Sign out of all sessions": index every saved Session/Grant by account so
+  // they can all be ended (auth/account-sessions.ts). Shared via Redis when wired.
+  initAccountSessionIndex(options.redis);
+  trackAccountSessions(provider);
 
   // Hosted OAuth redirect bounce (GET /oauth/callback) for Citrate Core desktop
   // MCP sign-in: providers that reject the http-loopback redirect (Notion) point

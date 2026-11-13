@@ -28,6 +28,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import type Provider from 'oidc-provider';
 import { getSessionBus, type SessionEvent } from './session-bus.js';
 import { getAccountEpochStore } from './auth/account-epoch.js';
+import { endAllAccountSessions } from './auth/account-sessions.js';
 
 /** `{"everywhere": true}` JSON body (or `?everywhere=1`). Never throws. */
 async function wantsEverywhere(req: IncomingMessage): Promise<boolean> {
@@ -277,7 +278,11 @@ export function mountLogoutRoutes(
       const everywhere = await wantsEverywhere(ctx.req);
       // Everything up to and INCLUDING this second (the caller is logging out
       // too, so no same-second session needs to survive).
-      if (everywhere) await getAccountEpochStore().bump(sub, Math.floor(Date.now() / 1000) + 1);
+      if (everywhere) {
+        await getAccountEpochStore().bump(sub, Math.floor(Date.now() / 1000) + 1);
+        // And end every indexed session/grant outright (the bus publish is below).
+        await endAllAccountSessions(provider, sub, { publish: false });
+      }
 
       // 3) PUBLISH the logout on the session bus so the OTHER apps cascade.
       getSessionBus().publish(sub, { type: 'logout', sid, at: Date.now() });

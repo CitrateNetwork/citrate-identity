@@ -1,6 +1,6 @@
 /**
  * Request checks for the state-changing actions on auth.citrate.ai's own
- * account page (/account), starting with "Add a passkey".
+ * account page (/account): add a passkey, sign out, sign out of all sessions.
  *
  *   - a token bound to THIS browser session: HMAC-SHA256 under the cookie key
  *     (COOKIE_KEYS; every configured key verifies, so rotation keeps open
