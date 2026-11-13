@@ -28,6 +28,13 @@ services:
       PORT: "3000"
       ISSUER_URL: ${ISSUER_URL}
       COOKIE_KEYS: ${COOKIE_KEYS}
+      # Browser session lifetime on auth.citrate.ai (seconds). Unset = 14 days
+      # idle, no absolute limit (src/auth/session-lifetime.ts).
+      SESSION_IDLE_TTL_SECONDS: ${SESSION_IDLE_TTL_SECONDS:-}
+      SESSION_ABSOLUTE_TTL_SECONDS: ${SESSION_ABSOLUTE_TTL_SECONDS:-}
+      # 1 = Sign out / Sign out of all sessions on /account, the per-account
+      # Session/Grant index, and POST /logout everywhere ending them. Unset = off.
+      ACCOUNT_SESSION_CONTROLS: ${ACCOUNT_SESSION_CONTROLS:-}
       # RP-initiated logout with no confirm click for a valid id_token_hint, and
       # a logout that ends the whole browser session (src/logout-ui.ts). Unset = off.
       RP_LOGOUT_SEAMLESS: ${RP_LOGOUT_SEAMLESS:-}

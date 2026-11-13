@@ -28,6 +28,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import type Provider from 'oidc-provider';
 import { getSessionBus, type SessionEvent } from './session-bus.js';
 import { getAccountEpochStore } from './auth/account-epoch.js';
+import { endAllAccountSessions } from './auth/account-sessions.js';
 
 /** `{"everywhere": true}` JSON body (or `?everywhere=1`). Never throws. */
 async function wantsEverywhere(req: IncomingMessage): Promise<boolean> {
@@ -62,6 +63,12 @@ export interface LogoutRouteOptions {
    * fan-out. Default 1000.
    */
   maxSseConnections?: number;
+  /**
+   * ACCOUNT_SESSION_CONTROLS=1: `{"everywhere": true}` also ends every indexed
+   * Session and Grant (auth/account-sessions.ts). Off: the account epoch alone,
+   * as before.
+   */
+  endIndexedSessions?: boolean;
 }
 
 /** Live count of open `/sessions/events` streams (FUA-IDENTITY-05 cap). */
@@ -277,7 +284,20 @@ export function mountLogoutRoutes(
       const everywhere = await wantsEverywhere(ctx.req);
       // Everything up to and INCLUDING this second (the caller is logging out
       // too, so no same-second session needs to survive).
-      if (everywhere) await getAccountEpochStore().bump(sub, Math.floor(Date.now() / 1000) + 1);
+      if (everywhere) {
+        await getAccountEpochStore().bump(sub, Math.floor(Date.now() / 1000) + 1);
+        // And end every indexed session/grant outright (the bus publish is
+        // below). Best effort: the epoch above already refuses them, so an
+        // index or Redis failure must not turn today's 200 into an error.
+        if (options.endIndexedSessions) {
+          try {
+            await endAllAccountSessions(provider, sub, { publish: false });
+          } catch (err) {
+            // eslint-disable-next-line no-console
+            console.warn(`[citrate-identity] logout everywhere: indexed sessions not ended: ${(err as Error).message}`);
+          }
+        }
+      }
 
       // 3) PUBLISH the logout on the session bus so the OTHER apps cascade.
       getSessionBus().publish(sub, { type: 'logout', sid, at: Date.now() });

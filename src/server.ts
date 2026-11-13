@@ -2,6 +2,7 @@ import Provider from 'oidc-provider';
 import {
   assertProductionConfig,
   buildConfiguration,
+  envFlag,
   loadOrCreateJwks,
   siweDomainFromIssuer,
   ISSUER_URL,
@@ -45,6 +46,7 @@ import {
   mountWebauthnRoutes,
   RedisChallengeStore,
 } from './auth/webauthn-routes.js';
+import { initAccountSessionIndex, trackAccountSessions } from './auth/account-sessions.js';
 import { mountGoogleRoutes } from './auth/google-routes.js';
 import { mountConfiguredOAuth2Providers } from './auth/oauth2-provider.js';
 import { initAuthStoresFromEnv } from './auth/stores.js';
@@ -269,6 +271,14 @@ export async function createProvider(
   // sessions before any route reads them.
   initAccountEpochStore(options.redis);
   mountSessionEpochGuard(provider);
+  // "Sign out of all sessions": index every saved Session/Grant by account so
+  // they can all be ended (auth/account-sessions.ts). Shared via Redis when wired.
+  // Behind ACCOUNT_SESSION_CONTROLS=1; off, nothing is indexed (as before).
+  const sessionControls = envFlag('ACCOUNT_SESSION_CONTROLS');
+  if (sessionControls) {
+    initAccountSessionIndex(options.redis);
+    trackAccountSessions(provider);
+  }
 
   // Hosted OAuth redirect bounce (GET /oauth/callback) for Citrate Core desktop
   // MCP sign-in: providers that reject the http-loopback redirect (Notion) point
@@ -513,7 +523,7 @@ export async function createProvider(
 
   // AUTHSPINE S1-WP3: the Account Hub (/account) — the universal authenticated
   // surface every RP links to (identity, wallet, KYC status + CTA, access tier).
-  mountAccountRoute(provider, { handoffStore });
+  mountAccountRoute(provider, { handoffStore, sessionControls });
 
   // AUTHSPINE S1-WP4: admin entitlement grant API (service-guarded; fail-closed
   // when ENTITLEMENTS_ADMIN_SECRET is unset). Grants/raises higher tiers + roles.
@@ -527,7 +537,7 @@ export async function createProvider(
   // IDP-S2 / TD-5 (authority side): POST /logout revokes the presented token,
   // ends its session, and publishes a `logout` on the session bus; GET
   // /sessions/events streams those events to subscribed relying parties (SSE).
-  mountLogoutRoutes(provider);
+  mountLogoutRoutes(provider, { endIndexedSessions: sessionControls });
 
   // EW-S1 WP-5: /aa/* — smart-wallet address prediction + deploy-permit
   // signing for the Citrate ERC-4337 stack. Only enabled when the AA env

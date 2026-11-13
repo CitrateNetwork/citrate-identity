@@ -273,5 +273,9 @@ describe('with RP_LOGOUT_SEAMLESS and AUTH_ROOT_REDIRECT_URL unset (current beha
     expect(rootRedirectFromEnv({ AUTH_ROOT_REDIRECT_URL: 'https://www.citrate.ai/join' })).toBe('https://www.citrate.ai/join');
     expect(() => rootRedirectFromEnv({ AUTH_ROOT_REDIRECT_URL: 'http://www.citrate.ai/join' })).toThrow(/https/);
     expect(() => rootRedirectFromEnv({ AUTH_ROOT_REDIRECT_URL: '/join' })).toThrow(/https/);
+    // The value is never echoed into the error (it reaches the boot log).
+    expect(() => rootRedirectFromEnv({ AUTH_ROOT_REDIRECT_URL: 'http://secret-host.example/x?token=abc' })).toThrow(
+      /^AUTH_ROOT_REDIRECT_URL must be an absolute https URL$/,
+    );
   });
 });

@@ -17,17 +17,28 @@
  * session and has a user record, the page offers to add a passkey to it
  * (auth/webauthn-routes.ts `mountAccountPasskeyRoutes`; script at
  * /account/passkey.js, allowed by the page's `script-src 'self'`).
+ *
+ * Signing out (2026-11-12): the page names the account this browser is signed
+ * in as and offers two same-origin form POSTs:
+ *   - `POST /account/sign-out` ends this browser's session (and the grants of
+ *     apps that do not hold offline access, as RP-initiated logout does);
+ *   - `POST /account/sign-out-all` ends every browser session, grant and
+ *     refresh token of the account (auth/account-sessions.ts).
+ * Both carry the session-bound account-action token and refuse a cross-site
+ * request (account-csrf.ts).
  */
 import type Provider from 'oidc-provider';
-import type { ServerResponse } from 'node:http';
+import type { IncomingMessage, ServerResponse } from 'node:http';
 
 import { getKycStore, effectiveVerified, type KycStatus, type KycClaim } from './kyc.js';
 import { resolveEntitlementClaim, type EntitlementClaim } from './entitlements.js';
 import { getUserStore } from './auth/stores.js';
 import { predictedWalletForAccount } from './aa/wallet-claims.js';
 import type { HandoffStore } from './handoff-store.js';
-import { accountActionToken } from './account-csrf.js';
+import { accountActionToken, isCrossSite, isValidAccountActionToken } from './account-csrf.js';
 import { isRecentSignIn } from './auth/webauthn-routes.js';
+import { endAllAccountSessions, revokeGrant } from './auth/account-sessions.js';
+import { getSessionBus } from './session-bus.js';
 
 function escapeHtml(v: string): string {
   return v
@@ -118,7 +129,41 @@ h1{font-size:22px;margin:0 0 2px}.sub{color:var(--muted);font-size:13px;margin:0
 .note{color:var(--muted);font-size:12.5px;margin:10px 0 0}
 .back{display:inline-block;margin-bottom:18px;color:var(--muted);font-size:13px;text-decoration:none}
 .back:hover{color:var(--ink)}
+form{margin:0}.actions{display:grid;gap:8px;margin-top:12px}
 `;
+
+/** Where a signed-out member is pointed back to. */
+const JOIN_URL = 'https://www.citrate.ai/join';
+
+/** Read a small urlencoded form body. Never throws; oversize or unreadable → empty. */
+async function readForm(req: IncomingMessage): Promise<URLSearchParams> {
+  try {
+    const ct = String(req.headers['content-type'] ?? '').toLowerCase();
+    if (!ct.startsWith('application/x-www-form-urlencoded')) return new URLSearchParams();
+    const chunks: Buffer[] = [];
+    let size = 0;
+    for await (const c of req) {
+      size += (c as Buffer).length;
+      if (size > 4096) return new URLSearchParams();
+      chunks.push(c as Buffer);
+    }
+    return new URLSearchParams(Buffer.concat(chunks).toString('utf8'));
+  } catch {
+    return new URLSearchParams();
+  }
+}
+
+function renderSessionCard(who: string, token: string): string {
+  const field = `<input type="hidden" name="csrf" value="${escapeHtml(token)}"/>`;
+  return `<div class="card"><h2>Signed in</h2>
+  <div class="row"><span class="k">Signed in as</span><span class="v mono">${escapeHtml(who)}</span></div>
+  <div class="actions">
+    <form method="post" action="/account/sign-out">${field}<button class="btn secondary" type="submit">Sign out</button></form>
+    <form method="post" action="/account/sign-out-all">${field}<button class="btn secondary" type="submit">Sign out of all sessions</button></form>
+  </div>
+  <p class="note">"Sign out" ends your Citrate session in this browser. "Sign out of all sessions" also signs you out on every other browser and device, and apps must sign in again.</p>
+</div>`;
+}
 
 function kycLive(claim: KycClaim | undefined): KycStatus | 'none' | 'expired' {
   if (!claim) return 'none';
@@ -145,8 +190,10 @@ function renderHub(args: {
   addPasskeyToken?: string;
   /** The session could add a passkey but must sign in again first. */
   passkeyNeedsReauth?: boolean;
+  /** Present when the account shown is this browser's own session. */
+  signedIn?: { who: string; token: string };
 }): string {
-  const { email, signingMethod, wallet, kyc, ent, backLink, addPasskeyToken, passkeyNeedsReauth } = args;
+  const { email, signingMethod, wallet, kyc, ent, backLink, addPasskeyToken, passkeyNeedsReauth, signedIn } = args;
   const kycBadge =
     kyc === 'verified' ? '<span class="badge ok">Verified</span>'
     : kyc === 'pending' ? '<span class="badge warn">In review</span>'
@@ -165,7 +212,7 @@ function renderHub(args: {
 ${backLink ? `<a class="back" href="${escapeHtml(backLink)}">&larr; Back to the app</a>` : ''}
 <h1>Your Citrate account</h1>
 <p class="sub">One identity across every Citrate site &amp; app.</p>
-
+${signedIn ? renderSessionCard(signedIn.who, signedIn.token) : ''}
 <div class="card"><h2>Identity</h2>
   <div class="row"><span class="k">Email</span><span class="v">${email ? escapeHtml(email) : '<span class="badge muted">none</span>'}</span></div>
   <div class="row"><span class="k">Sign-in method</span><span class="v">${escapeHtml(signingMethod || 'passkey/wallet')}</span></div>
@@ -200,14 +247,38 @@ function renderPasskeyReauthCard(): string {
 </div>`;
 }
 
-function renderSignedOut(): string {
+function renderSignedOut(justSignedOut?: 'this' | 'all'): string {
+  const lead =
+    justSignedOut === 'all'
+      ? "You're signed out of all sessions. Every browser and app must sign in again."
+      : justSignedOut === 'this'
+        ? "You're signed out on this browser."
+        : "You're not signed in.";
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
 <title>Your Citrate account</title><style>${PAGE_CSS}</style></head><body><div class="wrap">
 <h1>Your Citrate account</h1>
 <p class="sub">Sign in through any Citrate app, then return here to manage your account and verify your identity.</p>
-<div class="card"><p class="note">You're not signed in. Open a Citrate app (e.g. the explorer or dashboard), sign in, and use its "Manage account" link to come back here.</p></div>
+<div class="card"><p class="note">${lead} Open a Citrate app (e.g. the explorer or dashboard), sign in, and use its "Manage account" link to come back here.</p>
+<div class="actions"><a class="btn" href="${JOIN_URL}">Go to Citrate</a></div></div>
 </div></body></html>`;
+}
+
+interface BrowserSession {
+  jti: string;
+  accountId?: string;
+  authorizations?: Record<string, { grantId?: string; persistsLogout?: boolean } | undefined>;
+  destroy(): Promise<void>;
+}
+
+/** Clear panva's session cookie (and its signature / legacy variants). */
+function clearSessionCookie(
+  ctx: { secure: boolean; cookies: { set(n: string, v: null, o: object): unknown } },
+  name: string,
+): void {
+  for (const n of [name, `${name}.legacy`]) {
+    ctx.cookies.set(n, null, { path: '/', sameSite: 'lax', signed: true, secure: ctx.secure, httpOnly: true });
+  }
 }
 
 /** Options for {@link mountAccountRoute}. */
@@ -220,6 +291,12 @@ export interface AccountRouteOptions {
    * holds. Omitted → cookie-only behaviour, unchanged.
    */
   handoffStore?: HandoffStore;
+  /**
+   * The Sign out / Sign out of all sessions card and its POST routes
+   * (ACCOUNT_SESSION_CONTROLS=1). Off: /account renders as before and the
+   * routes are not mounted.
+   */
+  sessionControls?: boolean;
 }
 
 /**
@@ -233,6 +310,57 @@ export function mountAccountRoute(
   options: AccountRouteOptions = {},
 ): void {
   const handoffStore = options.handoffStore;
+  const issuerOrigin = new URL(provider.issuer).origin;
+  // panva's session cookie name (`_session` by default); not in its typings.
+  const sessionCookie = (provider as unknown as { cookieName(n: string): string }).cookieName('session');
+
+  const sessionControls = options.sessionControls === true;
+
+  // POST /account/sign-out and /account/sign-out-all (ACCOUNT_SESSION_CONTROLS).
+  if (sessionControls) provider.use(async (ctx, next) => {
+    if (ctx.method !== 'POST' || (ctx.path !== '/account/sign-out' && ctx.path !== '/account/sign-out-all')) {
+      return next();
+    }
+    const all = ctx.path === '/account/sign-out-all';
+    ctx.set('cache-control', 'no-store');
+    if (isCrossSite(ctx.req, issuerOrigin)) {
+      ctx.status = 403;
+      ctx.body = { error: 'invalid_request', reason: 'cross_site_forbidden' };
+      return;
+    }
+    let session: BrowserSession | undefined;
+    try {
+      session = (await provider.Session.get(ctx)) as unknown as BrowserSession;
+    } catch {
+      session = undefined;
+    }
+    const form = await readForm(ctx.req);
+    if (!session?.accountId) {
+      ctx.status = 303;
+      ctx.redirect('/account?signed_out=1');
+      return;
+    }
+    if (!isValidAccountActionToken(session.jti, form.get('csrf'))) {
+      ctx.status = 403;
+      ctx.body = { error: 'invalid_request', reason: 'invalid_csrf_token' };
+      return;
+    }
+    const accountId = session.accountId;
+    if (all) {
+      await endAllAccountSessions(provider, accountId);
+    } else {
+      for (const auth of Object.values(session.authorizations ?? {})) {
+        if (auth?.grantId && !auth.persistsLogout) await revokeGrant(provider, auth.grantId);
+      }
+      getSessionBus().publish(accountId, { type: 'logout', sid: session.jti, at: Date.now() });
+    }
+    // Ending all sessions already destroyed this one; destroying again is a no-op.
+    await session.destroy();
+    clearSessionCookie(ctx, sessionCookie);
+    ctx.status = 303;
+    ctx.redirect(all ? '/account?signed_out=all' : '/account?signed_out=1');
+  });
+
   provider.use(async (ctx, next) => {
     if (ctx.method !== 'GET' || ctx.path !== '/account') return next();
 
@@ -255,7 +383,8 @@ export function mountAccountRoute(
     }
     if (!accountId) accountId = browser?.accountId;
     if (!accountId) {
-      sendHtml(ctx.res, 200, renderSignedOut());
+      const flag = ctx.query['signed_out'];
+      sendHtml(ctx.res, 200, renderSignedOut(flag === 'all' ? 'all' : flag === '1' ? 'this' : undefined));
       return;
     }
 
@@ -285,6 +414,12 @@ export function mountAccountRoute(
     const recent = ownSession && isRecentSignIn(browser?.loginTs);
     const addPasskeyToken = recent && browser ? accountActionToken(browser.jti) : undefined;
     const passkeyNeedsReauth = ownSession && !recent;
+    // The sign-out actions act on this browser's session, so they are shown
+    // only when the account on the page IS that session's account.
+    const signedIn =
+      sessionControls && browser?.accountId === accountId
+        ? { who: rec?.email ?? wallet ?? accountId, token: accountActionToken(browser.jti) }
+        : undefined;
 
     sendHtml(
       ctx.res,
@@ -300,6 +435,7 @@ export function mountAccountRoute(
         backLink,
         addPasskeyToken,
         passkeyNeedsReauth,
+        signedIn,
       }),
     );
   });

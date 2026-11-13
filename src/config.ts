@@ -1,6 +1,7 @@
 import { ORCHARD_CLIENTS, ORCHARD_SIGNED_OUT_PATH } from './orchard-clients.js';
 import { isRevokedByEpoch, tokenAuthSec } from './auth/account-epoch.js';
 import { logoutSource, postLogoutSuccessSource } from './logout-ui.js';
+import { sessionLifetimeFromEnv, sessionTtlSeconds } from './auth/session-lifetime.js';
 import {
   readFileSync,
   writeFileSync,
@@ -1044,6 +1045,8 @@ export async function buildConfiguration(
 ): Promise<Configuration> {
   const jwks = await loadOrCreateJwks();
   const orchardSignedOutUri = envFlag('ORCHARD_SIGNED_OUT_URI');
+  // Read once per provider so a bad value refuses to boot.
+  const sessionLifetime = sessionLifetimeFromEnv();
 
   return {
     jwks,
@@ -1627,9 +1630,13 @@ export async function buildConfiguration(
       IdToken: 60 * 60,
       RefreshToken: 14 * 24 * 60 * 60,
       // PBA-L3a-013: pinned explicitly instead of inheriting library defaults.
-      // A browser SSO session lasts at most as long as a refresh token; a
-      // grant the same; a login/consent interaction one hour.
-      Session: 14 * 24 * 60 * 60,
+      // A grant lasts as long as a refresh token; a login/consent interaction
+      // one hour. The browser session: an idle window (SESSION_IDLE_TTL_SECONDS,
+      // default 14 days, no longer than a refresh token) and an optional limit
+      // from the last sign-in (SESSION_ABSOLUTE_TTL_SECONDS); see
+      // auth/session-lifetime.ts. panva calls this on every save.
+      Session: (_ctx: unknown, session: { loginTs?: number }) =>
+        sessionTtlSeconds(sessionLifetime, session),
       Grant: 14 * 24 * 60 * 60,
       Interaction: 60 * 60,
     },

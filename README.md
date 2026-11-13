@@ -115,6 +115,9 @@ Key env vars (full annotations in `.env.example`):
 | `EXPLORER_ORIGIN` | `http://localhost:3001` | Registered redirect base for the explorer RP. |
 | `DASHBOARD_ORIGIN` | `http://localhost:3002` | Redirect base for the dashboard RP. |
 | `COOKIE_KEYS` | dev default | Comma-separated cookie-signing secrets (prepend to rotate). |
+| `SESSION_IDLE_TTL_SECONDS` | `1209600` (14d) | Browser session idle limit (proposed: `43200`, 12h). |
+| `SESSION_ABSOLUTE_TTL_SECONDS` | unset (none) | Browser session limit from the last sign-in (proposed: `604800`, 7d); must be ≥ the idle limit. |
+| `ACCOUNT_SESSION_CONTROLS` | unset (off) | `1`: sign out / sign out of all sessions on `/account` (and the session index behind it). |
 | `RP_LOGOUT_SEAMLESS` | unset (off) | `1`: no confirm click on `/session/end` for a valid `id_token_hint`; logout ends the whole browser session. |
 | `ORCHARD_SIGNED_OUT_URI` | unset (off) | `1`: register `<orchard origin>/join?signed_out=1` as a post-logout URI. |
 | `OIDC_PROMPT_SELECT_ACCOUNT` | unset (off) | `1`: accept `prompt=select_account`. |
