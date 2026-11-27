@@ -38,6 +38,7 @@ import { verifyAaStackOnChain, formatAaStackProblems } from './aa/verify-stack.j
 import { mountStaticAssets } from './static-assets.js';
 import { mountPasswordRoutes } from './auth/password-routes.js';
 import { createRateLimiter, type RateLimiter } from './auth/rate-limit.js';
+import { mountOAuthRelay, type OAuthRelayOptions } from './oauth-relay/routes.js';
 import { initAccountEpochStore, mountSessionEpochGuard } from './auth/account-epoch.js';
 import {
   ACCOUNT_REAUTH_CALLBACK_PATH,
@@ -158,6 +159,12 @@ export interface CreateProviderOptions {
    * Redis-backed limiter when `redis` is provided, else per-process.
    */
   rateLimiter?: RateLimiter;
+  /**
+   * L6-WP04 OAuth token relay seams (tests): outbound fetch, the environment the
+   * provider credentials and OAUTH_RELAY are read from, the logger, and budgets.
+   * Defaults: global fetch, process.env, console, RELAY_LIMITS.
+   */
+  oauthRelay?: OAuthRelayOptions;
 }
 
 /**
@@ -286,6 +293,16 @@ export async function createProvider(
   // app's loopback listener. Stateless, no secret, no token exchange. See ADR-3 /
   // OAUTH_SETUP_RUNBOOK.md and src/oauth-bounce.ts.
   mountOAuthBounce(provider);
+
+  // L6-WP04: server-side OAuth token relay (POST /oauth/relay/v1/{provider}/
+  // token|refresh|revoke). Adds the provider client secret server side so the
+  // desktop build never holds one; signed-in desktop members only; per-IP and
+  // per-account budgets (Redis when wired). OAUTH_RELAY=0 turns it off.
+  // See src/oauth-relay/routes.ts and docs/OAUTH_RELAY.md.
+  mountOAuthRelay(provider, {
+    ...(options.oauthRelay ?? {}),
+    rateLimiter: options.rateLimiter ?? createRateLimiter(options.redis),
+  });
 
   // SIWE login. The signing JWK is the same RS256 key the authority publishes
   // via JWKS, so direct-path ID tokens verify against `/jwks`. `keys[0]` is

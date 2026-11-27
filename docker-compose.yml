@@ -152,6 +152,17 @@ services:
       CITRATE_AA_DISCORD_CLIENT_SECRET: ${CITRATE_AA_DISCORD_CLIENT_SECRET:-}
       CITRATE_AA_X_CLIENT_ID: ${CITRATE_AA_X_CLIENT_ID:-}
       CITRATE_AA_X_CLIENT_SECRET: ${CITRATE_AA_X_CLIENT_SECRET:-}
+      # L6-WP04 OAuth token relay (POST /oauth/relay/v1/{provider}/token|refresh|revoke).
+      # The relay adds the provider client secret server side so desktop builds never
+      # hold one. A provider with either value unset answers 503 not_configured and is
+      # never called. OAUTH_RELAY=0 turns every relay route off (503 relay_disabled).
+      # These are the CONNECTIONS apps, separate from the CITRATE_AA_GITHUB_* login
+      # federation app above. Values come from 1Password; see docs/OAUTH_RELAY.md.
+      OAUTH_RELAY: ${OAUTH_RELAY:-}
+      GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID:-}
+      GITHUB_CLIENT_SECRET: ${GITHUB_CLIENT_SECRET:-}
+      NOTION_CLIENT_ID: ${NOTION_CLIENT_ID:-}
+      NOTION_CLIENT_SECRET: ${NOTION_CLIENT_SECRET:-}
       # FWA #87.1 — Resend transactional email (verification codes). SMTP egress
       # is blocked on the droplet, so this HTTPS sender is REQUIRED for the
       # password verified-email flow (else register/login 503).
