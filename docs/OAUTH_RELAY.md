@@ -1,6 +1,7 @@
 ---
 created: 2026-11-27T00:00:00Z
-branch: feat/v60-l6-wp04-oauth-relay
+last_updated: 2026-11-27
+branch: feat/v60-l6-relay-slack-linkedin
 author: Larry Klosowski
 status: active
 planset: 2026-11-07-v060 (L6-WP04, AR-E8.1 / F-20)
@@ -8,7 +9,7 @@ planset: 2026-11-07-v060 (L6-WP04, AR-E8.1 / F-20)
 
 # OAuth token relay (`/oauth/relay/v1`)
 
-Citrate Core connects members to GitHub, Notion and other providers whose token
+Citrate Core connects members to GitHub, Notion, Slack and other providers whose token
 endpoint needs a client secret. A desktop binary cannot keep a secret, so the
 code exchange runs here: the app sends the authorization code and PKCE
 verifier, this authority adds the client secret, calls the provider's fixed
@@ -36,10 +37,14 @@ members only).
 Answers:
 
 - `token` and `refresh`: the provider's status, body and content type, byte for
-  byte. No token length or shape is checked. GitHub answers some errors with 200
+  byte (Slack excepted, below). No token length or shape is checked. GitHub answers some errors with 200
   and an `error` field; those pass through as well.
 - `revoke`: `200 {"revoked":true,"upstream_status":N}` or
-  `502 {"error":"provider_rejected","revoked":false,"upstream_status":N}`.
+  `502 {"error":"provider_rejected","revoked":false,"upstream_status":N}`
+  (Slack adds `provider_error` when `auth.revoke` answers `ok:false`).
+- Slack `token` and `refresh` are never relayed raw: they are parsed, checked
+  and rebuilt; see
+  [Slack](#slack-core-slack-mcp-user-app).
 - Every answer, relayed or the relay's own, carries `Cache-Control: no-store`
   and `X-Content-Type-Options: nosniff`.
 - Relay errors:
@@ -63,9 +68,87 @@ Answers:
 |---|---|---|---|---|
 | `github` | `https://github.com/login/oauth/access_token` (form body, `Accept: application/json`) | `DELETE https://api.github.com/applications/{client_id}/token`, Basic, JSON `{access_token}` | secret in form body | `http://127.0.0.1:8975/oauth/callback` |
 | `notion` | `https://api.notion.com/v1/oauth/token` (JSON body) | none | Basic | `https://auth.citrate.ai/oauth/callback` (the hosted bounce, because Notion rejects an http loopback) |
+| `slack` | `https://slack.com/api/oauth.v2.user.access` (form body) | `POST https://slack.com/api/auth.revoke`, form `token`, no client credentials | secret in form body | `https://auth.citrate.ai/oauth/callback` (the hosted bounce) |
 
-Adding a provider is a code change to `providers.ts` with tests. No URL from a
-request is ever used outbound.
+Each row accepts exactly one `redirect_uri`, compared as a whole string (no
+trailing slash, case or query variants). LinkedIn is not a row: its token
+never reaches the desktop, so `/oauth/relay/v1/linkedin/*` answers 404.
+
+Known limit (accepted): Notion and Slack share the hosted bounce
+`https://auth.citrate.ai/oauth/callback`, so the relay cannot tell a Notion
+callback from a Slack one by its redirect. A code sent to the wrong provider's
+exchange is refused by that provider, which did not issue it. The binding of a
+callback to the flow that started it (`state` and the PKCE verifier) is
+enforced in Citrate Core, not here.
+
+### Slack (Core Slack MCP user app)
+
+App ID `A0CM5JALP3R` (informational, not read by the relay), token rotation on,
+MCP on. User scopes only: `search:read.public`, `channels:read`,
+`channels:history`, `users:read`. No bot scopes.
+
+- The desktop opens `https://slack.com/oauth/v2_user/authorize` with
+  `client_id`, `user_scope` (the four scopes above), `redirect_uri` (the hosted
+  bounce), `state` and an S256 `code_challenge`.
+- `token`: `oauth.v2.user.access` with `grant_type=authorization_code`, `code`,
+  `code_verifier`, `redirect_uri`, `client_id`, `client_secret`.
+- `refresh` (token rotation): the same method with
+  `grant_type=refresh_token`. Slack's token rotation page shows refresh on
+  `oauth.v2.access`; the `oauth.v2.user.access` reference lists
+  `grant_type` and `refresh_token` as arguments, and the relay uses it because
+  the tokens come from that method. To be confirmed against the live app
+  during QA. Rotated tokens (`xoxe.xoxp-...`, refresh
+  `xoxe-1-...`) are long; they reach the app untruncated.
+- `revoke`: `auth.revoke` with the token as a form field.
+
+Slack answers HTTP 200 with `ok:false` on errors, and one exchange can mint a
+bot token beside the user token, so the relay never relays Slack's raw body
+(`src/oauth-relay/slack.ts`). It parses the answer strictly (a duplicate key
+or nesting deeper than 32 levels is refused), validates it, and on success
+sends a new JSON body built only from these fields:
+
+- `ok`, `app_id`, `scope`, `token_type`, `access_token`, `expires_in`,
+  `refresh_token`, `is_enterprise_install`
+- `authed_user`: `id`, `scope`, `token_type`, `access_token`, `expires_in`,
+  `refresh_token`
+- `team` and `enterprise` (or `null`): `id`, `name`
+
+Every other field (for example `id_token`, `warning`, `response_metadata`) is
+dropped. A Slack token is any string containing `xox<letter>-`, `xoxe.` or
+`xoxe-`, found by a scan of the raw bytes and of every decoded key and string
+value at any depth, arrays included.
+
+| Slack answer | Relay answer |
+|---|---|
+| `ok:true`, user tokens only (`xoxp-` / `xoxe.xoxp-`, refresh `xoxe-`), every granted scope (top-level `scope` and `authed_user.scope`, strings) in the approved set | `200` with the rebuilt body |
+| unparseable with a token in its bytes, a duplicate key, nesting past the bound, an allowlisted field of the wrong type (for example a non-string `scope`), or no access token | revoked, then `502 ... "provider_error":"malformed_answer"` |
+| `ok:false` with `ratelimited` | `429 {"error":"rate_limited","provider_error":"ratelimited"}` |
+| `ok:false` with `internal_error`, `fatal_error`, `service_unavailable` or `request_timeout` | `502 {"error":"provider_rejected","provider_error":"<code>"}` |
+| `ok:false` with any other plain error code | `400 {"error":"provider_rejected","provider_error":"<code>"}`; nothing else from the answer |
+| `ok:false` with any other error value, or not JSON, or no token | `502 provider_rejected`, no detail |
+| a token anywhere but `access_token`, `refresh_token`, `authed_user.access_token`, `authed_user.refresh_token` (for example `enterprise.access_token`, an array element, an object key, a JSON-escaped value), or a known token field that is not exactly one Slack token | revoked, then `502 ... "provider_error":"unexpected_token_field"` |
+| any bot or app token (`token_type` not `user`, `bot_user_id`, `bot`, `incoming_webhook`, or an access token `xox...` but not `xoxp-`) | every token revoked at `auth.revoke`, then `502 {"error":"provider_rejected","provider_error":"bot_token_refused","revoked":true}` |
+| a granted scope outside the approved set | revoked, then `502 ... "provider_error":"scope_not_approved"` |
+| no granted scope reported, or an empty or whitespace scope string | revoked, then `502 ... "provider_error":"scope_missing"` (fail closed) |
+
+"Revoked" means every Slack token in the answer, access and refresh
+(`xoxe-`), is sent to `auth.revoke`. `revoked` is `false` when any revocation
+call failed or a known token field held a value that is not a Slack token (it
+cannot be revoked). The same checks run on `refresh` answers. A Slack answer
+withheld for any other reason has its tokens revoked the same way and carries
+`revoked`: one that echoed the client secret, a 3xx, an `ok:false` answer that
+still carries a token, and an answer over the 256 KiB cap (the tokens in the
+bytes read before the cap). PKCE stays
+required: a Slack code exchange without a valid `code_verifier` is refused
+with 400 before any outbound call.
+
+Slack docs used (checked 2026-11-27):
+
+- MCP server, confidential OAuth, `oauth/v2_user/authorize` and `oauth.v2.user.access`: https://docs.slack.dev/ai/mcp-server
+- `oauth.v2.user.access` arguments (`code_verifier`, `grant_type`, `refresh_token`), response and `ok:false` shape: https://docs.slack.dev/reference/methods/oauth.v2.user.access
+- User and bot scopes, `oauth.v2.access` versus `oauth.v2.user.access`: https://docs.slack.dev/authentication/installing-with-oauth
+- Token rotation (`grant_type=refresh_token`, `xoxe.` prefixes, 12 hour expiry): https://docs.slack.dev/authentication/using-token-rotation
+- `auth.revoke` (token as POST parameter, `{"ok":true,"revoked":true}`): https://docs.slack.dev/reference/methods/auth.revoke
 
 ## Guarantees
 
@@ -103,6 +186,7 @@ request is ever used outbound.
 | `OAUTH_RELAY` | `0` turns every relay route off. Unset means on. |
 | `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET` | GitHub connections app. Not the `CITRATE_AA_GITHUB_*` login federation app. |
 | `NOTION_CLIENT_ID`, `NOTION_CLIENT_SECRET` | Notion public integration. |
+| `SLACK_CLIENT_ID`, `SLACK_CLIENT_SECRET` | Core Slack MCP user app. `SLACK_APP_ID` is informational and not read. |
 
 The compose file passes these names through; `.env` holds the values. Values
 live in 1Password only:
@@ -111,6 +195,8 @@ live in 1Password only:
 - `op://citrate-infra/identity.oauth-relay/GITHUB_CLIENT_SECRET`
 - `op://citrate-infra/identity.oauth-relay/NOTION_CLIENT_ID`
 - `op://citrate-infra/identity.oauth-relay/NOTION_CLIENT_SECRET`
+- `op://citrate-infra/identity.oauth-relay/SLACK_CLIENT_ID`
+- `op://citrate-infra/identity.oauth-relay/SLACK_CLIENT_SECRET`
 
 ## Deploy checklist (operator)
 
@@ -118,8 +204,8 @@ Secrets never pass through a terminal, a chat, a file on the operator machine or
 the shell history. They move from 1Password straight into the droplet `.env`.
 
 1. Register the provider apps (connections runbook, L6-WP21). GitHub callback
-   URL: `http://127.0.0.1:8975/oauth/callback`. Notion redirect URI:
-   `https://auth.citrate.ai/oauth/callback`. Store the four values in the
+   URL: `http://127.0.0.1:8975/oauth/callback`. Notion and Slack redirect URI:
+   `https://auth.citrate.ai/oauth/callback`. Store the values in the
    1Password item above.
 2. Write a template on the operator machine that holds references only, for
    example `oauth-relay.env.tpl`:
@@ -129,6 +215,8 @@ the shell history. They move from 1Password straight into the droplet `.env`.
    GITHUB_CLIENT_SECRET={{ op://citrate-infra/identity.oauth-relay/GITHUB_CLIENT_SECRET }}
    NOTION_CLIENT_ID={{ op://citrate-infra/identity.oauth-relay/NOTION_CLIENT_ID }}
    NOTION_CLIENT_SECRET={{ op://citrate-infra/identity.oauth-relay/NOTION_CLIENT_SECRET }}
+   SLACK_CLIENT_ID={{ op://citrate-infra/identity.oauth-relay/SLACK_CLIENT_ID }}
+   SLACK_CLIENT_SECRET={{ op://citrate-infra/identity.oauth-relay/SLACK_CLIENT_SECRET }}
    ```
 
 3. Pipe the injected result into the droplet `.env`, replacing any earlier
@@ -138,7 +226,7 @@ the shell history. They move from 1Password straight into the droplet `.env`.
    ```
    op inject -i oauth-relay.env.tpl | ssh <deploy-host> \
      'cd <deploy-dir> && umask 077 && \
-      grep -Ev "^(GITHUB|NOTION)_CLIENT_(ID|SECRET)=" .env > .env.new && \
+      grep -Ev "^(GITHUB|NOTION|SLACK)_CLIENT_(ID|SECRET)=" .env > .env.new && \
       cat >> .env.new && chmod 600 .env.new && mv .env.new .env'
    ```
 
@@ -148,7 +236,7 @@ the shell history. They move from 1Password straight into the droplet `.env`.
    `GIT_SHA="$(git rev-parse HEAD)" docker compose up -d --build identity`.
 5. Verify without printing a value:
    - `docker compose exec identity node -e "process.exit(process.env.GITHUB_CLIENT_SECRET ? 0 : 1)"` exits 0.
-   - `curl -s -o /dev/null -w '%{http_code}' -X POST https://auth.citrate.ai/oauth/relay/v1/github/token` prints `401`.
+   - `curl -s -o /dev/null -w '%{http_code}' -X POST https://auth.citrate.ai/oauth/relay/v1/github/token` prints `401` (same for `slack`).
    - `GET /health` is still 200 and the OAuth bounce still answers
      `GET /oauth/callback` with 302.
 6. Runtime proof is a recorded GitHub connect from a release build of Citrate

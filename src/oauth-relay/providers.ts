@@ -18,7 +18,7 @@ import { CORE_LOOPBACK_CALLBACK } from '../oauth-bounce.js';
 
 /**
  * The hosted https redirect providers that reject an http loopback are
- * registered against (Notion). It is this authority's own bounce
+ * registered against (Notion, Slack). It is this authority's own bounce
  * (`src/oauth-bounce.ts`), which 302s the browser to the same loopback.
  */
 export const HOSTED_BOUNCE_REDIRECT = 'https://auth.citrate.ai/oauth/callback';
@@ -37,8 +37,11 @@ export interface RevokeEndpoint {
   /** Builds the fixed revoke URL; only the configured client id is substituted. */
   url: (clientId: string) => string;
   method: 'DELETE' | 'POST';
-  /** Always Basic for the providers here. */
-  auth: 'basic';
+  /**
+   * `basic`: client_id:client_secret as HTTP Basic. `none`: the token itself
+   * is the credential (Slack `auth.revoke`); no client secret is sent.
+   */
+  auth: 'basic' | 'none';
   /** The body field name the provider expects the token under. */
   tokenField: string;
   encoding: BodyEncoding;
@@ -60,6 +63,21 @@ export interface RelayProvider {
   readonly headers: Readonly<Record<string, string>>;
   /** The ONLY redirect_uri values accepted for this provider. */
   readonly redirectUris: readonly string[];
+  /**
+   * Answer policy checked before a token/refresh answer is passed through.
+   * Absent: the provider's answer passes through unchanged (GitHub, Notion).
+   */
+  readonly answerPolicy?: SlackUserAnswerPolicy;
+}
+
+/**
+ * Slack answers HTTP 200 with `ok:false` on errors, and one exchange can mint
+ * bot and user tokens together. The relay only passes on an `ok:true` answer
+ * that carries user tokens alone, with every granted scope in the approved set.
+ */
+export interface SlackUserAnswerPolicy {
+  readonly kind: 'slack_user';
+  readonly approvedUserScopes: ReadonlySet<string>;
 }
 
 const GITHUB: RelayProvider = Object.freeze({
@@ -102,8 +120,47 @@ const NOTION: RelayProvider = Object.freeze({
   redirectUris: Object.freeze([HOSTED_BOUNCE_REDIRECT]),
 });
 
+/**
+ * Core Slack MCP user app (App ID A0CM5JALP3R, token rotation on). Read-only
+ * user scopes; no bot scopes. Changing this set is a reviewed code change.
+ */
+export const SLACK_APPROVED_USER_SCOPES: ReadonlySet<string> = new Set([
+  'search:read.public',
+  'channels:read',
+  'channels:history',
+  'users:read',
+]);
+
+/** Slack user OAuth v2 token method; the MCP server's documented token endpoint. */
+const SLACK_USER_TOKEN_URL = 'https://slack.com/api/oauth.v2.user.access';
+
+const SLACK: RelayProvider = Object.freeze({
+  id: 'slack',
+  envPrefix: 'SLACK',
+  // Code exchange and rotation refresh (grant_type=refresh_token) both use
+  // oauth.v2.user.access, which returns the user token at the top level.
+  tokenUrl: SLACK_USER_TOKEN_URL,
+  refreshUrl: SLACK_USER_TOKEN_URL,
+  revoke: Object.freeze({
+    // auth.revoke takes the token as a POST form parameter and answers
+    // {"ok":true,"revoked":true}; it needs no client credentials.
+    url: () => 'https://slack.com/api/auth.revoke',
+    method: 'POST' as const,
+    auth: 'none' as const,
+    tokenField: 'token',
+    encoding: 'form' as const,
+    headers: Object.freeze({ accept: 'application/json' }),
+  }),
+  authStyle: 'body',
+  encoding: 'form',
+  headers: Object.freeze({ accept: 'application/json' }),
+  // Slack requires an https redirect; core uses the hosted bounce.
+  redirectUris: Object.freeze([HOSTED_BOUNCE_REDIRECT]),
+  answerPolicy: Object.freeze({ kind: 'slack_user' as const, approvedUserScopes: SLACK_APPROVED_USER_SCOPES }),
+});
+
 export const RELAY_PROVIDERS: ReadonlyMap<string, RelayProvider> = new Map(
-  [GITHUB, NOTION].map((p) => [p.id, p] as const),
+  [GITHUB, NOTION, SLACK].map((p) => [p.id, p] as const),
 );
 
 /** Exact-match lookup; anything else (case variants, `__proto__`) is unknown. */
