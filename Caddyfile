@@ -11,6 +11,30 @@
 # auth.citrate.ai). Caddy provisions + renews the certificate for that hostname
 # automatically; no manual cert wrangling.
 
+# Global options. The default logger also carries Caddy's error log, which records
+# the full request URI when a proxy upstream is down (for example during an
+# identity restart). Redact OAuth callback query values there too.
+{
+	log default {
+		output stderr
+		format filter {
+			request>uri query {
+				replace code REDACTED
+				replace state REDACTED
+				replace error_description REDACTED
+			}
+			resp_headers>Location query {
+				replace code REDACTED
+				replace state REDACTED
+				replace error_description REDACTED
+				delete handle
+				delete sub
+			}
+			wrap json
+		}
+	}
+}
+
 {$ISSUER_HOST} {
 	encode zstd gzip
 
@@ -36,9 +60,26 @@
 		-Server
 	}
 
+	# OAuth callbacks (/oauth/callback for Notion and Slack, /oauth/linkedin/callback)
+	# carry a one-time `code` and the `state` in the query string. The access log
+	# keeps the request but replaces those values, so they never reach the logs.
 	log {
 		output stdout
-		format console
+		format filter {
+			request>uri query {
+				replace code REDACTED
+				replace state REDACTED
+				replace error_description REDACTED
+			}
+			resp_headers>Location query {
+				replace code REDACTED
+				replace state REDACTED
+				replace error_description REDACTED
+				delete handle
+				delete sub
+			}
+			wrap console
+		}
 	}
 }
 
