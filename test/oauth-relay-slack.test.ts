@@ -78,7 +78,8 @@ const revokedTokens = () =>
 beforeAll(async () => {
   up = await startUpstream();
   log = captureLogger();
-  auth = await startAuthority({ fetch: seamFetch(up), env: ENV, logger: log.logger });
+  // Roomy budgets: this suite makes many calls as one member from one IP.
+  auth = await startAuthority({ fetch: seamFetch(up), env: ENV, logger: log.logger, limits: { perIp: 1000, perAccount: 1000 } });
   member = await mintAccessToken(auth.provider, 'member-slack');
 });
 
@@ -440,12 +441,19 @@ describe('review fixes (#55): fail-closed edges', () => {
   });
 
   it('PKCE is required for Slack: an exchange without code_verifier is refused before any outbound call', async () => {
-    const { code_verifier: _omit, ...noVerifier } = slackBody();
-    for (const body of [noVerifier, slackBody({ code_verifier: '' }), slackBody({ code_verifier: 'short' })]) {
-      const r = await post(auth, '/oauth/relay/v1/slack/token', body, member);
-      expect(r.status).toBe(400);
-      expect(await r.json()).toMatchObject({ error: 'bad_request' });
+    // Own authority: a fresh rate-limit budget, so a 400 cannot be masked by a 429.
+    const a = await startAuthority({ fetch: seamFetch(up), env: ENV, logger: log.logger });
+    try {
+      const t = await mintAccessToken(a.provider, 'member-slack-pkce');
+      const { code_verifier: _omit, ...noVerifier } = slackBody();
+      for (const body of [noVerifier, slackBody({ code_verifier: '' }), slackBody({ code_verifier: 'short' })]) {
+        const r = await post(a, '/oauth/relay/v1/slack/token', body, t);
+        expect(r.status).toBe(400);
+        expect(await r.json()).toMatchObject({ error: 'bad_request' });
+      }
+      expect(up.seen).toHaveLength(0);
+    } finally {
+      await stop(a.server);
     }
-    expect(up.seen).toHaveLength(0);
   });
 });

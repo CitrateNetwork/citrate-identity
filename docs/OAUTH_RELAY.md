@@ -92,7 +92,11 @@ MCP on. User scopes only: `search:read.public`, `channels:read`,
 - `token`: `oauth.v2.user.access` with `grant_type=authorization_code`, `code`,
   `code_verifier`, `redirect_uri`, `client_id`, `client_secret`.
 - `refresh` (token rotation): the same method with
-  `grant_type=refresh_token`. Rotated tokens (`xoxe.xoxp-...`, refresh
+  `grant_type=refresh_token`. Slack's token rotation page shows refresh on
+  `oauth.v2.access`; the `oauth.v2.user.access` reference lists
+  `grant_type` and `refresh_token` as arguments, and the relay uses it because
+  the tokens come from that method. To be confirmed against the live app
+  during QA. Rotated tokens (`xoxe.xoxp-...`, refresh
   `xoxe-1-...`) are long; they pass through byte for byte, untruncated.
 - `revoke`: `auth.revoke` with the token as a form field.
 
@@ -103,14 +107,22 @@ passing it on (`src/oauth-relay/slack.ts`):
 | Slack answer | Relay answer |
 |---|---|
 | `ok:true`, user tokens only (`xoxp-` / `xoxe.xoxp-`), every granted scope (top-level `scope` and `authed_user.scope`) in the approved set | Slack's answer, byte for byte |
-| `ok:false` with a plain error code | `400 {"error":"provider_rejected","provider_error":"<code>"}`; nothing else from the answer |
+| `ok:false` with `ratelimited` | `429 {"error":"rate_limited","provider_error":"ratelimited"}` |
+| `ok:false` with `internal_error`, `fatal_error`, `service_unavailable` or `request_timeout` | `502 {"error":"provider_rejected","provider_error":"<code>"}` |
+| `ok:false` with any other plain error code | `400 {"error":"provider_rejected","provider_error":"<code>"}`; nothing else from the answer |
 | `ok:false` with any other error value, or not JSON, or no token | `502 provider_rejected`, no detail |
+| a token anywhere but `access_token`, `refresh_token`, `authed_user.access_token`, `authed_user.refresh_token` (for example `enterprise.access_token`, or any `xox...` value under another key) | revoked, then `502 ... "provider_error":"unexpected_token_field"` |
 | any bot or app token (`token_type` not `user`, `bot_user_id`, `bot`, `incoming_webhook`, or a token not `xoxp-`) | every access token revoked at `auth.revoke`, then `502 {"error":"provider_rejected","provider_error":"bot_token_refused","revoked":true}` |
 | a granted scope outside the approved set | revoked, then `502 ... "provider_error":"scope_not_approved"` |
-| no granted scope reported | revoked, then `502 ... "provider_error":"scope_missing"` (fail closed) |
+| no granted scope reported, or an empty or whitespace scope string | revoked, then `502 ... "provider_error":"scope_missing"` (fail closed) |
 
-`revoked` is `false` when a revocation call failed. The same checks run on
-`refresh` answers.
+"Revoked" means every Slack token in the answer, access and refresh
+(`xoxe-`), is sent to `auth.revoke`. `revoked` is `false` when any revocation
+call failed. The same checks run on `refresh` answers. A Slack token answer
+withheld by the generic guards (it echoed the client secret, or it was a 3xx)
+has its tokens revoked the same way and carries `revoked`. PKCE stays
+required: a Slack code exchange without a valid `code_verifier` is refused
+with 400 before any outbound call.
 
 Slack docs used (checked 2026-11-27):
 

@@ -44,7 +44,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import type Provider from 'oidc-provider';
 import { isRevokedByEpoch, tokenAuthSec } from '../auth/account-epoch.js';
 import { clientIp, type RateLimiter } from '../auth/rate-limit.js';
-import { judgeSlackAnswer, judgeSlackRevoke } from './slack.js';
+import { judgeSlackAnswer, judgeSlackRevoke, slackErrorStatus, slackTokensIn } from './slack.js';
 import {
   findRelayProvider,
   providerCredentials,
@@ -472,14 +472,37 @@ export function mountOAuthRelay(
         return;
       }
 
+      /**
+       * Revoke every Slack token in a withheld answer (a policy provider only;
+       * a revoke call's own answer carries no new token). Best effort: false
+       * when any revocation failed.
+       */
+      const revokeAll = async (tokens: string[]): Promise<boolean> => {
+        if (!p.revoke) return false;
+        let all = true;
+        for (const t of tokens) {
+          try {
+            const rv = await callUpstream(doFetch, revokeRequest(p.revoke, creds, t));
+            if (!(rv.status >= 200 && rv.status < 300 && judgeSlackRevoke(rv.body).ok)) all = false;
+          } catch {
+            all = false;
+          }
+        }
+        return all;
+      };
+      const withheld = async (outcome: string, reason: string) => {
+        const tokens = p.answerPolicy && operation !== 'revoke' ? slackTokensIn(answer.body) : [];
+        const revoked = tokens.length > 0 ? await revokeAll(tokens) : null;
+        note('warn', p.id, operation, outcome, 502, answer.status);
+        sendJson(res, 502, { error: 'provider_rejected', reason, ...(revoked !== null ? { revoked } : {}) });
+      };
+
       if (echoesSecret(answer, creds)) {
-        note('warn', p.id, operation, 'upstream_echoed_secret', 502, answer.status);
-        sendJson(res, 502, { error: 'provider_rejected', reason: 'the provider answer was withheld' });
+        await withheld('upstream_echoed_secret', 'the provider answer was withheld');
         return;
       }
       if (answer.status >= 300 && answer.status < 400) {
-        note('warn', p.id, operation, 'upstream_redirect', 502, answer.status);
-        sendJson(res, 502, { error: 'provider_rejected', reason: 'the provider answered with a redirect' });
+        await withheld('upstream_redirect', 'the provider answered with a redirect');
         return;
       }
 
@@ -503,28 +526,20 @@ export function mountOAuthRelay(
       if (p.answerPolicy) {
         const verdict = judgeSlackAnswer(answer.body, p.answerPolicy);
         if (verdict.kind === 'provider_error') {
-          // A plain Slack error code (invalid_code) is the caller's problem: 400.
-          // Anything unreadable is the provider's: 502. Nothing else is echoed.
-          const status = verdict.code ? 400 : 502;
+          // ratelimited: 429. Slack-side failures and unreadable errors: 502.
+          // Any other plain code (invalid_code) is the caller's: 400. Only the
+          // code is echoed.
+          const { status, error } = slackErrorStatus(verdict.code);
           note('warn', p.id, operation, 'provider_error', status, answer.status);
           sendJson(res, status, {
-            error: 'provider_rejected',
+            error,
             ...(verdict.code ? { provider_error: verdict.code } : { reason: 'the provider answer was not usable' }),
           });
           return;
         }
         if (verdict.kind === 'refuse') {
           // Never hand out a token the policy forbids; take it back at Slack first.
-          let revoked = p.revoke !== undefined;
-          for (const t of verdict.tokens) {
-            if (!p.revoke) break;
-            try {
-              const rv = await callUpstream(doFetch, revokeRequest(p.revoke, creds, t));
-              if (!(rv.status >= 200 && rv.status < 300 && judgeSlackRevoke(rv.body).ok)) revoked = false;
-            } catch {
-              revoked = false;
-            }
-          }
+          const revoked = await revokeAll(verdict.tokens);
           note('warn', p.id, operation, `refused_${verdict.reason}${revoked ? '' : '_revoke_failed'}`, 502, answer.status);
           sendJson(res, 502, { error: 'provider_rejected', provider_error: verdict.reason, revoked });
           return;
