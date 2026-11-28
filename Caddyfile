@@ -41,3 +41,52 @@
 		format console
 	}
 }
+
+# Homestead connector broker (container `homestead-broker`, joined to this
+# stack's docker network). Add this site only after the A record
+# connect.citrate.ai -> the droplet exists (DNS-only), so the HTTP-01 challenge
+# can succeed. Source of truth: citrate-homestead deploy/broker/CONNECT_BROKER.md.
+#
+# No `log` directive on purpose: a Caddy access log records the full request
+# URI, and /oauth/callback carries the OAuth `code` and `state` in its query
+# string. The broker writes its own redacted line per request.
+connect.citrate.ai {
+	encode zstd gzip
+
+	request_body {
+		max_size 16KiB
+	}
+
+	reverse_proxy homestead-broker:8080 {
+		header_up X-Forwarded-Proto {scheme}
+		header_up X-Forwarded-Host {host}
+		# Overwrites any client-supplied value; the broker rate-limits on it.
+		header_up X-Real-IP {remote_host}
+
+		health_uri /health
+		health_interval 30s
+		health_timeout 5s
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "no-referrer"
+		X-Frame-Options "DENY"
+		-Server
+	}
+
+	# Handled errors are logged at DEBUG, so a broker outage or an oversized body
+	# never writes the callback's code and state to the ERROR log. The answer is
+	# a bare status code with the same security headers.
+	handle_errors {
+		header {
+			Strict-Transport-Security "max-age=31536000; includeSubDomains"
+			X-Content-Type-Options "nosniff"
+			Referrer-Policy "no-referrer"
+			X-Frame-Options "DENY"
+			-Server
+		}
+		respond "{err.status_code}" {err.status_code}
+	}
+}
