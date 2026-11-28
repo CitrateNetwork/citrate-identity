@@ -1,7 +1,7 @@
 ---
 created: 2026-11-27T00:00:00Z
-last_updated: 2026-11-27
-branch: feat/v60-l6-relay-slack-linkedin
+last_updated: 2026-11-28
+branch: ops/oauth-relay-env-tpl
 author: Larry Klosowski
 status: active
 planset: 2026-11-07-v060 (L6-WP04, AR-E8.1 / F-20)
@@ -207,8 +207,9 @@ the shell history. They move from 1Password straight into the droplet `.env`.
    URL: `http://127.0.0.1:8975/oauth/callback`. Notion and Slack redirect URI:
    `https://auth.citrate.ai/oauth/callback`. Store the values in the
    1Password item above.
-2. Write a template on the operator machine that holds references only, for
-   example `oauth-relay.env.tpl`:
+2. Use the tracked template [`deploy/oauth-relay.env.tpl`](../deploy/oauth-relay.env.tpl),
+   which holds references only (it also carries the LinkedIn lines and keeps the
+   Notion lines commented until Notion is registered). Its relay lines are:
 
    ```
    GITHUB_CLIENT_ID={{ op://citrate-infra/identity.oauth-relay/GITHUB_CLIENT_ID }}
@@ -224,9 +225,9 @@ the shell history. They move from 1Password straight into the droplet `.env`.
    `CITRATE_AA_GITHUB_*` lines alone):
 
    ```
-   op inject -i oauth-relay.env.tpl | ssh <deploy-host> \
+   op inject -i deploy/oauth-relay.env.tpl | ssh <deploy-host> \
      'cd <deploy-dir> && umask 077 && \
-      grep -Ev "^(GITHUB|NOTION|SLACK)_CLIENT_(ID|SECRET)=" .env > .env.new && \
+      grep -Ev "^(GITHUB|NOTION|SLACK|LINKEDIN)_CLIENT_(ID|SECRET)=" .env > .env.new && \
       cat >> .env.new && chmod 600 .env.new && mv .env.new .env'
    ```
 
