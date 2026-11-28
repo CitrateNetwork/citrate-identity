@@ -105,6 +105,7 @@ again.
 | `KYC_STATUS_SECRETS` / `KYC_STATUS_SECRET` | for `GET /kyc/status` | per-caller status secrets `name:secret,…` (one per relying service, e.g. `membership:…,treasury-signer:…`) and/or one `KYC_STATUS_SECRET`. **No fallback to `KYC_WEBHOOK_SECRET`**: unset = `/kyc/status` disabled (503), and a status secret equal to the webhook secret also disables it |
 | `CITRATE_RPC_URL` | optional | chain-40204 RPC; enables EIP-1271 (Safe/contract-wallet) logins. EOA + WalletConnect work without it |
 | `WALLETCONNECT_PROJECT_ID` | optional | enables the login-page QR/mobile connector (not fail-closed) |
+| `LINKEDIN_CLIENT_ID` / `LINKEDIN_CLIENT_SECRET` | optional | LinkedIn app for `GET /oauth/linkedin/start` and `/oauth/linkedin/callback`; either unset = `/start` answers 503. Own 1Password item `identity.linkedin-relay`; see [`docs/OAUTH_LINKEDIN.md`](docs/OAUTH_LINKEDIN.md) |
 | `OAUTH_RELAY` | optional | `0` turns the OAuth token relay off (every `/oauth/relay/v1/*` route answers 503). Unset = on |
 | `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` | optional | GitHub connections app for the relay. Either unset = GitHub relay answers 503, never called. Not the `CITRATE_AA_GITHUB_*` login app. Set from 1Password only; see [`docs/OAUTH_RELAY.md`](docs/OAUTH_RELAY.md) |
 | `NOTION_CLIENT_ID` / `NOTION_CLIENT_SECRET` | optional | Notion public integration for the relay; same rules as GitHub |

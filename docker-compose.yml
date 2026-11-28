@@ -158,6 +158,10 @@ services:
       # never called. OAUTH_RELAY=0 turns every relay route off (503 relay_disabled).
       # These are the CONNECTIONS apps, separate from the CITRATE_AA_GITHUB_* login
       # federation app above. Values come from 1Password; see docs/OAUTH_RELAY.md.
+      # LinkedIn social-identity relay (GET /oauth/linkedin/start|callback); its own
+      # 1Password item. Either unset = /start answers 503. See docs/OAUTH_LINKEDIN.md.
+      LINKEDIN_CLIENT_ID: ${LINKEDIN_CLIENT_ID:-}
+      LINKEDIN_CLIENT_SECRET: ${LINKEDIN_CLIENT_SECRET:-}
       OAUTH_RELAY: ${OAUTH_RELAY:-}
       GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID:-}
       GITHUB_CLIENT_SECRET: ${GITHUB_CLIENT_SECRET:-}
