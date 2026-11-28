@@ -195,7 +195,7 @@ describe('slack token exchange (oauth.v2.user.access)', () => {
     expect(JSON.parse(text)).toMatchObject({ error: 'provider_rejected', provider_error: 'scope_not_approved', revoked: true });
     expect(text).not.toContain(LONG_ACCESS);
     expect(text).not.toContain(LONG_REFRESH);
-    expect(revokedTokens()).toEqual([LONG_ACCESS]);
+    expect(revokedTokens()).toEqual([LONG_ACCESS, LONG_REFRESH]);
     const rv = up.seen.find((s) => s.requestedUrl === REVOKE_URL)!;
     expect(rv.method).toBe('POST');
     expect(rv.body).not.toContain(SLACK_SECRET);
@@ -206,7 +206,7 @@ describe('slack token exchange (oauth.v2.user.access)', () => {
     const r = await post(auth, '/oauth/relay/v1/slack/token', slackBody(), member);
     expect(r.status).toBe(502);
     expect(await r.json()).toMatchObject({ provider_error: 'scope_not_approved' });
-    expect(revokedTokens()).toEqual([LONG_ACCESS]);
+    expect(revokedTokens()).toEqual([LONG_ACCESS, LONG_REFRESH]);
   });
 
   it('a strict subset of the approved scopes is accepted', async () => {
@@ -221,7 +221,7 @@ describe('slack token exchange (oauth.v2.user.access)', () => {
     const r = await post(auth, '/oauth/relay/v1/slack/token', slackBody(), member);
     expect(r.status).toBe(502);
     expect(await r.json()).toMatchObject({ provider_error: 'scope_missing' });
-    expect(revokedTokens()).toEqual([LONG_ACCESS]);
+    expect(revokedTokens()).toEqual([LONG_ACCESS, LONG_REFRESH]);
   });
 
   it('an answer that includes a bot token is revoked (every token) and refused', async () => {
@@ -253,7 +253,7 @@ describe('slack token exchange (oauth.v2.user.access)', () => {
     const r = await post(auth, '/oauth/relay/v1/slack/token', slackBody(), member);
     expect(r.status).toBe(502);
     expect(await r.json()).toMatchObject({ provider_error: 'bot_token_refused' });
-    expect(revokedTokens()).toEqual([rotBot]);
+    expect(revokedTokens()).toEqual([rotBot, LONG_REFRESH]);
   });
 
   it('a refusal whose revoke fails says revoked:false', async () => {
@@ -349,6 +349,102 @@ describe('slack redirect is the hosted bounce only', () => {
     ]) {
       const r = await post(auth, '/oauth/relay/v1/slack/token', slackBody({ redirect_uri }), member);
       expect(r.status, redirect_uri).toBe(400);
+    }
+    expect(up.seen).toHaveLength(0);
+  });
+});
+
+describe('review fixes (#55): fail-closed edges', () => {
+  it('an empty or whitespace scope is scope_missing, and the tokens are revoked', async () => {
+    for (const scope of ['', ' , ', ',', '   ']) {
+      up.seen.length = 0;
+      script(okUser({ scope, authed_user: { id: 'U1', scope } }));
+      const r = await post(auth, '/oauth/relay/v1/slack/token', slackBody(), member);
+      expect(r.status, JSON.stringify(scope)).toBe(502);
+      expect(await r.json()).toMatchObject({ provider_error: 'scope_missing', revoked: true });
+      expect(revokedTokens()).toEqual([LONG_ACCESS, LONG_REFRESH]);
+    }
+  });
+
+  it('refresh tokens are revoked too: an answer with only a refresh token and a bad scope revokes it', async () => {
+    const userRefresh = 'xoxe-1-' + 'u'.repeat(40);
+    script(
+      JSON.stringify({
+        ok: true,
+        authed_user: { id: 'U1', scope: 'chat:write', refresh_token: userRefresh, token_type: 'user' },
+        refresh_token: LONG_REFRESH,
+      }),
+    );
+    const r = await post(auth, '/oauth/relay/v1/slack/token', slackBody(), member);
+    expect(r.status).toBe(502);
+    const text = await r.text();
+    expect(JSON.parse(text)).toMatchObject({ provider_error: 'scope_not_approved', revoked: true });
+    expect(text).not.toContain(LONG_REFRESH);
+    expect(revokedTokens().sort()).toEqual([LONG_REFRESH, userRefresh].sort());
+  });
+
+  it('a token in an unknown field (enterprise.access_token) is refused and revoked', async () => {
+    const hidden = ['xoxp', 'fixture', 'enterprise'].join('-');
+    script(okUser({ enterprise: { id: 'E1', access_token: hidden } }));
+    const r = await post(auth, '/oauth/relay/v1/slack/token', slackBody(), member);
+    expect(r.status).toBe(502);
+    const text = await r.text();
+    expect(JSON.parse(text)).toMatchObject({ provider_error: 'unexpected_token_field', revoked: true });
+    expect(text).not.toContain(hidden);
+    expect(revokedTokens().sort()).toEqual([LONG_ACCESS, LONG_REFRESH, hidden].sort());
+  });
+
+  it('a Slack-looking token value under any other key is refused too', async () => {
+    const stray = ['xoxa', 'fixture', 'stray'].join('-');
+    script(okUser({ extra: [{ note: stray }] }));
+    const r = await post(auth, '/oauth/relay/v1/slack/token', slackBody(), member);
+    expect(r.status).toBe(502);
+    expect(await r.json()).toMatchObject({ provider_error: 'unexpected_token_field' });
+    expect(revokedTokens()).toContain(stray);
+  });
+
+  it('a token answer withheld for echoing the secret still has its tokens revoked', async () => {
+    script(okUser({ debug: SLACK_SECRET }));
+    const r = await post(auth, '/oauth/relay/v1/slack/token', slackBody(), member);
+    expect(r.status).toBe(502);
+    const text = await r.text();
+    expect(text).not.toContain(SLACK_SECRET);
+    expect(text).not.toContain(LONG_ACCESS);
+    expect(JSON.parse(text)).toMatchObject({ error: 'provider_rejected', revoked: true });
+    expect(revokedTokens()).toEqual([LONG_ACCESS, LONG_REFRESH]);
+    for (const s of up.seen.filter((x) => x.requestedUrl === REVOKE_URL)) expect(s.body).not.toContain(SLACK_SECRET);
+  });
+
+  it('a token answer withheld for a 3xx still has its tokens revoked', async () => {
+    up.reply = (s) =>
+      s.requestedUrl === REVOKE_URL ? { status: 200, body: '{"ok":true,"revoked":true}' } : { status: 302, body: okUser() };
+    const r = await post(auth, '/oauth/relay/v1/slack/token', slackBody(), member);
+    expect(r.status).toBe(502);
+    expect(await r.json()).toMatchObject({ error: 'provider_rejected', revoked: true });
+    expect(revokedTokens()).toEqual([LONG_ACCESS, LONG_REFRESH]);
+  });
+
+  it('ratelimited maps to 429; internal_error and fatal_error map to 502', async () => {
+    const cases: Array<[string, number, string]> = [
+      ['ratelimited', 429, 'rate_limited'],
+      ['internal_error', 502, 'provider_rejected'],
+      ['fatal_error', 502, 'provider_rejected'],
+      ['invalid_code', 400, 'provider_rejected'],
+    ];
+    for (const [code, status, error] of cases) {
+      script(JSON.stringify({ ok: false, error: code }));
+      const r = await post(auth, '/oauth/relay/v1/slack/token', slackBody(), member);
+      expect(r.status, code).toBe(status);
+      expect(await r.json(), code).toEqual({ error, provider_error: code });
+    }
+  });
+
+  it('PKCE is required for Slack: an exchange without code_verifier is refused before any outbound call', async () => {
+    const { code_verifier: _omit, ...noVerifier } = slackBody();
+    for (const body of [noVerifier, slackBody({ code_verifier: '' }), slackBody({ code_verifier: 'short' })]) {
+      const r = await post(auth, '/oauth/relay/v1/slack/token', body, member);
+      expect(r.status).toBe(400);
+      expect(await r.json()).toMatchObject({ error: 'bad_request' });
     }
     expect(up.seen).toHaveLength(0);
   });
