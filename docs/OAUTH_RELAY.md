@@ -85,9 +85,14 @@ request is ever used outbound.
   app signs in again and retries. The same check applies to the other bearer
   routes on this authority (`/kyc/handoff`, `/identity/:sub/wallets`,
   `/identity/:sub/orchard-proof`, `/aa/enroll-validator`, `/aa/register-wallet`,
-  `/aa/guardians`). Provider tokens the app already holds are not touched; the
-  epoch revokes the member's Citrate credential, not their GitHub or Notion
-  grant.
+  `/aa/guardians`, `POST /logout`, `GET /sessions/events`). Provider tokens the
+  app already holds are not touched; the epoch revokes the member's Citrate
+  credential, not their GitHub or Notion grant. A token with no `iat` on a
+  stamped account, or an epoch-store error, is refused too (fail closed).
+  Clock skew: the stamp comes from the clock of the instance that wrote it and
+  `iat` from the clock of the instance that issued the token, so a token issued
+  just after the stamp by a host lagging the epoch writer is refused for up to
+  that skew (the app signs in again); keep instances on NTP.
 - Rate limits: 120 per IP and 40 per account per 15 minutes, shared through
   Redis in production (`src/auth/rate-limit.ts`).
 

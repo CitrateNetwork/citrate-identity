@@ -595,6 +595,47 @@ describe('oauth relay: #52 follow-ups', () => {
     expect(await r.text()).toBe(GH_TOKEN_RESPONSE);
   });
 
+  it('account epoch fails closed: an epoch-store error refuses the bearer 401, no outbound call', async () => {
+    up.reply = () => ({ status: 200, body: GH_TOKEN_RESPONSE });
+    const t = await mintAccessToken(auth.provider, 'member-epoch-store-down');
+    expect((await post(auth, '/oauth/relay/v1/github/token', tokenBody(), t)).status).toBe(200);
+    up.seen.length = 0;
+    setAccountEpochStore({
+      get: async () => {
+        throw new Error('redis down');
+      },
+      bump: async () => {
+        throw new Error('redis down');
+      },
+    });
+    const r = await post(auth, '/oauth/relay/v1/github/token', tokenBody(), t);
+    expect(r.status).toBe(401);
+    expect(await r.json()).toMatchObject({ error: 'not_signed_in' });
+    expect(up.seen).toHaveLength(0);
+  });
+
+  it('account epoch fails closed: a bearer with no iat on a stamped account is refused 401, no outbound call', async () => {
+    up.reply = () => ({ status: 200, body: GH_TOKEN_RESPONSE });
+    const t = await mintAccessToken(auth.provider, 'member-epoch-no-iat');
+    const realFind = auth.provider.AccessToken.find.bind(auth.provider.AccessToken);
+    vi.spyOn(auth.provider.AccessToken, 'find').mockImplementation(async (...args: Parameters<typeof realFind>) => {
+      const found = await realFind(...args);
+      if (found) {
+        Object.defineProperty(found, 'iat', { value: undefined });
+        Object.defineProperty(found, 'iiat', { value: undefined });
+      }
+      return found;
+    });
+    // Without an epoch the iat-less token still works.
+    expect((await post(auth, '/oauth/relay/v1/github/token', tokenBody(), t)).status).toBe(200);
+    up.seen.length = 0;
+    await getAccountEpochStore().bump('member-epoch-no-iat', nowSec() - 30);
+    const r = await post(auth, '/oauth/relay/v1/github/token', tokenBody(), t);
+    expect(r.status).toBe(401);
+    expect(await r.json()).toMatchObject({ error: 'not_signed_in' });
+    expect(up.seen).toHaveLength(0);
+  });
+
   it('an expired access token is refused 401 with no outbound call', async () => {
     const short = await mintAccessToken(auth.provider, 'member-expired', 'citrate-core', { expiresIn: 60 });
     const realNow = Date.now();
