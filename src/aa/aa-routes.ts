@@ -42,6 +42,7 @@ import { getGuardianStore } from './guardians.js';
 import { getWalletRegistry } from '../identity-registry.js';
 import { getUserStore, getWebAuthnStore } from '../auth/stores.js';
 import { createRateLimiter, type RateLimiter } from '../auth/rate-limit.js';
+import { isRevokedByEpoch, tokenAuthSec } from '../auth/account-epoch.js';
 import type { RedisLike } from '../redis.js';
 
 /**
@@ -494,6 +495,8 @@ async function resolveCaller(
     const acct = token.accountId;
     const clientId = token.clientId;
     if (typeof acct !== 'string' || typeof clientId !== 'string') return null;
+    // PBA-L3a-008: a token issued before the account's revocation epoch counts as none.
+    if (await isRevokedByEpoch(acct, tokenAuthSec(token))) return null;
     const userId = accountIdToAaUserId(acct);
     return userId ? { accountId: acct, userId, clientId } : null;
   } catch {
@@ -575,6 +578,8 @@ async function resolveAccount(provider: Provider, ctx: Ctx): Promise<Hex | null>
     if (!token || token.isExpired) return null;
     const acct = token.accountId;
     if (typeof acct !== 'string') return null;
+    // PBA-L3a-008: a token issued before the account's revocation epoch counts as none.
+    if (await isRevokedByEpoch(acct, tokenAuthSec(token))) return null;
     // All three account shapes resolve to a 32-byte AA userId:
     // raw 32-byte hex, zero-padded SIWE EOA, or keccak256(uuid) for
     // the UUID-keyed passkey/email/Google users (EW-S1 WP-6).

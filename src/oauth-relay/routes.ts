@@ -31,10 +31,15 @@
  * - A response that contains the client secret is replaced by a generic 502.
  * - `OAUTH_RELAY=0` disables every route (503 relay_disabled, no outbound
  *   call). A provider with no configured secret answers 503 not_configured.
- * - `Cache-Control: no-store` on every answer.
+ * - `Cache-Control: no-store` and `X-Content-Type-Options: nosniff` on every
+ *   answer, relayed ones included.
+ * - A bearer issued before the account's revocation epoch (password reset,
+ *   sign out everywhere; `auth/account-epoch.ts`) is refused like an unknown
+ *   one, so it stops working on the relay at once rather than at expiry.
  */
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type Provider from 'oidc-provider';
+import { isRevokedByEpoch, tokenAuthSec } from '../auth/account-epoch.js';
 import { clientIp, type RateLimiter } from '../auth/rate-limit.js';
 import {
   findRelayProvider,
@@ -93,6 +98,7 @@ function noStoreHeaders(contentType: string): Record<string, string> {
     'cache-control': 'no-store',
     pragma: 'no-cache',
     'referrer-policy': 'no-referrer',
+    'x-content-type-options': 'nosniff',
   };
 }
 
@@ -149,7 +155,10 @@ function str(body: Record<string, unknown>, key: string): string | null {
   return typeof v === 'string' && v.length > 0 ? v : null;
 }
 
-/** Bearer access token issued by this authority, or null. */
+/**
+ * Bearer access token issued by this authority, or null. A token issued before
+ * the account's revocation epoch (PBA-L3a-008) counts as no token.
+ */
 async function resolveMember(
   provider: Provider,
   req: IncomingMessage,
@@ -162,6 +171,7 @@ async function resolveMember(
     const token = await provider.AccessToken.find(m[1]);
     if (!token || token.isExpired) return null;
     if (typeof token.accountId !== 'string' || typeof token.clientId !== 'string') return null;
+    if (await isRevokedByEpoch(token.accountId, tokenAuthSec(token))) return null;
     return { accountId: token.accountId, clientId: token.clientId };
   } catch {
     return null;
@@ -274,6 +284,8 @@ function echoesSecret(answer: UpstreamAnswer, creds: ProviderCredentials): boole
   return (
     text.includes(creds.clientSecret) ||
     text.includes(encodeURIComponent(creds.clientSecret)) ||
+    // application/x-www-form-urlencoded: space as '+', and !'()~ escaped.
+    text.includes(new URLSearchParams({ s: creds.clientSecret }).toString().slice(2)) ||
     text.includes(Buffer.from(`${creds.clientId}:${creds.clientSecret}`).toString('base64'))
   );
 }
