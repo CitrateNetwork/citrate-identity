@@ -54,7 +54,7 @@ connect.citrate.ai {
 	encode zstd gzip
 
 	request_body {
-		max_size 16KB
+		max_size 16KiB
 	}
 
 	reverse_proxy homestead-broker:8080 {
@@ -74,5 +74,19 @@ connect.citrate.ai {
 		Referrer-Policy "no-referrer"
 		X-Frame-Options "DENY"
 		-Server
+	}
+
+	# Handled errors are logged at DEBUG, so a broker outage or an oversized body
+	# never writes the callback's code and state to the ERROR log. The answer is
+	# a bare status code with the same security headers.
+	handle_errors {
+		header {
+			Strict-Transport-Security "max-age=31536000; includeSubDomains"
+			X-Content-Type-Options "nosniff"
+			Referrer-Policy "no-referrer"
+			X-Frame-Options "DENY"
+			-Server
+		}
+		respond "{err.status_code}" {err.status_code}
 	}
 }
