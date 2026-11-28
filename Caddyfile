@@ -14,29 +14,17 @@
 {$ISSUER_HOST} {
 	encode zstd gzip
 
-	# Treasury-signer sidecar (production deployment only). Public
-	# /_ops/treasury/* -> citrate-treasury-signer:8790, which serves /grant and
-	# /health at its root, so the /_ops/treasury prefix is stripped. Where that
-	# container is not running, requests to this prefix answer 502 and nothing
-	# else is affected. This route was live on the droplet but missing from git.
-	handle_path /_ops/treasury/* {
-		reverse_proxy citrate-treasury-signer:8790
-	}
+	# Forward the real client protocol/host so the app issues correct absolute
+	# (https) discovery/issuer URLs and sets Secure cookies.
+	reverse_proxy identity:3000 {
+		header_up X-Forwarded-Proto {scheme}
+		header_up X-Forwarded-Host {host}
+		header_up X-Real-IP {remote_host}
 
-	# Everything else -> the identity OIDC app.
-	handle {
-		# Forward the real client protocol/host so the app issues correct absolute
-		# (https) discovery/issuer URLs and sets Secure cookies.
-		reverse_proxy identity:3000 {
-			header_up X-Forwarded-Proto {scheme}
-			header_up X-Forwarded-Host {host}
-			header_up X-Real-IP {remote_host}
-
-			# Let the load balancer / Caddy short-circuit on the app's own /health.
-			health_uri /health
-			health_interval 30s
-			health_timeout 5s
-		}
+		# Let the load balancer / Caddy short-circuit on the app's own /health.
+		health_uri /health
+		health_interval 30s
+		health_timeout 5s
 	}
 
 	# Reasonable security headers for an auth surface. HSTS is safe once HTTPS is
