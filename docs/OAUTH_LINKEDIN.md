@@ -62,8 +62,9 @@ Values live in 1Password only, in their own item:
 1. In the LinkedIn app, set the only Authorized redirect URL to
    `https://auth.citrate.ai/oauth/linkedin/callback`.
 2. Inject from 1Password straight into the droplet `.env`, the same way as the
-   relay checklist in [`OAUTH_RELAY.md`](OAUTH_RELAY.md), with a template that
-   holds references only:
+   relay checklist in [`OAUTH_RELAY.md`](OAUTH_RELAY.md), with the tracked
+   template [`deploy/oauth-relay.env.tpl`](../deploy/oauth-relay.env.tpl), which
+   holds references only and includes these lines:
 
    ```
    LINKEDIN_CLIENT_ID={{ op://citrate-infra/identity.linkedin-relay/LINKEDIN_CLIENT_ID }}
