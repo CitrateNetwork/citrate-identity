@@ -14,17 +14,29 @@
 {$ISSUER_HOST} {
 	encode zstd gzip
 
-	# Forward the real client protocol/host so the app issues correct absolute
-	# (https) discovery/issuer URLs and sets Secure cookies.
-	reverse_proxy identity:3000 {
-		header_up X-Forwarded-Proto {scheme}
-		header_up X-Forwarded-Host {host}
-		header_up X-Real-IP {remote_host}
+	# Treasury-signer sidecar (production deployment only). Public
+	# /_ops/treasury/* -> citrate-treasury-signer:8790, which serves /grant and
+	# /health at its root, so the /_ops/treasury prefix is stripped. Where that
+	# container is not running, requests to this prefix answer 502 and nothing
+	# else is affected. This route was live on the droplet but missing from git.
+	handle_path /_ops/treasury/* {
+		reverse_proxy citrate-treasury-signer:8790
+	}
 
-		# Let the load balancer / Caddy short-circuit on the app's own /health.
-		health_uri /health
-		health_interval 30s
-		health_timeout 5s
+	# Everything else -> the identity OIDC app.
+	handle {
+		# Forward the real client protocol/host so the app issues correct absolute
+		# (https) discovery/issuer URLs and sets Secure cookies.
+		reverse_proxy identity:3000 {
+			header_up X-Forwarded-Proto {scheme}
+			header_up X-Forwarded-Host {host}
+			header_up X-Real-IP {remote_host}
+
+			# Let the load balancer / Caddy short-circuit on the app's own /health.
+			health_uri /health
+			health_interval 30s
+			health_timeout 5s
+		}
 	}
 
 	# Reasonable security headers for an auth surface. HSTS is safe once HTTPS is
@@ -39,5 +51,40 @@
 	log {
 		output stdout
 		format console
+	}
+}
+
+# Homestead connector broker (container `homestead-broker`, joined to this
+# stack's docker network). Add this site only after the A record
+# connect.citrate.ai -> the droplet exists (DNS-only), so the HTTP-01 challenge
+# can succeed. Source of truth: citrate-homestead deploy/broker/CONNECT_BROKER.md.
+#
+# No `log` directive on purpose: a Caddy access log records the full request
+# URI, and /oauth/callback carries the OAuth `code` and `state` in its query
+# string. The broker writes its own redacted line per request.
+connect.citrate.ai {
+	encode zstd gzip
+
+	request_body {
+		max_size 16KB
+	}
+
+	reverse_proxy homestead-broker:8080 {
+		header_up X-Forwarded-Proto {scheme}
+		header_up X-Forwarded-Host {host}
+		# Overwrites any client-supplied value; the broker rate-limits on it.
+		header_up X-Real-IP {remote_host}
+
+		health_uri /health
+		health_interval 30s
+		health_timeout 5s
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "no-referrer"
+		X-Frame-Options "DENY"
+		-Server
 	}
 }
