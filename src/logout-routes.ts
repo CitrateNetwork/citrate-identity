@@ -27,7 +27,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type Provider from 'oidc-provider';
 import { getSessionBus, type SessionEvent } from './session-bus.js';
-import { getAccountEpochStore } from './auth/account-epoch.js';
+import { getAccountEpochStore, isRevokedByEpoch, tokenAuthSec } from './auth/account-epoch.js';
 import { endAllAccountSessions } from './auth/account-sessions.js';
 
 /** `{"everywhere": true}` JSON body (or `?everywhere=1`). Never throws. */
@@ -100,10 +100,33 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
  */
 interface FoundAccessToken {
   accountId?: string;
+  iat?: number;
+  iiat?: number;
   sessionUid?: string;
   sid?: string;
   grantId?: string;
   destroy(): Promise<void>;
+}
+
+/**
+ * Resolve a presented access token to an active one, or undefined. A token the
+ * adapter does not know, one without an account, and one issued before the
+ * account's revocation epoch (PBA-L3a-008: password reset, sign out everywhere)
+ * all count as no token. Fails closed: an adapter or epoch-store error is no
+ * token too.
+ */
+async function findActiveAccessToken(
+  provider: Provider,
+  token: string,
+): Promise<(FoundAccessToken & { accountId: string }) | undefined> {
+  try {
+    const at = (await provider.AccessToken.find(token)) as FoundAccessToken | undefined;
+    if (!at || typeof at.accountId !== 'string' || at.accountId.length === 0) return undefined;
+    if (await isRevokedByEpoch(at.accountId, tokenAuthSec(at))) return undefined;
+    return at as FoundAccessToken & { accountId: string };
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -151,15 +174,8 @@ export function mountLogoutRoutes(
         });
         return;
       }
-      let subscriberAt: FoundAccessToken | undefined;
-      try {
-        subscriberAt = (await provider.AccessToken.find(token)) as
-          | FoundAccessToken
-          | undefined;
-      } catch {
-        subscriberAt = undefined;
-      }
-      if (!subscriberAt || !subscriberAt.accountId) {
+      const subscriberAt = await findActiveAccessToken(provider, token);
+      if (!subscriberAt) {
         sendJson(ctx.res, 401, {
           error: 'invalid_grant',
           reason: 'the presented token is not active',
@@ -230,16 +246,9 @@ export function mountLogoutRoutes(
         return;
       }
 
-      let at: FoundAccessToken | undefined;
-      try {
-        at = (await provider.AccessToken.find(token)) as
-          | FoundAccessToken
-          | undefined;
-      } catch {
-        at = undefined;
-      }
-      if (!at || !at.accountId) {
-        // Unknown / already-revoked / expired token → fail closed.
+      const at = await findActiveAccessToken(provider, token);
+      if (!at) {
+        // Unknown / already-revoked / expired / pre-epoch token → fail closed.
         sendJson(ctx.res, 401, {
           error: 'invalid_grant',
           reason: 'the presented token is not active',

@@ -19,6 +19,11 @@ import { InMemoryRateLimiter } from '../src/auth/rate-limit.js';
 import { CORE_LOOPBACK_CALLBACK } from '../src/oauth-bounce.js';
 import { HOSTED_BOUNCE_REDIRECT } from '../src/oauth-relay/providers.js';
 import type { OAuthRelayOptions, RelayLogger } from '../src/oauth-relay/routes.js';
+import {
+  InMemoryAccountEpochStore,
+  getAccountEpochStore,
+  setAccountEpochStore,
+} from '../src/auth/account-epoch.js';
 
 // ---- fixtures ---------------------------------------------------------------
 
@@ -138,10 +143,19 @@ async function mintAccessToken(
   provider: Provider,
   accountId: string,
   clientId = 'citrate-core',
+  opts: { iat?: number; expiresIn?: number } = {},
 ): Promise<string> {
   const client = await provider.Client.find(clientId);
   if (!client) throw new Error(`client ${clientId} not registered`);
-  const at = new provider.AccessToken({ accountId, client, scope: 'openid', gty: 'authorization_code', grantId: `test-grant-${accountId}` });
+  const at = new provider.AccessToken({
+    accountId,
+    client,
+    scope: 'openid',
+    gty: 'authorization_code',
+    grantId: `test-grant-${accountId}`,
+    ...(opts.iat !== undefined ? { iat: opts.iat } : {}),
+    ...(opts.expiresIn !== undefined ? { expiresIn: opts.expiresIn } : {}),
+  } as never);
   return at.save();
 }
 
@@ -548,5 +562,125 @@ describe('oauth relay: additional required tests', () => {
     expect(await r.json()).toMatchObject({ error: 'provider_rejected' });
     expect(up.seen).toHaveLength(1);
     expect(up.seen.some((x) => x.path === '/stolen')).toBe(false);
+  });
+});
+
+// ---- #52 follow-ups -------------------------------------------------------------
+
+describe('oauth relay: #52 follow-ups', () => {
+  const nowSec = () => Math.floor(Date.now() / 1000);
+  afterEach(() => setAccountEpochStore(new InMemoryAccountEpochStore()));
+
+  it('account epoch: a token issued before a password reset / sign out everywhere is refused 401, no outbound call', async () => {
+    up.reply = () => ({ status: 200, body: GH_TOKEN_RESPONSE });
+    const old = await mintAccessToken(auth.provider, 'member-epoch-old', 'citrate-core', { iat: nowSec() - 60 });
+    expect((await post(auth, '/oauth/relay/v1/github/token', tokenBody(), old)).status).toBe(200);
+    up.seen.length = 0;
+
+    await getAccountEpochStore().bump('member-epoch-old', nowSec());
+    for (const op of ['token', 'refresh', 'revoke']) {
+      const r = await post(auth, `/oauth/relay/v1/github/${op}`, op === 'token' ? tokenBody() : { refresh_token: 'r', token: 't' }, old);
+      expect(r.status, op).toBe(401);
+      expect(await r.json()).toMatchObject({ error: 'not_signed_in' });
+    }
+    expect(up.seen).toHaveLength(0);
+  });
+
+  it('account epoch: a token issued after the epoch works', async () => {
+    up.reply = () => ({ status: 200, body: GH_TOKEN_RESPONSE });
+    await getAccountEpochStore().bump('member-epoch-fresh', nowSec() - 30);
+    const fresh = await mintAccessToken(auth.provider, 'member-epoch-fresh');
+    const r = await post(auth, '/oauth/relay/v1/github/token', tokenBody(), fresh);
+    expect(r.status).toBe(200);
+    expect(await r.text()).toBe(GH_TOKEN_RESPONSE);
+  });
+
+  it('account epoch fails closed: an epoch-store error refuses the bearer 401, no outbound call', async () => {
+    up.reply = () => ({ status: 200, body: GH_TOKEN_RESPONSE });
+    const t = await mintAccessToken(auth.provider, 'member-epoch-store-down');
+    expect((await post(auth, '/oauth/relay/v1/github/token', tokenBody(), t)).status).toBe(200);
+    up.seen.length = 0;
+    setAccountEpochStore({
+      get: async () => {
+        throw new Error('redis down');
+      },
+      bump: async () => {
+        throw new Error('redis down');
+      },
+    });
+    const r = await post(auth, '/oauth/relay/v1/github/token', tokenBody(), t);
+    expect(r.status).toBe(401);
+    expect(await r.json()).toMatchObject({ error: 'not_signed_in' });
+    expect(up.seen).toHaveLength(0);
+  });
+
+  it('account epoch fails closed: a bearer with no iat on a stamped account is refused 401, no outbound call', async () => {
+    up.reply = () => ({ status: 200, body: GH_TOKEN_RESPONSE });
+    const t = await mintAccessToken(auth.provider, 'member-epoch-no-iat');
+    const realFind = auth.provider.AccessToken.find.bind(auth.provider.AccessToken);
+    vi.spyOn(auth.provider.AccessToken, 'find').mockImplementation(async (...args: Parameters<typeof realFind>) => {
+      const found = await realFind(...args);
+      if (found) {
+        Object.defineProperty(found, 'iat', { value: undefined });
+        Object.defineProperty(found, 'iiat', { value: undefined });
+      }
+      return found;
+    });
+    // Without an epoch the iat-less token still works.
+    expect((await post(auth, '/oauth/relay/v1/github/token', tokenBody(), t)).status).toBe(200);
+    up.seen.length = 0;
+    await getAccountEpochStore().bump('member-epoch-no-iat', nowSec() - 30);
+    const r = await post(auth, '/oauth/relay/v1/github/token', tokenBody(), t);
+    expect(r.status).toBe(401);
+    expect(await r.json()).toMatchObject({ error: 'not_signed_in' });
+    expect(up.seen).toHaveLength(0);
+  });
+
+  it('an expired access token is refused 401 with no outbound call', async () => {
+    const short = await mintAccessToken(auth.provider, 'member-expired', 'citrate-core', { expiresIn: 60 });
+    const realNow = Date.now();
+    vi.spyOn(Date, 'now').mockImplementation(() => realNow + 120_000);
+    const r = await post(auth, '/oauth/relay/v1/github/token', tokenBody(), short);
+    expect(r.status).toBe(401);
+    expect(await r.json()).toMatchObject({ error: 'not_signed_in' });
+    expect(up.seen).toHaveLength(0);
+  });
+
+  it('an answer echoing the secret form-encoded (space as +, !\'()~ escaped) is withheld', async () => {
+    const secret = "fixture secret (form)!~'" + 'f'.repeat(24); // test-only, not a credential
+    const formEncoded = new URLSearchParams({ s: secret }).toString().slice(2);
+    // The variant differs from both the raw and the encodeURIComponent forms.
+    expect(formEncoded).not.toBe(encodeURIComponent(secret));
+    expect(formEncoded).toContain('+');
+    const a = await startAuthority({
+      fetch: seamFetch(up),
+      env: { GITHUB_CLIENT_ID: GH_ID, GITHUB_CLIENT_SECRET: secret },
+      logger: captureLogger().logger,
+    });
+    try {
+      const t = await mintAccessToken(a.provider, 'member-form-echo');
+      up.reply = () => ({ status: 400, body: `error=bad&echo=${formEncoded}`, contentType: 'application/x-www-form-urlencoded' });
+      const r = await post(a, '/oauth/relay/v1/github/token', tokenBody(), t);
+      expect(r.status).toBe(502);
+      const text = await r.text();
+      expect(text).not.toContain(formEncoded);
+      expect(JSON.parse(text)).toMatchObject({ error: 'provider_rejected' });
+    } finally {
+      await stop(a.server);
+    }
+  });
+
+  it('x-content-type-options: nosniff on relayed answers and on errors', async () => {
+    up.reply = () => ({ status: 200, body: GH_TOKEN_RESPONSE });
+    const ok = await post(auth, '/oauth/relay/v1/github/token', tokenBody(), member);
+    expect(ok.status).toBe(200);
+    expect(ok.headers.get('x-content-type-options')).toBe('nosniff');
+    up.reply = () => ({ status: 400, body: 'not json', contentType: 'text/html' });
+    const relayedErr = await post(auth, '/oauth/relay/v1/github/token', tokenBody(), member);
+    expect(relayedErr.status).toBe(400);
+    expect(relayedErr.headers.get('x-content-type-options')).toBe('nosniff');
+    const own = await post(auth, '/oauth/relay/v1/github/token', tokenBody());
+    expect(own.status).toBe(401);
+    expect(own.headers.get('x-content-type-options')).toBe('nosniff');
   });
 });

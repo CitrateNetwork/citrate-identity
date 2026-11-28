@@ -16,6 +16,7 @@
  */
 
 import type Provider from 'oidc-provider';
+import { isRevokedByEpoch, tokenAuthSec } from '../auth/account-epoch.js';
 import type { Address } from 'viem';
 
 import {
@@ -158,7 +159,10 @@ async function resolveSub(provider: Provider, ctx: Ctx): Promise<string | null> 
   try {
     const token = await provider.AccessToken.find(m[1].trim());
     if (!token || token.isExpired) return null;
-    return typeof token.accountId === 'string' ? token.accountId : null;
+    if (typeof token.accountId !== 'string') return null;
+    // PBA-L3a-008: a token issued before the account's revocation epoch counts as none.
+    if (await isRevokedByEpoch(token.accountId, tokenAuthSec(token))) return null;
+    return token.accountId;
   } catch {
     return null;
   }
