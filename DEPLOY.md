@@ -108,6 +108,8 @@ again.
 | `OAUTH_RELAY` | optional | `0` turns the OAuth token relay off (every `/oauth/relay/v1/*` route answers 503). Unset = on |
 | `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` | optional | GitHub connections app for the relay. Either unset = GitHub relay answers 503, never called. Not the `CITRATE_AA_GITHUB_*` login app. Set from 1Password only; see [`docs/OAUTH_RELAY.md`](docs/OAUTH_RELAY.md) |
 | `NOTION_CLIENT_ID` / `NOTION_CLIENT_SECRET` | optional | Notion public integration for the relay; same rules as GitHub |
+| `SLACK_CLIENT_ID` / `SLACK_CLIENT_SECRET` | optional | Core Slack MCP user app for the relay (approved user scopes only); same rules as GitHub |
+| `LINKEDIN_CLIENT_ID` / `LINKEDIN_CLIENT_SECRET` | optional | LinkedIn app for `GET /oauth/linkedin/start` and `/oauth/linkedin/callback`; either unset = `/start` answers 503. Own 1Password item `identity.linkedin-relay` |
 
 \*`KYC_WEBHOOK_SECRET` is only needed when the KYC vendor webhook is wired; safe to
 set now so it's ready.

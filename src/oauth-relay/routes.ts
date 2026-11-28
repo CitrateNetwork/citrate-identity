@@ -29,6 +29,9 @@
  * - Never logs a body, code, verifier, token or secret: log lines carry only
  *   provider id, operation, outcome and status codes.
  * - A response that contains the client secret is replaced by a generic 502.
+ * - A provider with an answer policy (Slack, `slack.ts`) has its token and
+ *   refresh answers checked first: `ok:false` maps to a clean error; a bot
+ *   token or a scope outside the approved set is revoked and withheld.
  * - `OAUTH_RELAY=0` disables every route (503 relay_disabled, no outbound
  *   call). A provider with no configured secret answers 503 not_configured.
  * - `Cache-Control: no-store` and `X-Content-Type-Options: nosniff` on every
@@ -41,6 +44,8 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import type Provider from 'oidc-provider';
 import { isRevokedByEpoch, tokenAuthSec } from '../auth/account-epoch.js';
 import { clientIp, type RateLimiter } from '../auth/rate-limit.js';
+import type { LinkedInStateStore } from './linkedin.js';
+import { judgeSlackAnswer, judgeSlackRevoke } from './slack.js';
 import {
   findRelayProvider,
   providerCredentials,
@@ -84,6 +89,8 @@ export interface OAuthRelayOptions {
   env?: Readonly<Record<string, string | undefined>>;
   logger?: RelayLogger;
   limits?: Partial<RelayLimits>;
+  /** LinkedIn `state` store (tests). Defaults to Redis when wired, else in-memory. */
+  linkedinStates?: LinkedInStateStore;
 }
 
 type Operation = 'token' | 'refresh' | 'revoke';
@@ -92,7 +99,7 @@ const OPERATIONS: ReadonlySet<string> = new Set(['token', 'refresh', 'revoke']);
 /** RFC 7636 section 4.1: 43 to 128 chars of [A-Z a-z 0-9 - . _ ~]. */
 const CODE_VERIFIER_RE = /^[A-Za-z0-9\-._~]{43,128}$/;
 
-function noStoreHeaders(contentType: string): Record<string, string> {
+export function noStoreHeaders(contentType: string): Record<string, string> {
   return {
     'content-type': contentType,
     'cache-control': 'no-store',
@@ -102,7 +109,7 @@ function noStoreHeaders(contentType: string): Record<string, string> {
   };
 }
 
-function sendJson(
+export function sendJson(
   res: ServerResponse,
   status: number,
   body: unknown,
@@ -202,11 +209,12 @@ function basic(creds: ProviderCredentials): string {
   return 'Basic ' + Buffer.from(`${creds.clientId}:${creds.clientSecret}`).toString('base64');
 }
 
-interface OutboundRequest {
+export interface OutboundRequest {
   url: string;
-  method: 'POST' | 'DELETE';
+  method: 'GET' | 'POST' | 'DELETE';
   headers: Record<string, string>;
-  body: string;
+  /** Absent for GET. */
+  body?: string;
 }
 
 /** Build the token/refresh request; client credentials per the provider's auth style. */
@@ -233,21 +241,21 @@ function grantRequest(
   };
 }
 
-interface UpstreamAnswer {
+export interface UpstreamAnswer {
   status: number;
   contentType: string;
   body: Buffer;
 }
 
-class UpstreamError extends Error {}
+export class UpstreamError extends Error {}
 
-async function callUpstream(doFetch: typeof fetch, req: OutboundRequest): Promise<UpstreamAnswer> {
+export async function callUpstream(doFetch: typeof fetch, req: OutboundRequest): Promise<UpstreamAnswer> {
   let res: Response;
   try {
     res = await doFetch(req.url, {
       method: req.method,
       headers: req.headers,
-      body: req.body,
+      ...(req.body !== undefined ? { body: req.body } : {}),
       redirect: 'manual',
       signal: AbortSignal.timeout(RELAY_UPSTREAM_TIMEOUT_MS),
     });
@@ -275,6 +283,25 @@ async function callUpstream(doFetch: typeof fetch, req: OutboundRequest): Promis
     status: res.status,
     contentType: res.headers.get('content-type') ?? 'application/json; charset=utf-8',
     body: Buffer.concat(chunks),
+  };
+}
+
+/** The provider's revocation call for one token (`p.revoke` must be set). */
+function revokeRequest(
+  revoke: NonNullable<RelayProvider['revoke']>,
+  creds: ProviderCredentials,
+  token: string,
+): OutboundRequest {
+  const enc = encode(revoke.encoding, { [revoke.tokenField]: token });
+  return {
+    url: revoke.url(creds.clientId),
+    method: revoke.method,
+    headers: {
+      ...revoke.headers,
+      'content-type': enc.contentType,
+      ...(revoke.auth === 'basic' ? { authorization: basic(creds) } : {}),
+    },
+    body: enc.body,
   };
 }
 
@@ -432,13 +459,7 @@ export function mountOAuthRelay(
         }
         const token = str(body, 'token');
         if (!token) return bad('token is required');
-        const enc = encode(p.revoke.encoding, { [p.revoke.tokenField]: token });
-        outbound = {
-          url: p.revoke.url(creds.clientId),
-          method: p.revoke.method,
-          headers: { ...p.revoke.headers, 'content-type': enc.contentType, authorization: basic(creds) },
-          body: enc.body,
-        };
+        outbound = revokeRequest(p.revoke, creds, token);
       }
 
       let answer: UpstreamAnswer;
@@ -463,11 +484,51 @@ export function mountOAuthRelay(
       }
 
       if (operation === 'revoke') {
-        const ok = answer.status >= 200 && answer.status < 300;
+        const http2xx = answer.status >= 200 && answer.status < 300;
+        // Slack answers 200 {"ok":false} on failure: HTTP status is not enough.
+        const slack = p.answerPolicy ? judgeSlackRevoke(answer.body) : null;
+        const ok = http2xx && (slack ? slack.ok : true);
         note(ok ? 'info' : 'warn', p.id, operation, ok ? 'revoked' : 'provider_rejected', ok ? 200 : 502, answer.status);
         if (ok) sendJson(res, 200, { revoked: true, upstream_status: answer.status });
-        else sendJson(res, 502, { error: 'provider_rejected', revoked: false, upstream_status: answer.status });
+        else
+          sendJson(res, 502, {
+            error: 'provider_rejected',
+            revoked: false,
+            upstream_status: answer.status,
+            ...(slack?.code ? { provider_error: slack.code } : {}),
+          });
         return;
+      }
+
+      if (p.answerPolicy) {
+        const verdict = judgeSlackAnswer(answer.body, p.answerPolicy);
+        if (verdict.kind === 'provider_error') {
+          // A plain Slack error code (invalid_code) is the caller's problem: 400.
+          // Anything unreadable is the provider's: 502. Nothing else is echoed.
+          const status = verdict.code ? 400 : 502;
+          note('warn', p.id, operation, 'provider_error', status, answer.status);
+          sendJson(res, status, {
+            error: 'provider_rejected',
+            ...(verdict.code ? { provider_error: verdict.code } : { reason: 'the provider answer was not usable' }),
+          });
+          return;
+        }
+        if (verdict.kind === 'refuse') {
+          // Never hand out a token the policy forbids; take it back at Slack first.
+          let revoked = p.revoke !== undefined;
+          for (const t of verdict.tokens) {
+            if (!p.revoke) break;
+            try {
+              const rv = await callUpstream(doFetch, revokeRequest(p.revoke, creds, t));
+              if (!(rv.status >= 200 && rv.status < 300 && judgeSlackRevoke(rv.body).ok)) revoked = false;
+            } catch {
+              revoked = false;
+            }
+          }
+          note('warn', p.id, operation, `refused_${verdict.reason}${revoked ? '' : '_revoke_failed'}`, 502, answer.status);
+          sendJson(res, 502, { error: 'provider_rejected', provider_error: verdict.reason, revoked });
+          return;
+        }
       }
 
       // Token and refresh: the provider's answer, unchanged.
