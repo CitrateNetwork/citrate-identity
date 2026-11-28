@@ -163,12 +163,9 @@ services:
       GITHUB_CLIENT_SECRET: ${GITHUB_CLIENT_SECRET:-}
       NOTION_CLIENT_ID: ${NOTION_CLIENT_ID:-}
       NOTION_CLIENT_SECRET: ${NOTION_CLIENT_SECRET:-}
-      # Slack: Core Slack MCP user app (user scopes only). LinkedIn: GET
-      # /oauth/linkedin/start|callback (its own 1Password item). Same 503 rule.
+      # Slack: Core Slack MCP user app (user scopes only). Same 503 rule.
       SLACK_CLIENT_ID: ${SLACK_CLIENT_ID:-}
       SLACK_CLIENT_SECRET: ${SLACK_CLIENT_SECRET:-}
-      LINKEDIN_CLIENT_ID: ${LINKEDIN_CLIENT_ID:-}
-      LINKEDIN_CLIENT_SECRET: ${LINKEDIN_CLIENT_SECRET:-}
       # FWA #87.1 — Resend transactional email (verification codes). SMTP egress
       # is blocked on the droplet, so this HTTPS sender is REQUIRED for the
       # password verified-email flow (else register/login 503).

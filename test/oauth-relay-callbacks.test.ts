@@ -6,7 +6,6 @@
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { CORE_LOOPBACK_CALLBACK } from '../src/oauth-bounce.js';
-import { LINKEDIN_CALLBACK } from '../src/oauth-relay/linkedin.js';
 import { HOSTED_BOUNCE_REDIRECT, RELAY_PROVIDERS } from '../src/oauth-relay/providers.js';
 import {
   mintAccessToken,
@@ -36,6 +35,9 @@ const REGISTERED: Record<string, string> = {
   slack: HOSTED_BOUNCE_REDIRECT,
 };
 
+/** LinkedIn's own callback route (citrate-core LINKEDIN_RELAY_SPEC.md); never a relay row. */
+const LINKEDIN_CALLBACK = 'https://auth.citrate.ai/oauth/linkedin/callback';
+
 const ALL_CALLBACKS = [CORE_LOOPBACK_CALLBACK, HOSTED_BOUNCE_REDIRECT, LINKEDIN_CALLBACK];
 
 let up: Upstream;
@@ -63,9 +65,10 @@ describe('exact callbacks per provider row', () => {
     for (const [id, p] of RELAY_PROVIDERS) expect(p.redirectUris, id).toEqual([REGISTERED[id]]);
   });
 
-  it('LinkedIn has its own callback route, distinct from the bounce and the loopback', () => {
-    expect(LINKEDIN_CALLBACK).toBe('https://auth.citrate.ai/oauth/linkedin/callback');
-    expect(new Set(ALL_CALLBACKS).size).toBe(3);
+  it('linkedin is not a relay row (404 unknown_provider, no outbound call)', async () => {
+    const r = await post(auth, '/oauth/relay/v1/linkedin/token', { code: 'c', code_verifier: VERIFIER, redirect_uri: LINKEDIN_CALLBACK }, member);
+    expect(r.status).toBe(404);
+    expect(up.seen).toHaveLength(0);
   });
 
   for (const [id, registered] of Object.entries(REGISTERED)) {

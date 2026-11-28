@@ -44,7 +44,6 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import type Provider from 'oidc-provider';
 import { isRevokedByEpoch, tokenAuthSec } from '../auth/account-epoch.js';
 import { clientIp, type RateLimiter } from '../auth/rate-limit.js';
-import type { LinkedInStateStore } from './linkedin.js';
 import { judgeSlackAnswer, judgeSlackRevoke } from './slack.js';
 import {
   findRelayProvider,
@@ -89,8 +88,6 @@ export interface OAuthRelayOptions {
   env?: Readonly<Record<string, string | undefined>>;
   logger?: RelayLogger;
   limits?: Partial<RelayLimits>;
-  /** LinkedIn `state` store (tests). Defaults to Redis when wired, else in-memory. */
-  linkedinStates?: LinkedInStateStore;
 }
 
 type Operation = 'token' | 'refresh' | 'revoke';
@@ -99,7 +96,7 @@ const OPERATIONS: ReadonlySet<string> = new Set(['token', 'refresh', 'revoke']);
 /** RFC 7636 section 4.1: 43 to 128 chars of [A-Z a-z 0-9 - . _ ~]. */
 const CODE_VERIFIER_RE = /^[A-Za-z0-9\-._~]{43,128}$/;
 
-export function noStoreHeaders(contentType: string): Record<string, string> {
+function noStoreHeaders(contentType: string): Record<string, string> {
   return {
     'content-type': contentType,
     'cache-control': 'no-store',
@@ -109,7 +106,7 @@ export function noStoreHeaders(contentType: string): Record<string, string> {
   };
 }
 
-export function sendJson(
+function sendJson(
   res: ServerResponse,
   status: number,
   body: unknown,
@@ -209,12 +206,11 @@ function basic(creds: ProviderCredentials): string {
   return 'Basic ' + Buffer.from(`${creds.clientId}:${creds.clientSecret}`).toString('base64');
 }
 
-export interface OutboundRequest {
+interface OutboundRequest {
   url: string;
-  method: 'GET' | 'POST' | 'DELETE';
+  method: 'POST' | 'DELETE';
   headers: Record<string, string>;
-  /** Absent for GET. */
-  body?: string;
+  body: string;
 }
 
 /** Build the token/refresh request; client credentials per the provider's auth style. */
@@ -241,21 +237,21 @@ function grantRequest(
   };
 }
 
-export interface UpstreamAnswer {
+interface UpstreamAnswer {
   status: number;
   contentType: string;
   body: Buffer;
 }
 
-export class UpstreamError extends Error {}
+class UpstreamError extends Error {}
 
-export async function callUpstream(doFetch: typeof fetch, req: OutboundRequest): Promise<UpstreamAnswer> {
+async function callUpstream(doFetch: typeof fetch, req: OutboundRequest): Promise<UpstreamAnswer> {
   let res: Response;
   try {
     res = await doFetch(req.url, {
       method: req.method,
       headers: req.headers,
-      ...(req.body !== undefined ? { body: req.body } : {}),
+      body: req.body,
       redirect: 'manual',
       signal: AbortSignal.timeout(RELAY_UPSTREAM_TIMEOUT_MS),
     });

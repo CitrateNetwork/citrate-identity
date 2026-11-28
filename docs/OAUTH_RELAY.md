@@ -70,11 +70,15 @@ Answers:
 | `slack` | `https://slack.com/api/oauth.v2.user.access` (form body) | `POST https://slack.com/api/auth.revoke`, form `token`, no client credentials | secret in form body | `https://auth.citrate.ai/oauth/callback` (the hosted bounce) |
 
 Each row accepts exactly one `redirect_uri`, compared as a whole string (no
-trailing slash, case or query variants). LinkedIn is not a row: it has its own
-callback route (below) and its token never reaches the desktop, so
-`/oauth/relay/v1/linkedin/*` answers 404. Notion and Slack share the hosted
-bounce; the relay cannot tell their codes apart by redirect, and each provider
-refuses a code it did not issue.
+trailing slash, case or query variants). LinkedIn is not a row: its token
+never reaches the desktop, so `/oauth/relay/v1/linkedin/*` answers 404.
+
+Known limit (accepted): Notion and Slack share the hosted bounce
+`https://auth.citrate.ai/oauth/callback`, so the relay cannot tell a Notion
+callback from a Slack one by its redirect. A code sent to the wrong provider's
+exchange is refused by that provider, which did not issue it. The binding of a
+callback to the flow that started it (`state` and the PKCE verifier) is
+enforced in Citrate Core, not here.
 
 ### Slack (Core Slack MCP user app)
 
@@ -116,33 +120,6 @@ Slack docs used (checked 2026-11-27):
 - Token rotation (`grant_type=refresh_token`, `xoxe.` prefixes, 12 hour expiry): https://docs.slack.dev/authentication/using-token-rotation
 - `auth.revoke` (token as POST parameter, `{"ok":true,"revoked":true}`): https://docs.slack.dev/reference/methods/auth.revoke
 
-## LinkedIn (`/oauth/linkedin/start`, `/oauth/linkedin/callback`)
-
-Implements citrate-core `docs/LINKEDIN_RELAY_SPEC.md` section 2. Source
-[`src/oauth-relay/linkedin.ts`](../src/oauth-relay/linkedin.ts), tests
-[`test/oauth-relay-linkedin.test.ts`](../test/oauth-relay-linkedin.test.ts).
-
-- `GET /oauth/linkedin/start?state=<16 to 128 unreserved chars>&rd=http://127.0.0.1:8975/oauth/callback[&challenge=<S256>]`:
-  `rd` must be that exact loopback. The relay stores `state` (single use, 5
-  minute TTL, Redis when wired) and 302s to
-  `https://www.linkedin.com/oauth/v2/authorization` with `response_type=code`,
-  `client_id`, `redirect_uri=https://auth.citrate.ai/oauth/linkedin/callback`,
-  `scope=openid profile`, `state`. 400 on a bad or reused state or `rd`, 503 when
-  not configured, 429 over the per-IP budget.
-- `GET /oauth/linkedin/callback?code&state` (exact path only): an unknown,
-  used or expired state gets a 400 page, no redirect and no outbound call.
-  Otherwise the relay posts the code with the secret to
-  `https://www.linkedin.com/oauth/v2/accessToken`, reads
-  `https://api.linkedin.com/v2/userinfo`, drops the LinkedIn token and 302s to
-  `http://127.0.0.1:8975/oauth/callback?state=<state>&handle=<preferred_username or name>&sub=<sub>`.
-  A LinkedIn error or a failed exchange returns `state` plus a fixed
-  `error=access_denied | invalid_request | server_error` instead.
-- Not yet done: the planset (L6-WP16) asks for a signed assertion in place of
-  the bare `handle` query value; this route follows the spec as written.
-
-Adding a provider is a code change to `providers.ts` with tests. No URL from a
-request is ever used outbound.
-
 ## Guarantees
 
 - Never logs a request body, response body, code, verifier, token, secret or
@@ -180,7 +157,6 @@ request is ever used outbound.
 | `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET` | GitHub connections app. Not the `CITRATE_AA_GITHUB_*` login federation app. |
 | `NOTION_CLIENT_ID`, `NOTION_CLIENT_SECRET` | Notion public integration. |
 | `SLACK_CLIENT_ID`, `SLACK_CLIENT_SECRET` | Core Slack MCP user app. `SLACK_APP_ID` is informational and not read. |
-| `LINKEDIN_CLIENT_ID`, `LINKEDIN_CLIENT_SECRET` | LinkedIn app ("Sign In with LinkedIn using OpenID Connect"). |
 
 The compose file passes these names through; `.env` holds the values. Values
 live in 1Password only:
@@ -191,8 +167,6 @@ live in 1Password only:
 - `op://citrate-infra/identity.oauth-relay/NOTION_CLIENT_SECRET`
 - `op://citrate-infra/identity.oauth-relay/SLACK_CLIENT_ID`
 - `op://citrate-infra/identity.oauth-relay/SLACK_CLIENT_SECRET`
-- `op://citrate-infra/identity.linkedin-relay/LINKEDIN_CLIENT_ID`
-- `op://citrate-infra/identity.linkedin-relay/LINKEDIN_CLIENT_SECRET`
 
 ## Deploy checklist (operator)
 
@@ -201,9 +175,8 @@ the shell history. They move from 1Password straight into the droplet `.env`.
 
 1. Register the provider apps (connections runbook, L6-WP21). GitHub callback
    URL: `http://127.0.0.1:8975/oauth/callback`. Notion and Slack redirect URI:
-   `https://auth.citrate.ai/oauth/callback`. LinkedIn Authorized redirect URL:
-   `https://auth.citrate.ai/oauth/linkedin/callback`. Store the values in the
-   1Password items above.
+   `https://auth.citrate.ai/oauth/callback`. Store the values in the
+   1Password item above.
 2. Write a template on the operator machine that holds references only, for
    example `oauth-relay.env.tpl`:
 
@@ -214,8 +187,6 @@ the shell history. They move from 1Password straight into the droplet `.env`.
    NOTION_CLIENT_SECRET={{ op://citrate-infra/identity.oauth-relay/NOTION_CLIENT_SECRET }}
    SLACK_CLIENT_ID={{ op://citrate-infra/identity.oauth-relay/SLACK_CLIENT_ID }}
    SLACK_CLIENT_SECRET={{ op://citrate-infra/identity.oauth-relay/SLACK_CLIENT_SECRET }}
-   LINKEDIN_CLIENT_ID={{ op://citrate-infra/identity.linkedin-relay/LINKEDIN_CLIENT_ID }}
-   LINKEDIN_CLIENT_SECRET={{ op://citrate-infra/identity.linkedin-relay/LINKEDIN_CLIENT_SECRET }}
    ```
 
 3. Pipe the injected result into the droplet `.env`, replacing any earlier
@@ -225,7 +196,7 @@ the shell history. They move from 1Password straight into the droplet `.env`.
    ```
    op inject -i oauth-relay.env.tpl | ssh <deploy-host> \
      'cd <deploy-dir> && umask 077 && \
-      grep -Ev "^(GITHUB|NOTION|SLACK|LINKEDIN)_CLIENT_(ID|SECRET)=" .env > .env.new && \
+      grep -Ev "^(GITHUB|NOTION|SLACK)_CLIENT_(ID|SECRET)=" .env > .env.new && \
       cat >> .env.new && chmod 600 .env.new && mv .env.new .env'
    ```
 
@@ -236,7 +207,6 @@ the shell history. They move from 1Password straight into the droplet `.env`.
 5. Verify without printing a value:
    - `docker compose exec identity node -e "process.exit(process.env.GITHUB_CLIENT_SECRET ? 0 : 1)"` exits 0.
    - `curl -s -o /dev/null -w '%{http_code}' -X POST https://auth.citrate.ai/oauth/relay/v1/github/token` prints `401` (same for `slack`).
-   - `curl -s -o /dev/null -w '%{http_code}' 'https://auth.citrate.ai/oauth/linkedin/start?state=probe-0123456789abcdef&rd=https://x.example/'` prints `400` (rejected `rd`; a 503 would mean LinkedIn is not configured).
    - `GET /health` is still 200 and the OAuth bounce still answers
      `GET /oauth/callback` with 302.
 6. Runtime proof is a recorded GitHub connect from a release build of Citrate
