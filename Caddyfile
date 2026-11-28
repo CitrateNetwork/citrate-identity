@@ -23,7 +23,14 @@
 				replace state REDACTED
 				replace error_description REDACTED
 			}
-			wrap console
+			resp_headers>Location query {
+				replace code REDACTED
+				replace state REDACTED
+				replace error_description REDACTED
+				delete handle
+				delete sub
+			}
+			wrap json
 		}
 	}
 }
@@ -63,6 +70,13 @@
 				replace code REDACTED
 				replace state REDACTED
 				replace error_description REDACTED
+			}
+			resp_headers>Location query {
+				replace code REDACTED
+				replace state REDACTED
+				replace error_description REDACTED
+				delete handle
+				delete sub
 			}
 			wrap console
 		}
