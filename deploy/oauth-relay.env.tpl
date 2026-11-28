@@ -23,10 +23,17 @@ SLACK_CLIENT_SECRET={{ op://citrate-infra/identity.oauth-relay/SLACK_CLIENT_SECR
 LINKEDIN_CLIENT_ID={{ op://citrate-infra/identity.linkedin-relay/LINKEDIN_CLIENT_ID }}
 LINKEDIN_CLIENT_SECRET={{ op://citrate-infra/identity.linkedin-relay/LINKEDIN_CLIENT_SECRET }}
 
-# Notion public integration. Left commented until the owner confirms which Notion
-# integration Core uses and its redirect URI is registered; while unset the relay
-# answers 503 not_configured for Notion and never calls it. To enable, add these two
-# lines without the leading "# " and wrap each reference in {{ }} (op inject also
-# resolves references inside comments, so they are kept bare here):
-# NOTION_CLIENT_ID=op://citrate-infra/identity.oauth-relay/NOTION_CLIENT_ID
-# NOTION_CLIENT_SECRET=op://citrate-infra/identity.oauth-relay/NOTION_CLIENT_SECRET
+# Notion public integration (live on the relay since 2026-11-28 06:55Z).
+NOTION_CLIENT_ID={{ op://citrate-infra/identity.oauth-relay/NOTION_CLIENT_ID }}
+NOTION_CLIENT_SECRET={{ op://citrate-infra/identity.oauth-relay/NOTION_CLIENT_SECRET }}
+
+# Google, Asana, HubSpot: vaulted, relay row not implemented. Kept commented with
+# bare references (op inject resolves only {{ }} references, including inside
+# comments). Enable a pair only once its relay row ships, by removing the leading
+# "# ", wrapping each reference in {{ }} and adding the prefix to the grep above.
+# GOOGLE_CLIENT_ID=op://citrate-infra/identity.oauth-relay/GOOGLE_CLIENT_ID
+# GOOGLE_CLIENT_SECRET=op://citrate-infra/identity.oauth-relay/GOOGLE_CLIENT_SECRET
+# ASANA_CLIENT_ID=op://citrate-infra/identity.oauth-relay/ASANA_CLIENT_ID
+# ASANA_CLIENT_SECRET=op://citrate-infra/identity.oauth-relay/ASANA_CLIENT_SECRET
+# HUBSPOT_CLIENT_ID=op://citrate-infra/identity.oauth-relay/HUBSPOT_CLIENT_ID
+# HUBSPOT_CLIENT_SECRET=op://citrate-infra/identity.oauth-relay/HUBSPOT_CLIENT_SECRET
