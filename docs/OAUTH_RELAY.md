@@ -37,12 +37,13 @@ members only).
 Answers:
 
 - `token` and `refresh`: the provider's status, body and content type, byte for
-  byte. No token length or shape is checked. GitHub answers some errors with 200
+  byte (Slack excepted, below). No token length or shape is checked. GitHub answers some errors with 200
   and an `error` field; those pass through as well.
 - `revoke`: `200 {"revoked":true,"upstream_status":N}` or
   `502 {"error":"provider_rejected","revoked":false,"upstream_status":N}`
   (Slack adds `provider_error` when `auth.revoke` answers `ok:false`).
-- Slack `token` and `refresh` are checked before they pass through; see
+- Slack `token` and `refresh` are never relayed raw: they are parsed, checked
+  and rebuilt; see
   [Slack](#slack-core-slack-mcp-user-app).
 - Every answer, relayed or the relay's own, carries `Cache-Control: no-store`
   and `X-Content-Type-Options: nosniff`.
@@ -97,30 +98,47 @@ MCP on. User scopes only: `search:read.public`, `channels:read`,
   `grant_type` and `refresh_token` as arguments, and the relay uses it because
   the tokens come from that method. To be confirmed against the live app
   during QA. Rotated tokens (`xoxe.xoxp-...`, refresh
-  `xoxe-1-...`) are long; they pass through byte for byte, untruncated.
+  `xoxe-1-...`) are long; they reach the app untruncated.
 - `revoke`: `auth.revoke` with the token as a form field.
 
 Slack answers HTTP 200 with `ok:false` on errors, and one exchange can mint a
-bot token beside the user token, so the relay reads a Slack answer before
-passing it on (`src/oauth-relay/slack.ts`):
+bot token beside the user token, so the relay never relays Slack's raw body
+(`src/oauth-relay/slack.ts`). It parses the answer strictly (a duplicate key
+or nesting deeper than 32 levels is refused), validates it, and on success
+sends a new JSON body built only from these fields:
+
+- `ok`, `app_id`, `scope`, `token_type`, `access_token`, `expires_in`,
+  `refresh_token`, `is_enterprise_install`
+- `authed_user`: `id`, `scope`, `token_type`, `access_token`, `expires_in`,
+  `refresh_token`
+- `team` and `enterprise` (or `null`): `id`, `name`
+
+Every other field (for example `id_token`, `warning`, `response_metadata`) is
+dropped. A Slack token is any string containing `xox<letter>-`, `xoxe.` or
+`xoxe-`, found by a scan of the raw bytes and of every decoded key and string
+value at any depth, arrays included.
 
 | Slack answer | Relay answer |
 |---|---|
-| `ok:true`, user tokens only (`xoxp-` / `xoxe.xoxp-`), every granted scope (top-level `scope` and `authed_user.scope`) in the approved set | Slack's answer, byte for byte |
+| `ok:true`, user tokens only (`xoxp-` / `xoxe.xoxp-`, refresh `xoxe-`), every granted scope (top-level `scope` and `authed_user.scope`, strings) in the approved set | `200` with the rebuilt body |
+| unparseable with a token in its bytes, a duplicate key, nesting past the bound, an allowlisted field of the wrong type (for example a non-string `scope`), or no access token | revoked, then `502 ... "provider_error":"malformed_answer"` |
 | `ok:false` with `ratelimited` | `429 {"error":"rate_limited","provider_error":"ratelimited"}` |
 | `ok:false` with `internal_error`, `fatal_error`, `service_unavailable` or `request_timeout` | `502 {"error":"provider_rejected","provider_error":"<code>"}` |
 | `ok:false` with any other plain error code | `400 {"error":"provider_rejected","provider_error":"<code>"}`; nothing else from the answer |
 | `ok:false` with any other error value, or not JSON, or no token | `502 provider_rejected`, no detail |
-| a token anywhere but `access_token`, `refresh_token`, `authed_user.access_token`, `authed_user.refresh_token` (for example `enterprise.access_token`, or any `xox...` value under another key) | revoked, then `502 ... "provider_error":"unexpected_token_field"` |
-| any bot or app token (`token_type` not `user`, `bot_user_id`, `bot`, `incoming_webhook`, or a token not `xoxp-`) | every access token revoked at `auth.revoke`, then `502 {"error":"provider_rejected","provider_error":"bot_token_refused","revoked":true}` |
+| a token anywhere but `access_token`, `refresh_token`, `authed_user.access_token`, `authed_user.refresh_token` (for example `enterprise.access_token`, an array element, an object key, a JSON-escaped value), or a known token field that is not exactly one Slack token | revoked, then `502 ... "provider_error":"unexpected_token_field"` |
+| any bot or app token (`token_type` not `user`, `bot_user_id`, `bot`, `incoming_webhook`, or an access token `xox...` but not `xoxp-`) | every token revoked at `auth.revoke`, then `502 {"error":"provider_rejected","provider_error":"bot_token_refused","revoked":true}` |
 | a granted scope outside the approved set | revoked, then `502 ... "provider_error":"scope_not_approved"` |
 | no granted scope reported, or an empty or whitespace scope string | revoked, then `502 ... "provider_error":"scope_missing"` (fail closed) |
 
 "Revoked" means every Slack token in the answer, access and refresh
 (`xoxe-`), is sent to `auth.revoke`. `revoked` is `false` when any revocation
-call failed. The same checks run on `refresh` answers. A Slack token answer
-withheld by the generic guards (it echoed the client secret, or it was a 3xx)
-has its tokens revoked the same way and carries `revoked`. PKCE stays
+call failed or a known token field held a value that is not a Slack token (it
+cannot be revoked). The same checks run on `refresh` answers. A Slack answer
+withheld for any other reason has its tokens revoked the same way and carries
+`revoked`: one that echoed the client secret, a 3xx, an `ok:false` answer that
+still carries a token, and an answer over the 256 KiB cap (the tokens in the
+bytes read before the cap). PKCE stays
 required: a Slack code exchange without a valid `code_verifier` is refused
 with 400 before any outbound call.
 
