@@ -48,6 +48,7 @@ import {
   type ProviderCredentials,
   type RelayProvider,
 } from './providers.js';
+import type { LinkedInStateStore } from './linkedin.js';
 
 export const RELAY_PATH_PREFIX = '/oauth/relay/v1/';
 export const RELAY_MAX_BODY_BYTES = 8 * 1024;
@@ -84,6 +85,8 @@ export interface OAuthRelayOptions {
   env?: Readonly<Record<string, string | undefined>>;
   logger?: RelayLogger;
   limits?: Partial<RelayLimits>;
+  /** LinkedIn `state` store (tests). Defaults to Redis when wired, else in-memory. */
+  linkedinStates?: LinkedInStateStore;
 }
 
 type Operation = 'token' | 'refresh' | 'revoke';
@@ -92,7 +95,7 @@ const OPERATIONS: ReadonlySet<string> = new Set(['token', 'refresh', 'revoke']);
 /** RFC 7636 section 4.1: 43 to 128 chars of [A-Z a-z 0-9 - . _ ~]. */
 const CODE_VERIFIER_RE = /^[A-Za-z0-9\-._~]{43,128}$/;
 
-function noStoreHeaders(contentType: string): Record<string, string> {
+export function noStoreHeaders(contentType: string): Record<string, string> {
   return {
     'content-type': contentType,
     'cache-control': 'no-store',
@@ -102,7 +105,7 @@ function noStoreHeaders(contentType: string): Record<string, string> {
   };
 }
 
-function sendJson(
+export function sendJson(
   res: ServerResponse,
   status: number,
   body: unknown,
@@ -202,11 +205,12 @@ function basic(creds: ProviderCredentials): string {
   return 'Basic ' + Buffer.from(`${creds.clientId}:${creds.clientSecret}`).toString('base64');
 }
 
-interface OutboundRequest {
+export interface OutboundRequest {
   url: string;
-  method: 'POST' | 'DELETE';
+  method: 'GET' | 'POST' | 'DELETE';
   headers: Record<string, string>;
-  body: string;
+  /** Absent for GET. */
+  body?: string;
 }
 
 /** Build the token/refresh request; client credentials per the provider's auth style. */
@@ -233,21 +237,21 @@ function grantRequest(
   };
 }
 
-interface UpstreamAnswer {
+export interface UpstreamAnswer {
   status: number;
   contentType: string;
   body: Buffer;
 }
 
-class UpstreamError extends Error {}
+export class UpstreamError extends Error {}
 
-async function callUpstream(doFetch: typeof fetch, req: OutboundRequest): Promise<UpstreamAnswer> {
+export async function callUpstream(doFetch: typeof fetch, req: OutboundRequest): Promise<UpstreamAnswer> {
   let res: Response;
   try {
     res = await doFetch(req.url, {
       method: req.method,
       headers: req.headers,
-      body: req.body,
+      ...(req.body !== undefined ? { body: req.body } : {}),
       redirect: 'manual',
       signal: AbortSignal.timeout(RELAY_UPSTREAM_TIMEOUT_MS),
     });

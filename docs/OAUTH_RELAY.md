@@ -156,3 +156,6 @@ the shell history. They move from 1Password straight into the droplet `.env`.
 
 Rollback: set `OAUTH_RELAY=0` in `.env` and recreate the identity service. The
 bounce, OIDC, SIWE and KYC routes are unaffected.
+
+LinkedIn uses its own routes, not this relay's endpoints: see
+[`OAUTH_LINKEDIN.md`](OAUTH_LINKEDIN.md).

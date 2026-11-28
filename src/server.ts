@@ -38,6 +38,7 @@ import { verifyAaStackOnChain, formatAaStackProblems } from './aa/verify-stack.j
 import { mountStaticAssets } from './static-assets.js';
 import { mountPasswordRoutes } from './auth/password-routes.js';
 import { createRateLimiter, type RateLimiter } from './auth/rate-limit.js';
+import { mountLinkedInRelay } from './oauth-relay/linkedin.js';
 import { mountOAuthRelay, type OAuthRelayOptions } from './oauth-relay/routes.js';
 import { initAccountEpochStore, mountSessionEpochGuard } from './auth/account-epoch.js';
 import {
@@ -299,9 +300,16 @@ export async function createProvider(
   // desktop build never holds one; signed-in desktop members only; per-IP and
   // per-account budgets (Redis when wired). OAUTH_RELAY=0 turns it off.
   // See src/oauth-relay/routes.ts and docs/OAUTH_RELAY.md.
-  mountOAuthRelay(provider, {
+  const relayLimiter = options.rateLimiter ?? createRateLimiter(options.redis);
+  mountOAuthRelay(provider, { ...(options.oauthRelay ?? {}), rateLimiter: relayLimiter });
+  // LinkedIn social-identity relay (GET /oauth/linkedin/start|callback): the
+  // server-side code exchange returns only {handle, sub} to the loopback; the
+  // LinkedIn token never leaves this authority. State in Redis when wired.
+  // See src/oauth-relay/linkedin.ts and citrate-core docs/LINKEDIN_RELAY_SPEC.md.
+  mountLinkedInRelay(provider, {
     ...(options.oauthRelay ?? {}),
-    rateLimiter: options.rateLimiter ?? createRateLimiter(options.redis),
+    rateLimiter: relayLimiter,
+    ...(options.redis ? { redis: options.redis } : {}),
   });
 
   // SIWE login. The signing JWK is the same RS256 key the authority publishes
