@@ -40,13 +40,15 @@ Answers:
   and an `error` field; those pass through as well.
 - `revoke`: `200 {"revoked":true,"upstream_status":N}` or
   `502 {"error":"provider_rejected","revoked":false,"upstream_status":N}`.
-- Relay errors, all with `Cache-Control: no-store`:
+- Every answer, relayed or the relay's own, carries `Cache-Control: no-store`
+  and `X-Content-Type-Options: nosniff`.
+- Relay errors:
 
 | Status | `error` | When |
 |---|---|---|
 | 400 | `bad_request` | missing field, bad `code_verifier`, unregistered `redirect_uri`, non-JSON body |
 | 400 | `unsupported_operation` | refresh or revoke on a provider without that endpoint |
-| 401 | `not_signed_in` | no bearer, unknown or expired bearer |
+| 401 | `not_signed_in` | no bearer, unknown or expired bearer, or a bearer issued before the account's revocation epoch (see below) |
 | 403 | `client_not_permitted` | bearer issued to another relying party |
 | 404 | `unknown_provider` / `unknown_operation` | provider or operation not in the table |
 | 413 | `bad_request` | body over 8 KiB |
@@ -72,6 +74,25 @@ request is ever used outbound.
 - Only whitelisted fields go upstream. A client-supplied `client_id` or
   `client_secret` is dropped. The member's bearer never goes upstream.
 - Upstream redirects are not followed.
+- A provider answer containing the client secret (raw, percent-encoded,
+  form-encoded with `+` for space, or inside the Basic credential) is replaced
+  by `502 provider_rejected`.
+- Account epoch (PBA-L3a-008, `src/auth/account-epoch.ts`): a password reset or
+  "sign out everywhere" stamps the account with the second it happened. A bearer
+  whose `iat` is before that second is refused `401 not_signed_in` with no
+  upstream call, from that moment on rather than at its expiry. A token issued
+  in the same second as the stamp survives (the reset's own new sign-in). The
+  app signs in again and retries. The same check applies to the other bearer
+  routes on this authority (`/kyc/handoff`, `/identity/:sub/wallets`,
+  `/identity/:sub/orchard-proof`, `/aa/enroll-validator`, `/aa/register-wallet`,
+  `/aa/guardians`, `POST /logout`, `GET /sessions/events`). Provider tokens the
+  app already holds are not touched; the epoch revokes the member's Citrate
+  credential, not their GitHub or Notion grant. A token with no `iat` on a
+  stamped account, or an epoch-store error, is refused too (fail closed).
+  Clock skew: the stamp comes from the clock of the instance that wrote it and
+  `iat` from the clock of the instance that issued the token, so a token issued
+  just after the stamp by a host lagging the epoch writer is refused for up to
+  that skew (the app signs in again); keep instances on NTP.
 - Rate limits: 120 per IP and 40 per account per 15 minutes, shared through
   Redis in production (`src/auth/rate-limit.ts`).
 

@@ -23,6 +23,7 @@
  */
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type Provider from 'oidc-provider';
+import { isRevokedByEpoch, tokenAuthSec } from './auth/account-epoch.js';
 import type { HandoffStore } from './handoff-store.js';
 
 /** The authority's own origin — the hand-off URLs are always first-party. */
@@ -51,6 +52,8 @@ async function resolveToken(
     const token = await provider.AccessToken.find(m[1].trim());
     if (!token || token.isExpired) return null;
     if (typeof token.accountId !== 'string' || typeof token.clientId !== 'string') return null;
+    // PBA-L3a-008: a token issued before the account's revocation epoch counts as none.
+    if (await isRevokedByEpoch(token.accountId, tokenAuthSec(token))) return null;
     return { sub: token.accountId, clientId: token.clientId };
   } catch {
     return null;

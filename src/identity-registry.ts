@@ -27,6 +27,7 @@
 
 import { ORCHARD_CLIENT_IDS, buildOrchardProofMessage } from './orchard-clients.js';
 import { createRateLimiter, type RateLimiter } from './auth/rate-limit.js';
+import { isRevokedByEpoch, tokenAuthSec } from './auth/account-epoch.js';
 import { createHash } from 'node:crypto';
 import type Provider from 'oidc-provider';
 import { getAddress, isAddress, verifyMessage } from 'ethers';
@@ -532,6 +533,8 @@ async function resolveToken(
     const token = await provider.AccessToken.find(m[1].trim());
     if (!token || token.isExpired) return null;
     if (typeof token.accountId !== 'string' || typeof token.clientId !== 'string') return null;
+    // PBA-L3a-008: a token issued before the account's revocation epoch counts as none.
+    if (await isRevokedByEpoch(token.accountId, tokenAuthSec(token))) return null;
     const scopes = new Set(String(token.scope ?? '').split(' ').filter((x) => x.length > 0));
     return { accountId: token.accountId, clientId: token.clientId, scopes };
   } catch {
