@@ -139,13 +139,14 @@ describe('slack token exchange (oauth.v2.user.access)', () => {
     expect(s.headers.authorization).toBeUndefined();
   });
 
-  it('long rotated tokens pass through untruncated, byte for byte', async () => {
+  it('long rotated tokens pass through untruncated in a response rebuilt from the allowlist', async () => {
     const answer = okUser();
     script(answer);
     const r = await post(auth, '/oauth/relay/v1/slack/token', slackBody(), member);
     expect(r.status).toBe(200);
     const text = await r.text();
-    expect(text).toBe(answer);
+    expect(JSON.parse(text)).toEqual(JSON.parse(answer));
+    expect(r.headers.get('content-type')).toMatch(/application\/json/);
     const j = JSON.parse(text) as { access_token: string; refresh_token: string };
     expect(j.access_token).toBe(LONG_ACCESS);
     expect(j.access_token.length).toBeGreaterThan(2000);
@@ -291,7 +292,7 @@ describe('slack refresh (token rotation)', () => {
     script(answer);
     const r = await post(auth, '/oauth/relay/v1/slack/refresh', { refresh_token: LONG_REFRESH }, member);
     expect(r.status).toBe(200);
-    expect(await r.text()).toBe(answer);
+    expect(JSON.parse(await r.text())).toEqual(JSON.parse(answer));
     const s = up.seen[0];
     expect(s.requestedUrl).toBe(TOKEN_URL);
     const out = new URLSearchParams(s.body);
@@ -455,5 +456,112 @@ describe('review fixes (#55): fail-closed edges', () => {
     } finally {
       await stop(a.server);
     }
+  });
+});
+
+describe('review round 2 (#55): the Slack answer is rebuilt, never relayed raw', () => {
+  const T = (tag: string) => ['xoxp', 'fixture', tag].join('-');
+
+  async function refused(answerText: string, reason: string): Promise<{ body: Record<string, unknown>; text: string }> {
+    up.seen.length = 0;
+    script(answerText);
+    const r = await post(auth, '/oauth/relay/v1/slack/token', slackBody(), member);
+    expect(r.status, reason).toBe(502);
+    const text = await r.text();
+    const body = JSON.parse(text) as Record<string, unknown>;
+    expect(body, reason).toMatchObject({ error: 'provider_rejected', provider_error: reason });
+    return { body, text };
+  }
+
+  it('drops every field outside the allowlist (id_token, warning, unknown objects)', async () => {
+    script(okUser({ id_token: 'eyJ.fixture.jwt', warning: 'superfluous_charset', response_metadata: { warnings: ['x'] } }));
+    const r = await post(auth, '/oauth/relay/v1/slack/token', slackBody(), member);
+    expect(r.status).toBe(200);
+    const j = JSON.parse(await r.text()) as Record<string, unknown>;
+    expect(j).toEqual(JSON.parse(okUser()));
+    expect(revokedTokens()).toHaveLength(0);
+  });
+
+  it('a token inside an array is refused and revoked', async () => {
+    const { text } = await refused(okUser({ extra: [T('array')] }), 'unexpected_token_field');
+    expect(text).not.toContain(T('array'));
+    expect(revokedTokens()).toContain(T('array'));
+    expect(revokedTokens()).toContain(LONG_ACCESS);
+  });
+
+  it('a token inside nested arrays is refused and revoked', async () => {
+    await refused(okUser({ extra: [[[{ deep: [T('nested')] }]]] }), 'unexpected_token_field');
+    expect(revokedTokens()).toContain(T('nested'));
+  });
+
+  it('a token nested deeper than the old walk limit is refused and revoked', async () => {
+    let v: unknown = { t: T('deep12') };
+    for (let i = 0; i < 12; i++) v = { n: v };
+    await refused(okUser({ extra: v }), 'unexpected_token_field');
+    expect(revokedTokens()).toContain(T('deep12'));
+  });
+
+  it('nesting past the parser bound is refused as malformed and its tokens are still revoked', async () => {
+    let v: unknown = [T('deep80')];
+    for (let i = 0; i < 80; i++) v = [v];
+    await refused(okUser({ extra: v }), 'malformed_answer');
+    expect(revokedTokens()).toContain(T('deep80'));
+    expect(revokedTokens()).toContain(LONG_ACCESS);
+  });
+
+  it('a token used as an object key is refused', async () => {
+    await refused(okUser({ extra: { [T('key')]: 1 } }), 'unexpected_token_field');
+    expect(revokedTokens()).toContain(T('key'));
+  });
+
+  it('a JSON-escaped token in an unknown field is refused', async () => {
+    const raw = okUser().replace(/}$/, ',"note":"xox\\u0070-fixture-escaped"}');
+    await refused(raw, 'unexpected_token_field');
+    expect(revokedTokens()).toContain('xoxp-fixture-escaped');
+  });
+
+  it('a non-string authed_user.scope next to an approved top-level scope is refused', async () => {
+    await refused(okUser({ scope: 'users:read', authed_user: { id: 'U1', scope: ['chat:write'] } }), 'malformed_answer');
+    expect(revokedTokens()).toEqual([LONG_ACCESS, LONG_REFRESH]);
+  });
+
+  it('a non-string known token field is refused', async () => {
+    await refused(okUser({ access_token: [LONG_ACCESS] }), 'malformed_answer');
+    expect(revokedTokens()).toContain(LONG_ACCESS);
+  });
+
+  it('duplicate JSON keys are refused and every token is revoked', async () => {
+    const a = T('dup-a');
+    const b = T('dup-b');
+    const raw = `{"ok":true,"access_token":"${a}","access_token":"${b}","token_type":"user","authed_user":{"id":"U1","scope":"users:read"}}`;
+    await refused(raw, 'malformed_answer');
+    expect(revokedTokens().sort()).toEqual([a, b].sort());
+  });
+
+  it('a non-xox access token on a known path reports revoked:false', async () => {
+    const { body } = await refused(okUser({ access_token: 'not-a-slack-token' }), 'unexpected_token_field');
+    expect(body['revoked']).toBe(false);
+    expect(revokedTokens()).toEqual([LONG_REFRESH]);
+  });
+
+  it('an oversized answer is refused and any token in the bytes read is revoked', async () => {
+    up.seen.length = 0;
+    const big = JSON.stringify({ ok: true, access_token: T('oversize'), token_type: 'user', pad: 'p'.repeat(300 * 1024) });
+    up.reply = (s) => (s.requestedUrl === REVOKE_URL ? { status: 200, body: '{"ok":true,"revoked":true}' } : { status: 200, body: big });
+    const r = await post(auth, '/oauth/relay/v1/slack/token', slackBody(), member);
+    expect(r.status).toBe(502);
+    const text = await r.text();
+    expect(text).not.toContain(T('oversize'));
+    expect(JSON.parse(text)).toMatchObject({ error: 'provider_rejected', revoked: true });
+    expect(revokedTokens()).toEqual([T('oversize')]);
+  });
+
+  it('an ok:false answer that still carries a token has it revoked', async () => {
+    up.seen.length = 0;
+    script(JSON.stringify({ ok: false, error: 'invalid_code', access_token: T('okfalse') }));
+    const r = await post(auth, '/oauth/relay/v1/slack/token', slackBody(), member);
+    expect(r.status).toBe(400);
+    expect(await r.json()).toEqual({ error: 'provider_rejected', provider_error: 'invalid_code', revoked: true });
+    expect(revokedTokens()).toEqual([T('okfalse')]);
   });
 });
