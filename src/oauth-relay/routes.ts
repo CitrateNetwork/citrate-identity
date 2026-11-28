@@ -29,6 +29,9 @@
  * - Never logs a body, code, verifier, token or secret: log lines carry only
  *   provider id, operation, outcome and status codes.
  * - A response that contains the client secret is replaced by a generic 502.
+ * - A provider with an answer policy (Slack, `slack.ts`) has its token and
+ *   refresh answers checked first: `ok:false` maps to a clean error; a bot
+ *   token or a scope outside the approved set is revoked and withheld.
  * - `OAUTH_RELAY=0` disables every route (503 relay_disabled, no outbound
  *   call). A provider with no configured secret answers 503 not_configured.
  * - `Cache-Control: no-store` and `X-Content-Type-Options: nosniff` on every
@@ -41,6 +44,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import type Provider from 'oidc-provider';
 import { isRevokedByEpoch, tokenAuthSec } from '../auth/account-epoch.js';
 import { clientIp, type RateLimiter } from '../auth/rate-limit.js';
+import { judgeSlackAnswer, judgeSlackRevoke, slackErrorStatus, slackTokensIn } from './slack.js';
 import {
   findRelayProvider,
   providerCredentials,
@@ -243,7 +247,15 @@ export interface UpstreamAnswer {
   body: Buffer;
 }
 
-export class UpstreamError extends Error {}
+export class UpstreamError extends Error {
+  /** Bytes read before an `oversized` stop, so a caller can revoke any token in them. */
+  constructor(
+    message: string,
+    readonly partial?: Buffer,
+  ) {
+    super(message);
+  }
+}
 
 export async function callUpstream(doFetch: typeof fetch, req: OutboundRequest): Promise<UpstreamAnswer> {
   let res: Response;
@@ -258,18 +270,16 @@ export async function callUpstream(doFetch: typeof fetch, req: OutboundRequest):
   } catch {
     throw new UpstreamError('unreachable');
   }
-  const declared = Number(res.headers.get('content-length'));
-  if (Number.isFinite(declared) && declared > RELAY_MAX_UPSTREAM_BYTES) {
-    throw new UpstreamError('oversized');
-  }
+  // No early stop on a declared Content-Length: the stream cap below bounds the
+  // read, and the bytes read reach the caller for revocation.
   const chunks: Buffer[] = [];
   let size = 0;
   if (res.body) {
     try {
       for await (const chunk of res.body as unknown as AsyncIterable<Uint8Array>) {
         size += chunk.byteLength;
-        if (size > RELAY_MAX_UPSTREAM_BYTES) throw new UpstreamError('oversized');
         chunks.push(Buffer.from(chunk));
+        if (size > RELAY_MAX_UPSTREAM_BYTES) throw new UpstreamError('oversized', Buffer.concat(chunks));
       }
     } catch (e) {
       throw e instanceof UpstreamError ? e : new UpstreamError('unreadable');
@@ -279,6 +289,25 @@ export async function callUpstream(doFetch: typeof fetch, req: OutboundRequest):
     status: res.status,
     contentType: res.headers.get('content-type') ?? 'application/json; charset=utf-8',
     body: Buffer.concat(chunks),
+  };
+}
+
+/** The provider's revocation call for one token (`p.revoke` must be set). */
+function revokeRequest(
+  revoke: NonNullable<RelayProvider['revoke']>,
+  creds: ProviderCredentials,
+  token: string,
+): OutboundRequest {
+  const enc = encode(revoke.encoding, { [revoke.tokenField]: token });
+  return {
+    url: revoke.url(creds.clientId),
+    method: revoke.method,
+    headers: {
+      ...revoke.headers,
+      'content-type': enc.contentType,
+      ...(revoke.auth === 'basic' ? { authorization: basic(creds) } : {}),
+    },
+    body: enc.body,
   };
 }
 
@@ -436,41 +465,106 @@ export function mountOAuthRelay(
         }
         const token = str(body, 'token');
         if (!token) return bad('token is required');
-        const enc = encode(p.revoke.encoding, { [p.revoke.tokenField]: token });
-        outbound = {
-          url: p.revoke.url(creds.clientId),
-          method: p.revoke.method,
-          headers: { ...p.revoke.headers, 'content-type': enc.contentType, authorization: basic(creds) },
-          body: enc.body,
-        };
+        outbound = revokeRequest(p.revoke, creds, token);
       }
+
+      /**
+       * Revoke Slack tokens found in an answer the relay withholds (policy
+       * providers only). Best effort: false when any revocation failed.
+       */
+      const revokeAll = async (tokens: string[]): Promise<boolean> => {
+        if (!p.revoke) return false;
+        let all = true;
+        for (const t of tokens) {
+          try {
+            const rv = await callUpstream(doFetch, revokeRequest(p.revoke, creds, t));
+            if (!(rv.status >= 200 && rv.status < 300 && judgeSlackRevoke(rv.body).ok)) all = false;
+          } catch {
+            all = false;
+          }
+        }
+        return all;
+      };
+      const policyTokens = (b: Buffer) => (p.answerPolicy && operation !== 'revoke' ? slackTokensIn(b) : []);
 
       let answer: UpstreamAnswer;
       try {
         answer = await callUpstream(doFetch, outbound);
       } catch (e) {
         const why = e instanceof UpstreamError ? e.message : 'unreachable';
+        // An oversized answer may already hold a minted token: revoke what was read.
+        const tokens = e instanceof UpstreamError && e.partial ? policyTokens(e.partial) : [];
+        const revoked = tokens.length > 0 ? await revokeAll(tokens) : null;
         note('warn', p.id, operation, `upstream_${why}`, 502);
-        sendJson(res, 502, { error: 'provider_rejected', reason: `the provider could not be reached (${why})` });
+        sendJson(res, 502, {
+          error: 'provider_rejected',
+          reason: `the provider could not be reached (${why})`,
+          ...(revoked !== null ? { revoked } : {}),
+        });
         return;
       }
 
+      const withheld = async (outcome: string, reason: string) => {
+        const tokens = policyTokens(answer.body);
+        const revoked = tokens.length > 0 ? await revokeAll(tokens) : null;
+        note('warn', p.id, operation, outcome, 502, answer.status);
+        sendJson(res, 502, { error: 'provider_rejected', reason, ...(revoked !== null ? { revoked } : {}) });
+      };
+
       if (echoesSecret(answer, creds)) {
-        note('warn', p.id, operation, 'upstream_echoed_secret', 502, answer.status);
-        sendJson(res, 502, { error: 'provider_rejected', reason: 'the provider answer was withheld' });
+        await withheld('upstream_echoed_secret', 'the provider answer was withheld');
         return;
       }
       if (answer.status >= 300 && answer.status < 400) {
-        note('warn', p.id, operation, 'upstream_redirect', 502, answer.status);
-        sendJson(res, 502, { error: 'provider_rejected', reason: 'the provider answered with a redirect' });
+        await withheld('upstream_redirect', 'the provider answered with a redirect');
         return;
       }
 
       if (operation === 'revoke') {
-        const ok = answer.status >= 200 && answer.status < 300;
+        const http2xx = answer.status >= 200 && answer.status < 300;
+        // Slack answers 200 {"ok":false} on failure: HTTP status is not enough.
+        const slack = p.answerPolicy ? judgeSlackRevoke(answer.body) : null;
+        const ok = http2xx && (slack ? slack.ok : true);
         note(ok ? 'info' : 'warn', p.id, operation, ok ? 'revoked' : 'provider_rejected', ok ? 200 : 502, answer.status);
         if (ok) sendJson(res, 200, { revoked: true, upstream_status: answer.status });
-        else sendJson(res, 502, { error: 'provider_rejected', revoked: false, upstream_status: answer.status });
+        else
+          sendJson(res, 502, {
+            error: 'provider_rejected',
+            revoked: false,
+            upstream_status: answer.status,
+            ...(slack?.code ? { provider_error: slack.code } : {}),
+          });
+        return;
+      }
+
+      if (p.answerPolicy) {
+        const verdict = judgeSlackAnswer(answer.body, p.answerPolicy);
+        if (verdict.kind === 'provider_error') {
+          // ratelimited: 429. Slack-side failures and unreadable errors: 502.
+          // Any other plain code (invalid_code) is the caller's: 400. Only the
+          // code is echoed.
+          const { status, error } = slackErrorStatus(verdict.code);
+          const revoked = verdict.tokens.length > 0 ? await revokeAll(verdict.tokens) : null;
+          note('warn', p.id, operation, 'provider_error', status, answer.status);
+          sendJson(res, status, {
+            error,
+            ...(verdict.code ? { provider_error: verdict.code } : { reason: 'the provider answer was not usable' }),
+            ...(revoked !== null ? { revoked } : {}),
+          });
+          return;
+        }
+        if (verdict.kind === 'refuse') {
+          // Never hand out a token the policy forbids; take it back at Slack first.
+          // A known token field holding a non-Slack value cannot be revoked: say so.
+          const revoked = (await revokeAll(verdict.tokens)) && !verdict.unrevocable;
+          note('warn', p.id, operation, `refused_${verdict.reason}${revoked ? '' : '_revoke_failed'}`, 502, answer.status);
+          sendJson(res, 502, { error: 'provider_rejected', provider_error: verdict.reason, revoked });
+          return;
+        }
+        // Slack's raw body is never relayed: only the allowlisted rebuild.
+        note('info', p.id, operation, 'relayed_rebuilt', 200, answer.status);
+        res.writeHead(200, noStoreHeaders('application/json; charset=utf-8'));
+        res.end(verdict.body);
         return;
       }
 
